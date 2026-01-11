@@ -8,26 +8,32 @@ def index():
 
 @main.route("/about")
 def about():
+    emails = []
     return render_template("about.html")
 
 @main.route("/allemails")
 def allemails():
+    emails = []
     return render_template("allemails.html", emails=emails)
 
 @main.route("/readonly")
 def readonly():
+    emails = []
     return render_template("readonly.html", emails=emails)
 
 @main.route("/responseneeded")
 def responseneeded():
+    emails = []
     return render_template("responseneeded.html", emails=emails)
 
 @main.route("/junkmailconfirm")
 def junkmailconfirm():
+    emails = []
     return render_template("junkmailconfirm.html", emails=emails)
 
 @main.route("/email/<int:id>")
 def email(id):
+    emails = []
     # later: fetch the email by id from the database
     return render_template("email.html", email=email)
 

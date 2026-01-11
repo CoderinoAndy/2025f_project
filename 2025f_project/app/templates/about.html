@@ -9,57 +9,88 @@
     <link
       href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
       rel="stylesheet"
-      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
-      crossorigin="anonymous"
     />
+
+    <style>
+      :root{
+        --bg: #1f1f1f;
+        --panel: #2a2a2a;
+        --panel-2: #3a3a3a;
+        --card: #4a4a4a;
+        --text: #e8e8e8;
+        --muted: #bdbdbd;
+        --accent: #ffffff;
+      }
+      body { background: var(--bg); color: var(--text); }
+      .topbar{
+        background: #121212;
+        padding: 14px 18px;
+        border-bottom: 1px solid #2b2b2b;
+      }
+      .brand { font-weight: 600; letter-spacing: 0.2px; }
+      .panel{
+        background: var(--panel);
+        border: 1px solid #333;
+        border-radius: 12px;
+        padding: 18px;
+      }
+      .muted { color: var(--muted); }
+      .navlink{
+        color: var(--text);
+        text-decoration: none;
+        margin-right: 16px;
+        opacity: 0.9;
+      }
+      .navlink:hover{ opacity: 1; text-decoration: underline; }
+      .btn-ghost{
+        background: transparent;
+        border: 1px solid #444;
+        color: var(--text);
+      }
+      .btn-ghost:hover{ border-color: #666; }
+    </style>
   </head>
 
   <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-      <div class="container">
-        <a class="navbar-brand" >My Flask App</a>
+    <div class="topbar d-flex align-items-center justify-content-between">
+      <div class="d-flex align-items-center gap-3">
+        <div class="brand">Email Dashboard</div>
+        <a class="navlink" href="{{ url_for('main.allemails') }}">All Emails</a>
+        <a class="navlink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
+        <a class="navlink" href="{{ url_for('main/readonly') }}">Read only</a>
+        <a class="navlink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <a class="btn btn-ghost btn-sm" href="{{ url_for('main.search') }}">Search</a>
+      </div>
+    </div>
 
-        <button
-          class="navbar-toggler"
-          type="button"
-          data-bs-toggle="collapse"
-          data-bs-target="#navbarNav"
-          aria-controls="navbarNav"
-          aria-expanded="false"
-          aria-label="Toggle navigation"
-        >
-          <span class="navbar-toggler-icon"></span>
-        </button>
+    <div class="container py-4">
+      <div class="panel">
+        <h3 class="mb-2">About</h3>
+        <p class="muted mb-3">
+          This dashboard organizes emails into four views (All Emails, Response needed, Read only, Junk Confirmation),
+          and lets you expand an email to view full contents, generate summaries, draft replies, revise, send, and move messages to junk.
+        </p>
 
-        <div class="collapse navbar-collapse" id="navbarNav">
-          <ul class="navbar-nav ms-auto">
-            <li class="nav-item">
-              <a class="nav-link" href="">Home</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link active" aria-current="page" href="">About</a>
-            </li>
-          </ul>
+        <hr style="border-color:#3a3a3a" />
+
+        <h5 class="mt-3">How to use</h5>
+        <ul class="muted">
+          <li><strong>All Emails</strong>: shows everything by recency, with type and priority (stars).</li>
+          <li><strong>Response needed</strong>: emails that require a reply.</li>
+          <li><strong>Read only</strong>: informational emails that don’t require a reply.</li>
+          <li><strong>Junk Confirmation</strong>: uncertain junk mail that needs user confirmation.</li>
+          <li>Click any email row to open the <strong>expanded email view</strong>.</li>
+        </ul>
+
+        <div class="d-flex gap-2 mt-3">
+          <a class="btn btn-light" href="{{ url_for('main.allemails') }}">Go to All Emails</a>
+          <a class="btn btn-ghost" href="{{ url_for('main.responseneeded') }}">Go to Response needed</a>
         </div>
       </div>
-    </nav>
+    </div>
 
-    <main class="container py-5">
-      <h1 class="mb-3">About</h1>
-      <p class="text-muted">
-        This is the About page.
-      </p>
-
-      <div class="alert alert-info mt-4" role="alert">
-        Bootstrap is working if seen
-      </div>
-    </main>
-
-    <!-- Bootstrap JS bundle (CDN) -->
-    <script
-      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-      integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-      crossorigin="anonymous"
-    ></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Junk Confirmation</title>
+
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    />
+
+    <style>
+      :root{
+        --bg: #1f1f1f;
+        --bar: #121212;
+        --headrow: #2f2f2f;
+        --card: #4a4a4a;
+        --text: #e8e8e8;
+        --muted: #bdbdbd;
+      }
+      body{ background: var(--bg); color: var(--text); }
+      .topnav{ background: var(--bar); padding: 14px 18px; border-bottom: 1px solid #2b2b2b; }
+      .tablink{ color: var(--text); text-decoration: none; margin-right: 18px; opacity: 0.85; }
+      .tablink:hover{ opacity: 1; text-decoration: underline; }
+      .tablink.active{ opacity: 1; text-decoration: underline; font-weight: 600; }
+
+      .tablehead{ background: var(--headrow); border-radius: 10px; padding: 10px 16px; margin-top: 14px; }
+      .headlabel{ text-decoration: underline; font-weight: 600; }
+
+      .email-card{
+        background: var(--card);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-top: 12px;
+        border: 1px solid #3f3f3f;
+      }
+      .email-title-link{ color: var(--text); text-decoration: none; }
+      .email-title-link:hover{ text-decoration: underline; }
+
+      .muted{ color: var(--muted); }
+      .priority{ margin-left: 8px; letter-spacing: 1px; }
+
+      .icon-btn{
+        border: 0;
+        background: transparent;
+        font-size: 26px;
+        line-height: 1;
+        padding: 0 6px;
+      }
+      .ok{ color: #6ad66a; }
+      .no{ color: #ff6b6b; }
+
+      .search-link{ color: var(--text); text-decoration:none; opacity:0.9; }
+      .search-link:hover{ opacity:1; text-decoration:underline; }
+    </style>
+  </head>
+
+  <body>
+    <div class="topnav d-flex align-items-center justify-content-between">
+      <div class="d-flex align-items-center flex-wrap">
+        <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
+        <a class="tablink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
+        <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>
+        <a class="tablink active" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
+        <i class="bi bi-search" aria-hidden="true"></i>
+      </div>
+    </div>
+
+    <div class="container py-3" style="max-width: 980px;">
+      <div class="tablehead">
+        <div class="row">
+          <div class="col-6 headlabel">Email title</div>
+          <div class="col-3 headlabel text-center">Type</div>
+          <div class="col-3 headlabel text-end">Date</div>
+        </div>
+      </div>
+
+      <div class="mt-2 muted">
+        Uncertain junk mail appears here. You can confirm moving it to junk (✓) or keep it (✗). You can also click the title to expand.
+      </div>
+
+      <!-- Expect: emails = list of dicts with id, title, type, date, priority -->
+      {% if emails and emails|length > 0 %}
+        {% for email in emails %}
+          <div class="email-card">
+            <div class="row align-items-center">
+              <div class="col-6">
+                <a class="email-title-link" href="{{ url_for('main.email', id=email.id) }}">
+                  {{ email.title }}
+                  {% if email.priority %}
+                    <span class="priority">{{ "★" * email.priority }}</span>
+                  {% endif %}
+                </a>
+              </div>
+              <div class="col-3 text-center muted">{{ email.type }}</div>
+              <div class="col-3 text-end muted">{{ email.date }}</div>
+            </div>
+
+            <div class="d-flex align-items-center justify-content-end gap-2 mt-2">
+              <!-- Replace these endpoints with your real POST routes -->
+              <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
+                <button class="icon-btn ok" type="submit" title="Move to Junk" aria-label="Move to Junk">
+                  <i class="bi bi-check2"></i>
+                </button>
+              </form>
+              <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
+                <button class="icon-btn no" type="submit" title="Not Junk" aria-label="Not Junk">
+                  <i class="bi bi-x-lg"></i>
+                </button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="mt-3 muted">No uncertain junk mail to confirm.</div>
+      {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

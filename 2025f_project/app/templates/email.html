@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Email</title>
+
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    />
+
+    <style>
+      :root{
+        --bg: #1f1f1f;
+        --bar: #121212;
+        --panel: #2d2d2d;
+        --panel-2: #3b3b3b;
+        --text: #e8e8e8;
+        --muted: #bdbdbd;
+      }
+      body{ background: var(--bg); color: var(--text); }
+
+      .headerbar{
+        background: var(--bar);
+        padding: 14px 18px;
+        border-bottom: 1px solid #2b2b2b;
+      }
+      .backlink{
+        color: var(--text);
+        text-decoration: none;
+        font-size: 26px;
+        opacity: 0.9;
+      }
+      .backlink:hover{ opacity: 1; }
+
+      .meta-wrap{
+        background: var(--panel);
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-top: 14px;
+      }
+      .meta-title{
+        text-decoration: underline;
+        font-weight: 600;
+        font-size: 22px;
+        line-height: 1.1;
+      }
+      .meta-sub{ color: var(--muted); margin-top: 4px; }
+
+      .email-body{
+        background: var(--panel);
+        border-radius: 12px;
+        padding: 16px;
+        margin-top: 12px;
+        white-space: pre-wrap;
+      }
+
+      .junk-box{
+        text-align: right;
+      }
+      .junk-label{
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .icon-btn{
+        border: 0;
+        background: transparent;
+        font-size: 34px;
+        line-height: 1;
+        padding: 0 6px;
+      }
+      .ok{ color: #6ad66a; }
+      .no{ color: #ff6b6b; }
+
+      .summary{
+        color: var(--muted);
+        font-style: italic;
+        margin-top: 10px;
+      }
+
+      .reply-panel{
+        background: var(--panel-2);
+        border-radius: 12px;
+        padding: 14px;
+        margin-top: 14px;
+      }
+      .reply-label{
+        font-weight: 700;
+        margin-bottom: 2px;
+      }
+      .reply-hint{
+        color: var(--muted);
+        font-style: italic;
+        margin-bottom: 10px;
+      }
+      textarea{
+        background: #4a4a4a !important;
+        color: var(--text) !important;
+        border: 1px solid #5b5b5b !important;
+      }
+      textarea::placeholder{ color: #d0d0d0; opacity: 0.7; }
+
+      .actions{
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+        margin-top: 8px;
+      }
+      .action-icon{
+        border: 0;
+        background: transparent;
+        color: var(--text);
+        font-size: 28px;
+        opacity: 0.9;
+      }
+      .action-icon:hover{ opacity: 1; }
+    </style>
+  </head>
+
+  <body>
+    <div class="headerbar d-flex align-items-center justify-content-between">
+      <!-- Back arrow (go to previous page) -->
+      <a class="backlink" href="javascript:history.back()" aria-label="Back">
+        <i class="bi bi-arrow-left"></i>
+      </a>
+
+      <div class="text-end">
+        <a href="{{ url_for('main.allemails') }}" class="text-decoration-none" style="color:#e8e8e8; opacity:0.85;">
+          All Emails
+        </a>
+      </div>
+    </div>
+
+    <div class="container py-3" style="max-width: 980px;">
+      <!-- Expect: email = object/dict with title, sender, date, type, body, summary, draft -->
+      <div class="meta-wrap">
+        <div class="row align-items-start">
+          <div class="col-12 col-md-4">
+            <div class="meta-title">{{ email.title }}</div>
+            <div class="meta-sub">From {{ email.sender }}</div>
+          </div>
+
+          <div class="col-12 col-md-4 mt-3 mt-md-0">
+            <div class="meta-title">Date Sent</div>
+            <div class="meta-sub">{{ email.date }}</div>
+          </div>
+
+          <div class="col-12 col-md-4 mt-3 mt-md-0">
+            <div class="meta-title">Type</div>
+            <div class="meta-sub">{{ email.type }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="email-body">
+        <div class="row">
+          <div class="col-12 col-md-9">
+            {{ email.body }}
+          </div>
+
+          <div class="col-12 col-md-3 junk-box mt-4 mt-md-0">
+            <div class="junk-label">Move to Junk</div>
+
+            <!-- Replace these endpoints with your real POST routes -->
+            <div class="d-flex justify-content-end gap-2">
+              <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
+                <button class="icon-btn ok" type="submit" title="Move to Junk" aria-label="Move to Junk">
+                  <i class="bi bi-check2"></i>
+                </button>
+              </form>
+              <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
+                <button class="icon-btn no" type="submit" title="Not Junk" aria-label="Not Junk">
+                  <i class="bi bi-x-lg"></i>
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="summary">
+          {% if email.summary %}
+            AI-Generated Summary: {{ email.summary }}
+          {% else %}
+            AI-Generated Summary (If email is longer than a set character limit)
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="reply-panel">
+        <div class="reply-label">Reply</div>
+        <div class="reply-hint">
+          AI Generated Draft (If type is response-required)
+        </div>
+
+        <!-- This form is for drafting/revising/sending -->
+        <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}">
+          <textarea
+            class="form-control"
+            name="reply_text"
+            rows="6"
+            placeholder="Write your reply here..."
+          >{% if email.draft %}{{ email.draft }}{% endif %}</textarea>
+
+          <div class="actions">
+            <!-- Revise (brain icon) -->
+            <button
+              type="submit"
+              name="action"
+              value="revise"
+              class="action-icon"
+              title="Revise draft"
+              aria-label="Revise draft"
+              formaction="{{ url_for('main.revise_draft', id=email.id) }}"
+            >
+              <i class="bi bi-brain"></i>
+            </button>
+
+            <!-- Send (paper plane icon) -->
+            <button
+              type="submit"
+              name="action"
+              value="send"
+              class="action-icon"
+              title="Send"
+              aria-label="Send"
+            >
+              <i class="bi bi-send"></i>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

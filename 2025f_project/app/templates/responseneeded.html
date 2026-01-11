@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Response needed</title>
+
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    />
+
+    <style>
+      :root{
+        --bg: #1f1f1f;
+        --bar: #121212;
+        --headrow: #2f2f2f;
+        --card: #4a4a4a;
+        --text: #e8e8e8;
+        --muted: #bdbdbd;
+      }
+      body{ background: var(--bg); color: var(--text); }
+      .topnav{ background: var(--bar); padding: 14px 18px; border-bottom: 1px solid #2b2b2b; }
+      .tablink{ color: var(--text); text-decoration: none; margin-right: 18px; opacity: 0.85; }
+      .tablink:hover{ opacity: 1; text-decoration: underline; }
+      .tablink.active{ opacity: 1; text-decoration: underline; font-weight: 600; }
+      .tablehead{ background: var(--headrow); border-radius: 10px; padding: 10px 16px; margin-top: 14px; }
+      .headlabel{ text-decoration: underline; font-weight: 600; }
+      .email-row{
+        display:block; background: var(--card); color: var(--text); text-decoration:none;
+        border-radius:10px; padding:14px 16px; margin-top:12px; border:1px solid #3f3f3f;
+      }
+      .email-row:hover{ border-color:#6b6b6b; filter: brightness(1.03); }
+      .muted{ color: var(--muted); }
+      .priority{ margin-left: 8px; letter-spacing: 1px; }
+      .wrap-ellipsis{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .search-link{ color: var(--text); text-decoration:none; opacity:0.9; }
+      .search-link:hover{ opacity:1; text-decoration:underline; }
+    </style>
+  </head>
+
+  <body>
+    <div class="topnav d-flex align-items-center justify-content-between">
+      <div class="d-flex align-items-center flex-wrap">
+        <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
+        <a class="tablink active" href="{{ url_for('main.responseneeded') }}">Response needed</a>
+        <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>
+        <a class="tablink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
+        <i class="bi bi-search" aria-hidden="true"></i>
+      </div>
+    </div>
+
+    <div class="container py-3" style="max-width: 980px;">
+      <div class="tablehead">
+        <div class="row">
+          <div class="col-6 headlabel">Email title</div>
+          <div class="col-3 headlabel text-center">Type</div>
+          <div class="col-3 headlabel text-end">Date</div>
+        </div>
+      </div>
+
+      {% if emails and emails|length > 0 %}
+        {% for email in emails %}
+          <a class="email-row" href="{{ url_for('main.email', id=email.id) }}">
+            <div class="row align-items-center">
+              <div class="col-6 wrap-ellipsis">
+                {{ email.title }}
+                {% if email.priority %}
+                  <span class="priority">{{ "★" * email.priority }}</span>
+                {% endif %}
+              </div>
+              <div class="col-3 text-center muted wrap-ellipsis">
+                {{ email.type }}
+              </div>
+              <div class="col-3 text-end muted">
+                {{ email.date }}
+              </div>
+            </div>
+          </a>
+        {% endfor %}
+      {% else %}
+        <div class="mt-3 muted">No response-needed emails to display.</div>
+      {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

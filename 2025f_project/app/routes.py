@@ -1,46 +1,101 @@
-from flask import Blueprint, render_template, request
+from flask import Blueprint, render_template, request, redirect, url_for
 
 main = Blueprint("main", __name__)
 
+EMAILS = [
+    {
+        "id": 1,
+        "title": "Meeting follow-up",
+        "sender": "teacher@school.org",
+        "date": "2026-01-10",
+        "type": "response-needed",
+        "priority": 3,
+        "body": "Can you send your draft by Friday?",
+        "summary": "Teacher asking for draft by Friday.",
+        "draft": "Hi, thanks for the reminder! I will send it by Friday.",
+    },
+    {
+        "id": 2,
+        "title": "Newsletter",
+        "sender": "news@service.com",
+        "date": "2026-01-09",
+        "type": "read-only",
+        "priority": 1,
+        "body": "This is an informational newsletter.",
+        "summary": None,
+        "draft": None,
+    },
+]
+
+def get_email_by_id(email_id: int):
+    for e in EMAILS:
+        if e["id"] == email_id:
+            return e
+    return None
+
 @main.route("/")
 def index():
-    return "Welcome to our flask web application!"
+    return redirect(url_for("main.about"))
 
 @main.route("/about")
 def about():
-    emails = []
     return render_template("about.html")
 
 @main.route("/allemails")
 def allemails():
-    emails = []
-    return render_template("allemails.html", emails=emails)
+    return render_template("allemails.html", emails=EMAILS)
 
 @main.route("/readonly")
 def readonly():
-    emails = []
-    return render_template("readonly.html", emails=emails)
+    filtered = [e for e in EMAILS if e["type"] == "read-only"]
+    return render_template("readonly.html", emails=filtered)
 
 @main.route("/responseneeded")
 def responseneeded():
-    emails = []
-    return render_template("responseneeded.html", emails=emails)
+    filtered = [e for e in EMAILS if e["type"] == "response-needed"]
+    return render_template("responseneeded.html", emails=filtered)
 
 @main.route("/junkmailconfirm")
 def junkmailconfirm():
-    emails = []
-    return render_template("junkmailconfirm.html", emails=emails)
+    filtered = [e for e in EMAILS if e["type"] == "junk-uncertain"]
+    return render_template("junkmailconfirm.html", emails=filtered)
 
 @main.route("/email/<int:id>")
-def email(id):
-    emails = []
-    # later: fetch the email by id from the database
+def email_view(id):
+    email_data = get_email_by_id(id)
+    if email_data is None:
+        return "Email not found", 404
     return render_template("email.html", email=email_data)
 
 @main.route("/search")
 def search():
-    q = (request.args.get("q") or "").strip()   # reads ?q=...
-    emails = []  # later replace with real DB search results
-    return render_template("search.html", query=q, emails=emails)
+    q = (request.args.get("q") or "").strip().lower()
+    if not q:
+        return render_template("search.html", query="", emails=None)
+
+    results = []
+    for e in EMAILS:
+        haystack = f"{e['title']} {e['sender']} {e['body']}".lower()
+        if q in haystack:
+            results.append(e)
+
+    return render_template("search.html", query=q, emails=results)
+
+@main.route("/confirm_junk/<int:id>", methods=["POST"])
+def confirm_junk(id):
+    return redirect(url_for("main.junkmailconfirm"))
+
+@main.route("/reject_junk/<int:id>", methods=["POST"])
+def reject_junk(id):
+    return redirect(url_for("main.junkmailconfirm"))
+
+@main.route("/send_reply/<int:id>", methods=["POST"])
+def send_reply(id):
+    return redirect(url_for("main.email_view", id=id))
+
+@main.route("/revise_draft/<int:id>", methods=["POST"])
+def revise_draft(id):
+    return redirect(url_for("main.email_view", id=id))
+
 
 

@@ -35,7 +35,7 @@ def junkmailconfirm():
 def email(id):
     emails = []
     # later: fetch the email by id from the database
-    return render_template("email.html", email=email)
+    return render_template("email.html", email=email_data)
 
 @main.route("/search")
 def search():

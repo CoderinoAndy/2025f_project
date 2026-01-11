@@ -61,7 +61,7 @@ def junkmailconfirm():
     return render_template("junkmailconfirm.html", emails=filtered)
 
 @main.route("/email/<int:id>")
-def email_view(id):
+def email(id):
     email_data = get_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -91,11 +91,12 @@ def reject_junk(id):
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
 def send_reply(id):
-    return redirect(url_for("main.email_view", id=id))
+    return redirect(url_for("main.email", id=id))
 
 @main.route("/revise_draft/<int:id>", methods=["POST"])
 def revise_draft(id):
-    return redirect(url_for("main.email_view", id=id))
+    return redirect(url_for("main.email", id=id))
+
 
 
 

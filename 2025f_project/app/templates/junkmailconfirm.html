@@ -101,7 +101,7 @@
                 </a>
               </div>
               <div class="col-3 text-center muted">{{ email.type }}</div>
-              <div class="col-3 text-end muted">{{ email.date }}</div>
+              <div class="col-3 text-end muted">{{ email.date|fmt_dt }}</div>
             </div>
 
             <div class="d-flex align-items-center justify-content-end gap-2 mt-2">
@@ -121,7 +121,11 @@
         {% endfor %}
       {% else %}
       <div class="email-card">
-      <div class="muted">No uncertain junk mail to confirm.</div>
+        <div class="row align-items-center">
+          <div class="col-6 muted">No uncertain junk mail to confirm.</div>
+          <div class="col-3 text-center muted">—</div>
+          <div class="col-3 text-end muted">—</div>
+        </div>
       </div>
       {% endif %}
     </div>

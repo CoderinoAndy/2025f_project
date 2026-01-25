@@ -59,7 +59,14 @@
         margin-top: 12px;
         white-space: pre-wrap;
       }
-
+      .message-title{
+        font-weight: 700;
+        font-size: 20px;
+        margin-bottom: 8px;
+      }
+      .message-content{
+        color: var(--text);
+      }
       .junk-box{
         text-align: right;
       }
@@ -147,7 +154,7 @@
 
           <div class="col-12 col-md-4 mt-3 mt-md-0">
             <div class="meta-title">Date Sent</div>
-            <div class="meta-sub">{{ email.date }}</div>
+            <div class="meta-sub">{{ email.date|fmt_dt }}</div>
           </div>
 
           <div class="col-12 col-md-4 mt-3 mt-md-0">
@@ -160,37 +167,39 @@
       <div class="email-body">
         <div class="row">
           <div class="col-12 col-md-9">
-            {{ email.body }}
+            <div class="message-title">Message</div>
+            <div class="message-content">{{ email.body }}</div>
           </div>
+          <div class="col-12 col-md-3 junk-box mt-4 mt-md-0 d-flex flex-column">
+            <!-- This wrapper pushes the junk controls to the bottom -->
+            <div class="mt-auto">
+              <div class="junk-label">Move to Junk</div>
 
-          <div class="col-12 col-md-3 junk-box mt-4 mt-md-0">
-            <div class="junk-label">Move to Junk</div>
+              <div class="d-flex justify-content-end gap-2">
+                <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
+                  <button class="icon-btn ok" type="submit" title="Move to Junk" aria-label="Move to Junk">
+                    <i class="bi bi-check2"></i>
+                  </button>
+                </form>
 
-            <!-- Replace these endpoints with your real POST routes -->
-            <div class="d-flex justify-content-end gap-2">
-              <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
-                <button class="icon-btn ok" type="submit" title="Move to Junk" aria-label="Move to Junk">
-                  <i class="bi bi-check2"></i>
-                </button>
-              </form>
-              <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
-                <button class="icon-btn no" type="submit" title="Not Junk" aria-label="Not Junk">
-                  <i class="bi bi-x-lg"></i>
-                </button>
-              </form>
+                <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
+                  <button class="icon-btn no" type="submit" title="Not Junk" aria-label="Not Junk">
+                    <i class="bi bi-x-lg"></i>
+                  </button>
+                </form>
+              </div>
             </div>
           </div>
         </div>
-
         <div class="summary">
           {% if email.summary %}
             AI-Generated Summary: {{ email.summary }}
+          {% elif email.body and (email.body|length >= 200) %}
+            AI-Generated Summary: Not generated yet.
           {% else %}
-            AI-Generated Summary (If email is longer than a set character limit)
+            AI-Generated Summary: (Email is short; summary not needed.)
           {% endif %}
-        </div>
-      </div>
-
+        </div> 
       <div class="reply-panel">
         <div class="reply-label">Reply</div>
         <div class="reply-hint">
@@ -213,9 +222,9 @@
               name="action"
               value="revise"
               class="action-icon"
-              title="Revise draft"
-              aria-label="Revise draft"
-              formaction="{{ url_for('main.revise_draft', id=email.id) }}"
+              title="Generate draft"
+              aria-label="Generate draft"
+              formaction="{{ url_for('main.generate_draft', id=email.id) }}"
             >
               <i class="bi bi-brain"></i>
             </button>

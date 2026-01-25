@@ -141,7 +141,7 @@
                   {% endif %}
                 </div>
                 <div class="col-3 text-center muted wrap-ellipsis">{{ email.type }}</div>
-                <div class="col-3 text-end muted">{{ email.date }}</div>
+                <div class="col-3 text-end muted">{{ email.date|fmt_dt }}</div>
               </div>
             </a>
           {% endfor %}

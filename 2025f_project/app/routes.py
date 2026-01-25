@@ -83,11 +83,17 @@ def search():
 
 @main.route("/confirm_junk/<int:id>", methods=["POST"])
 def confirm_junk(id):
-    return redirect(url_for("main.junkmailconfirm"))
+    email_data = get_email_by_id(id)
+    if email_data is not None:
+        email_data["type"] = "junk"
+    return redirect(request.referrer or url_for("main.allemails"))
 
 @main.route("/reject_junk/<int:id>", methods=["POST"])
 def reject_junk(id):
-    return redirect(url_for("main.junkmailconfirm"))
+    email_data = get_email_by_id(id)
+    if email_data is not None:
+        email_data["type"] = "read-only"
+    return redirect(request.referrer or url_for("main.allemails"))
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
 def send_reply(id):

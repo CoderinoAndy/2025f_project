@@ -83,41 +83,41 @@
         </div>
       </div>
 
-      <div class="mt-2 muted">
-        Uncertain junk mail appears here. You can confirm moving it to junk (✓) or keep it (✗). You can also click the title to expand.
-      </div>
-
       <!-- Expect: emails = list of dicts with id, title, type, date, priority -->
       {% if emails and emails|length > 0 %}
         {% for email in emails %}
           <div class="email-card">
             <div class="row align-items-center">
-              <div class="col-6">
-                <a class="email-title-link" href="{{ url_for('main.email', id=email.id) }}">
+              <div class="col-6 d-flex align-items-center justify-content-between">
+                <a class="email-title-link flex-grow-1 me-2" href="{{ url_for('main.email', id=email.id) }}">
                   {{ email.title }}
                   {% if email.priority %}
                     <span class="priority">{{ "★" * email.priority }}</span>
                   {% endif %}
                 </a>
+
+                <div class="dropdown">
+                  <button class="dots-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="More options">
+                    <i class="bi bi-three-dots-vertical"></i>
+                  </button>
+
+                  <ul class="dropdown-menu dropdown-menu-end">
+                    <li>
+                      <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
+                        <button class="dropdown-item" type="submit">Move to junk</button>
+                      </form>
+                    </li>
+                    <li>
+                      <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
+                        <button class="dropdown-item" type="submit">Keep (not junk)</button>
+                      </form>
+                    </li>
+                  </ul>
+                </div>
               </div>
               <div class="col-3 text-center muted">{{ email.type }}</div>
               <div class="col-3 text-end muted">{{ email.date|fmt_dt }}</div>
             </div>
-
-            <div class="d-flex align-items-center justify-content-end gap-2 mt-2">
-              <!-- Replace these endpoints with your real POST routes -->
-              <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
-                <button class="icon-btn ok" type="submit" title="Move to Junk" aria-label="Move to Junk">
-                  <i class="bi bi-check2"></i>
-                </button>
-              </form>
-              <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
-                <button class="icon-btn no" type="submit" title="Not Junk" aria-label="Not Junk">
-                  <i class="bi bi-x-lg"></i>
-                </button>
-              </form>
-            </div>
-          </div>
         {% endfor %}
       {% else %}
       <div class="email-card">

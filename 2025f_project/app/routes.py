@@ -97,6 +97,22 @@ def send_reply(id):
 def revise_draft(id):
     return redirect(url_for("main.email", id=id))
 
+@main.route("/generate_draft/<int:id>", methods=["POST"])
+def generate_draft(id):
+    email_data = get_email_by_id(id)
+    if email_data is None:
+        return "Email not found", 404
 
+    # TO BE REPLACED BY LLM
+    title = email_data.get("title") or ""
+    draft = (
+        f"Hi,\n\n"
+        f"Thanks for your message about \"{title}\". "
+        f"I’ve received it and will get back to you shortly.\n\n"
+        f"Best regards,"
+    )
+
+    email_data["draft"] = draft
+    return redirect(url_for("main.email", id=id))
 
 

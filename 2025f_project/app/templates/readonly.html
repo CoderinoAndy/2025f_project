@@ -72,7 +72,7 @@
 
         {% if emails and emails|length > 0 %}
           {% for email in emails %}
-            href="{{ url_for('main.email', id=email.id, next=request.full_path) }}"
+            <a class="email-row" href="{{ url_for('main.email', id=email.id, next=request.path) }}">
               <div class="row g-0 align-items-center">
                 <div class="col-6 wrap-ellipsis pe-2">
                   {{ email.title }}

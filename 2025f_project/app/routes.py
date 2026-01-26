@@ -70,7 +70,14 @@ def email(id):
     email_data = get_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
-    return render_template("email.html", email=email_data)
+
+    next_url = request.args.get("next")
+
+    # Safety + sanity: only allow local paths
+    if not next_url or not next_url.startswith("/"):
+        next_url = url_for("main.allemails")
+
+    return render_template("email.html", email=email_data, next_url=next_url)
 
 @main.route("/email/<int:id>/set-type", methods=["POST"])
 def set_email_type(id):
@@ -97,7 +104,10 @@ def set_email_type(id):
         email_data["type"] = new_type
 
     # Return the user back to wherever they were.
-    return redirect(request.referrer or url_for("main.email", id=id))
+    next_url = request.form.get("next") or request.args.get("next")
+    if next_url and next_url.startswith("/"):
+        return redirect(url_for("main.email", id=id, next=next_url))
+    return redirect(url_for("main.email", id=id))
 
 @main.route("/search")
 def search():
@@ -115,6 +125,9 @@ def search():
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
 def send_reply(id):
+    next_url = request.form.get("next") or request.args.get("next")
+    if next_url and next_url.startswith("/"):
+        return redirect(url_for("main.email", id=id, next=next_url))
     return redirect(url_for("main.email", id=id))
 
 @main.route("/revise_draft/<int:id>", methods=["POST"])
@@ -137,6 +150,9 @@ def generate_draft(id):
     )
 
     email_data["draft"] = draft
+    next_url = request.form.get("next") or request.args.get("next")
+    if next_url and next_url.startswith("/"):
+        return redirect(url_for("main.email", id=id, next=next_url))
     return redirect(url_for("main.email", id=id))
 
 

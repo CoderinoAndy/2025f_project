@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request, redirect, url_for
+from flask import Blueprint, render_template, request, redirect, url_for, abort
 
 main = Blueprint("main", __name__)
 
@@ -71,6 +71,21 @@ def email(id):
     if email_data is None:
         return "Email not found", 404
     return render_template("email.html", email=email_data)
+
+@main.route("/email/<int:id>/set-type", methods=["POST"])
+def set_email_type(id):
+    new_type = request.form.get("new_type", "").strip()
+
+    allowed = {"response-needed", "read-only", "junk"}
+    if new_type not in allowed:
+        abort(400)
+
+    email = Email.query.get_or_404(id)
+    if email.type != new_type:
+        email.type = new_type
+        db.session.commit()
+
+    return redirect(url_for("main.email", id=id))
 
 @main.route("/search")
 def search():

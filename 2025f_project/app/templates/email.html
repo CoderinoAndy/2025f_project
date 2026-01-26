@@ -189,28 +189,25 @@
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">{{ email.title }}</div>
+              <ul class="dropdown-menu dropdown-menu-end">
+                {% set current_type = email.type %}
 
-              <!-- 3-dot menu -->
-              <div class="dropdown">
-                <button class="dots-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="More options">
-                  <i class="bi bi-three-dots-vertical"></i>
-                </button>
-
-                <ul class="dropdown-menu dropdown-menu-end">
-                  <li>
-                    <form method="post" action="{{ url_for('main.confirm_junk', id=email.id) }}" class="m-0">
-                      <button class="dropdown-item" type="submit">Move to junk</button>
-                    </form>
-                  </li>
-                  <li>
-                    <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
-                      <button class="dropdown-item" type="submit">Keep (not junk)</button>
-                    </form>
-                  </li>
-                </ul>
-              </div>
+                {% for t, label in [
+                  ('response-needed', 'Move to response needed'),
+                  ('read-only', 'Move to read only'),
+                  ('junk', 'Move to junk')
+                ] %}
+                  {% if t != current_type %}
+                    <li>
+                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
+                        <input type="hidden" name="new_type" value="{{ t }}" />
+                        <button class="dropdown-item" type="submit">{{ label }}</button>
+                      </form>
+                    </li>
+                  {% endif %}
+                {% endfor %}
+              </ul>
             </div>
-
             <div class="message-content">{{ email.body }}</div>
           </div>
 

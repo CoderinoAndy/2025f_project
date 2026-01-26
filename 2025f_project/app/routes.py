@@ -74,18 +74,30 @@ def email(id):
 
 @main.route("/email/<int:id>/set-type", methods=["POST"])
 def set_email_type(id):
-    new_type = request.form.get("new_type", "").strip()
+    """Change an email's category.
 
+    Note:
+    - Right now, emails live in the in-memory EMAILS list.
+    - Later, you can swap the implementation inside this function to update a SQLite row
+      (or your Outlook integration) without changing the UI.
+    """
+
+    new_type = (request.form.get("new_type") or "").strip()
+
+    # Only allow the 3 user-facing categories to be set from the UI.
     allowed = {"response-needed", "read-only", "junk"}
     if new_type not in allowed:
         abort(400)
 
-    email = Email.query.get_or_404(id)
-    if email.type != new_type:
-        email.type = new_type
-        db.session.commit()
+    email_data = get_email_by_id(id)
+    if email_data is None:
+        abort(404)
 
-    return redirect(url_for("main.email", id=id))
+    if email_data.get("type") != new_type:
+        email_data["type"] = new_type
+
+    # Return the user back to wherever they were.
+    return redirect(request.referrer or url_for("main.email", id=id))
 
 @main.route("/search")
 def search():
@@ -100,20 +112,6 @@ def search():
             results.append(e)
 
     return render_template("search.html", query=q, emails=results)
-
-@main.route("/confirm_junk/<int:id>", methods=["POST"])
-def confirm_junk(id):
-    email_data = get_email_by_id(id)
-    if email_data is not None:
-        email_data["type"] = "junk"
-    return redirect(request.referrer or url_for("main.allemails"))
-
-@main.route("/reject_junk/<int:id>", methods=["POST"])
-def reject_junk(id):
-    email_data = get_email_by_id(id)
-    if email_data is not None:
-        email_data["type"] = "read-only"
-    return redirect(request.referrer or url_for("main.allemails"))
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
 def send_reply(id):

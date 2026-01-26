@@ -76,6 +76,7 @@
       }
       .btn-ghost:hover{ border-color:#666; }
     </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
   <body>
@@ -84,6 +85,7 @@
         <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
         <a class="tablink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
         <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>
+        <a class="tablink" href="{{ url_for('main.junk') }}">Junk</a>
         <a class="tablink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
       </div>
 

@@ -77,11 +77,11 @@
       }
 
       .summary-text{
-        white-space: pre-line;
-        color: var(--muted);
-        font-style: italic;
-        text-align: left;
-        margin: 0;
+      white-space: pre-line;
+      color: var(--muted);
+      font-style: italic;
+      text-align: left;
+      margin: 0;
       }
 
       /* 3-dot menu button */
@@ -145,6 +145,7 @@
       }
       .action-icon:hover{ opacity: 1; }
     </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
   <body>
@@ -166,7 +167,7 @@
       <div class="meta-wrap">
         <div class="row align-items-start">
           <div class="col-12 col-md-4">
-            <div class="meta-title">{{ email.title }}</div>
+            <div class="meta-title">Author</div>
             <div class="meta-sub">From {{ email.sender }}</div>
           </div>
 
@@ -187,7 +188,7 @@
           <!-- Message panel -->
           <div class="panel-card">
             <div class="panel-header">
-              <div class="panel-title">Message</div>
+              <div class="panel-title">{{ email.title }}</div>
 
               <!-- 3-dot menu -->
               <div class="dropdown">

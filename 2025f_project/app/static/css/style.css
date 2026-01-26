@@ -1,0 +1,68 @@
+:root{
+  --bg: #15121a;
+  --bar: #0f0d13;
+  --panel: #221e2b;
+  --panel-2: #2b2636;
+
+  --headrow: #1c1824;
+  --card: #252033;
+
+  --text: #ece9f5;
+  --muted: #bdb5d4;
+
+  --accent: #7c3aed;
+  --accent-2: #a78bfa;
+
+  --border: #3a3348;
+}
+
+body{
+  background: var(--bg) !important;
+  color: var(--text) !important;
+}
+
+.topnav, .topbar, .headerbar{
+  background: var(--bar) !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+.tablink, .navlink{
+  color: var(--text) !important;
+  opacity: 0.85;
+  text-decoration: none;
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-right: 10px;
+}
+
+.tablink:hover, .navlink:hover{
+  opacity: 1;
+  background: rgba(124, 58, 237, 0.14);
+}
+
+.tablink.active{
+  opacity: 1;
+  background: rgba(124, 58, 237, 0.22);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+}
+
+.panel-card, .meta-wrap, .tablehead, .email-row{
+  background: var(--panel) !important;
+  border: 1px solid var(--border) !important;
+}
+
+.dropdown-menu{
+  background: var(--panel) !important;
+  border: 1px solid var(--border) !important;
+}
+.dropdown-item{ color: var(--text) !important; }
+.dropdown-item:hover{ background: rgba(124, 58, 237, 0.14) !important; }
+
+.btn-primary{
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+.btn-primary:hover{
+  background: var(--accent-2) !important;
+  border-color: var(--accent-2) !important;
+}

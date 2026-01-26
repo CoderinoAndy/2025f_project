@@ -16,49 +16,87 @@
 
     <style>
       :root{
-        --bg:#222;
-        --panel:#2f2f2f;
-        --panel-2:#3a3a3a;
-        --text:#eaeaea;
-        --muted:#bcbcbc;
+        --bg: #1f1f1f;
+        --bar: #121212;
+        --headrow: #2f2f2f;
+        --card: #4a4a4a;
+        --text: #e8e8e8;
+        --muted: #bdbdbd;
       }
-      body{ background:var(--bg); color:var(--text); }
-      .headerbar{
-        background:#2b2b2b; padding:10px 14px; border-bottom:1px solid #3f3f3f;
+      body{ background: var(--bg); color: var(--text); }
+
+      .topnav{
+        background: var(--bar);
+        padding: 14px 18px;
+        border-bottom: 1px solid #2b2b2b;
       }
-      .navlink{ color:var(--text); text-decoration:none; opacity:0.9; }
-      .navlink:hover{ opacity:1; text-decoration:underline; }
+      .tablink{
+        color: var(--text);
+        text-decoration: none;
+        margin-right: 18px;
+        opacity: 0.85;
+      }
+      .tablink:hover{ opacity: 1; text-decoration: underline; }
+      .tablink.active{ opacity: 1; text-decoration: underline; font-weight: 600; }
+
+      .search-link{
+        color: var(--text);
+        text-decoration: none;
+        opacity: 0.9;
+      }
+      .search-link:hover{ opacity: 1; text-decoration: underline; }
+
       .tablehead{
-        background:#2b2b2b; border-radius:12px; padding:12px 16px;
+        background: var(--headrow);
+        border-radius: 10px;
+        padding: 10px 16px;
+        margin-top: 14px;
       }
-      .headlabel{ font-weight:700; }
+      .headlabel{
+        text-decoration: underline;
+        font-weight: 600;
+      }
+
       .email-row{
-        display:block;
-        background:var(--panel);
-        border-radius:12px;
-        padding:12px 16px;
-        margin-top:10px;
-        text-decoration:none;
-        color:var(--text);
-        border:1px solid #3f3f3f;
+        display: block;
+        background: #3a3a3a;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin-top: 10px;
+        color: var(--text);
+        text-decoration: none;
       }
-      .email-row:hover{ background:var(--panel-2); }
-      .muted{ color:var(--muted); }
-      .wrap{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .priority{ margin-left:8px; opacity:0.9; }
+      .email-row:hover{ background: var(--card); }
+      .muted{ color: var(--muted); }
+      .wrap-ellipsis{
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .priority{ margin-left: 8px; opacity: 0.9; }
     </style>
+
+    <!-- Optional theme override (works once style.css has content) -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
   <body>
-    <div class="headerbar d-flex align-items-center justify-content-between">
-      <a class="navlink" href="{{ url_for('main.about') }}"><i class="bi bi-arrow-left"></i> Back</a>
-      <div class="text-end">
-        <a class="navlink" href="{{ url_for('main.allemails') }}">All Emails</a>
+    <div class="topnav d-flex align-items-center justify-content-between">
+      <div class="d-flex align-items-center flex-wrap">
+        <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
+        <a class="tablink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
+        <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>
+        <a class="tablink active" href="{{ url_for('main.junk') }}">Junk</a>
+        <a class="tablink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
+        <i class="bi bi-search" aria-hidden="true"></i>
       </div>
     </div>
 
     <div class="container py-3" style="max-width: 980px;">
-      <h3 class="mb-3">Junk</h3>
+      <h2 class="mb-2">Junk</h2>
 
       <div class="tablehead">
         <div class="row">
@@ -72,15 +110,18 @@
         {% for email in emails %}
           <a class="email-row" href="{{ url_for('main.email', id=email.id) }}">
             <div class="row align-items-center">
-              <div class="col-6 wrap">
+              <div class="col-6 wrap-ellipsis">
                 {{ email.title }}
                 {% if email.priority %}
                   <span class="priority">{{ "★" * email.priority }}</span>
                 {% endif %}
-                <div class="muted" style="font-size: 12px;">From {{ email.sender }}</div>
               </div>
-              <div class="col-3 text-center muted">{{ email.type }}</div>
-              <div class="col-3 text-end muted">{{ email.date|fmt_dt }}</div>
+              <div class="col-3 text-center muted wrap-ellipsis">
+                {{ email.type }}
+              </div>
+              <div class="col-3 text-end muted">
+                {{ email.date|fmt_dt }}
+              </div>
             </div>
           </a>
         {% endfor %}

@@ -42,7 +42,6 @@
         background: var(--panel);
         border-radius: 12px;
         padding: 14px 16px;
-        margin-top: 14px;
       }
       .meta-title{
         text-decoration: underline;
@@ -164,33 +163,31 @@
 
     <div class="container py-3" style="max-width: 980px;">
       <!-- Expect: email = object/dict with title, sender, date, type, body, summary, draft -->
-      <div class="meta-wrap">
-        <div class="row align-items-start">
-          <div class="col-12 col-md-4">
-            <div class="meta-title">Author</div>
-            <div class="meta-sub">From {{ email.sender }}</div>
-          </div>
-
-          <div class="col-12 col-md-4 mt-3 mt-md-0">
-            <div class="meta-title">Date Sent</div>
-            <div class="meta-sub">{{ email.date|fmt_dt }}</div>
-          </div>
-
-          <div class="col-12 col-md-4 mt-3 mt-md-0">
-            <div class="meta-title">Type</div>
-            <div class="meta-sub">{{ email.type }}</div>
-          </div>
-        </div>
-      </div>
-      <div class="row g-3 mt-2">
+      <div class="row g-3 mt-3 align-items-start">
         <!-- Left column: Message + Reply -->
         <div class="col-12 col-md-8">
+        <div class="meta-wrap mb-3">
+          <div class="row align-items-start">
+            <div class="col-12 col-md-4">
+              <div class="meta-title">Author</div>
+              <div class="meta-sub">From {{ email.sender }}</div>
+            </div>
+
+            <div class="col-12 col-md-4 mt-3 mt-md-0">
+              <div class="meta-title">Date Sent</div>
+              <div class="meta-sub">{{ email.date|fmt_dt }}</div>
+            </div>
+
+            <div class="col-12 col-md-4 mt-3 mt-md-0">
+              <div class="meta-title">Type</div>
+              <div class="meta-sub">{{ email.type }}</div>
+            </div>
+          </div>
+        </div>
           <!-- Message panel -->
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">{{ email.title }}</div>
-              <div class="panel-title">{{ email.title }}</div>
-
           <div class="dropdown">
             <button
               class="dots-btn"
@@ -289,6 +286,7 @@
           </div>
         </div>
       </div>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>

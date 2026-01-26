@@ -77,9 +77,11 @@
       }
 
       .summary-text{
-        white-space: pre-wrap;
+        white-space: pre-line;
         color: var(--muted);
         font-style: italic;
+        text-align: left;
+        margin: 0;
       }
 
       /* 3-dot menu button */
@@ -180,8 +182,9 @@
         </div>
       </div>
       <div class="row g-3 mt-2">
-        <!-- Left: Message panel -->
+        <!-- Left column: Message + Reply -->
         <div class="col-12 col-md-8">
+          <!-- Message panel -->
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">Message</div>
@@ -198,14 +201,62 @@
                       <button class="dropdown-item" type="submit">Move to junk</button>
                     </form>
                   </li>
+                  <li>
+                    <form method="post" action="{{ url_for('main.reject_junk', id=email.id) }}" class="m-0">
+                      <button class="dropdown-item" type="submit">Keep (not junk)</button>
+                    </form>
+                  </li>
                 </ul>
               </div>
             </div>
 
             <div class="message-content">{{ email.body }}</div>
           </div>
+
+          <!-- Reply panel (now contained in left column) -->
+          <div class="reply-panel">
+            <div class="reply-label">Reply</div>
+            <div class="reply-hint">
+              Generate a draft (brain), edit if needed, then send.
+            </div>
+
+            <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}">
+              <textarea
+                class="form-control"
+                name="reply_text"
+                rows="6"
+                placeholder="Write your reply here..."
+              >{% if email.draft %}{{ email.draft }}{% endif %}</textarea>
+
+              <div class="actions">
+                <button
+                  type="submit"
+                  name="action"
+                  value="revise"
+                  class="action-icon"
+                  title="Generate draft"
+                  aria-label="Generate draft"
+                  formaction="{{ url_for('main.generate_draft', id=email.id) }}"
+                >
+                  <i class="bi bi-lightbulb"></i>
+                </button>
+
+                <button
+                  type="submit"
+                  name="action"
+                  value="send"
+                  class="action-icon"
+                  title="Send"
+                  aria-label="Send"
+                >
+                  <i class="bi bi-send"></i>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
-        <!-- Right: Summary panel -->
+
+        <!-- Right column: Summary -->
         <div class="col-12 col-md-4">
           <div class="panel-card">
             <div class="panel-header">
@@ -213,63 +264,17 @@
             </div>
 
             <div class="summary-text">
-              {% if email.summary %}
-                {{ email.summary }}
-              {% elif email.body and (email.body|length >= 200) %}
+              {%- if email.summary -%}
+                {{ email.summary|trim }}
+              {%- elif email.body and (email.body|length >= 200) -%}
                 Not generated yet.
-              {% else %}
+              {%- else -%}
                 Email is short; summary not needed.
-              {% endif %}
+              {%- endif -%}
             </div>
           </div>
         </div>
       </div>
-      </div>
-      <div class="reply-panel">
-        <div class="reply-label">Reply</div>
-        <div class="reply-hint">
-          Generate a draft (brain), edit if needed, then send.
-        </div>
-
-        <!-- This form is for drafting/revising/sending -->
-        <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}">
-          <textarea
-            class="form-control"
-            name="reply_text"
-            rows="6"
-            placeholder="Write your reply here..."
-          >{% if email.draft %}{{ email.draft }}{% endif %}</textarea>
-
-          <div class="actions">
-            <!-- Revise (brain icon) -->
-            <button
-              type="submit"
-              name="action"
-              value="revise"
-              class="action-icon"
-              title="Generate draft"
-              aria-label="Generate draft"
-              formaction="{{ url_for('main.generate_draft', id=email.id) }}"
-            >
-              <i class="bi bi-lightbulb"></i>
-            </button>
-
-            <!-- Send (paper plane icon) -->
-            <button
-              type="submit"
-              name="action"
-              value="send"
-              class="action-icon"
-              title="Send"
-              aria-label="Send"
-            >
-              <i class="bi bi-send"></i>
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   </body>
 </html>

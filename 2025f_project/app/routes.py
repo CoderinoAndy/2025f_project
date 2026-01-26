@@ -60,6 +60,11 @@ def junkmailconfirm():
     filtered = [e for e in EMAILS if e["type"] == "junk-uncertain"]
     return render_template("junkmailconfirm.html", emails=filtered)
 
+@main.route("/junk")
+def junk():
+    filtered = [e for e in EMAILS if e["type"] == "junk"]
+    return render_template("junk.html", emails=filtered)
+
 @main.route("/email/<int:id>")
 def email(id):
     email_data = get_email_by_id(id)

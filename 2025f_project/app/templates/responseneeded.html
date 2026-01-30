@@ -47,6 +47,7 @@
   <body>
     <div class="topnav d-flex align-items-center justify-content-between">
       <div class="d-flex align-items-center flex-wrap">
+        <div class="brand">Proton</div>
         <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
         <a class="tablink active" href="{{ url_for('main.responseneeded') }}">Response needed</a>
         <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>
@@ -59,23 +60,24 @@
       </div>
     </div>
 
-    <div class="container py-3" style="max-width: 980px;">
+    <div class="container-fluid py-3 px-4">
       <h2 class="mb-2">Response needed</h2>
       <div class="list-shell">
         <div class="tablehead">
           <div class="row g-0">
             <div class="col-6 headlabel">Email title</div>
             <div class="col-3 headlabel text-center">Type</div>
-            <div class="col-3 headlabel text-end">Date</div>
           </div>
         </div>
 
         {% if emails and emails|length > 0 %}
           {% for email in emails %}
-            <a class="email-row" href="{{ url_for('main.email', id=email.id, next=request.path) }}">
-              <div class="row g-0 align-items-center">
+            <div class="email-row {% if not email.is_read %}unread{% endif %} position-relative">
+              <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=request.path) }}"></a>
+
+              <div class="row g-0 align-items-center flex-grow-1">
                 <div class="col-6 wrap-ellipsis pe-2">
-                  {{ email.title }}
+                  <span class="mail-title">{{ email.title }}</span>
                   {% if email.priority %}
                     <span class="priority">{{ "★" * email.priority }}</span>
                   {% endif %}
@@ -89,11 +91,62 @@
                   {{ email.date|fmt_dt }}
                 </div>
               </div>
-            </a>
+
+              <div class="row-actions">
+                <!-- Delete -->
+                <form method="post" action="{{ url_for('main.delete_email', id=email.id) }}" class="m-0">
+                  <input type="hidden" name="next" value="{{ request.path }}">
+                  <button type="submit" class="row-action-btn" title="Delete" aria-label="Delete">
+                    <i class="bi bi-trash"></i>
+                  </button>
+                </form>
+
+                <!-- Move (smart: only show other categories) -->
+                <div class="dropdown">
+                  <button class="row-action-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false"
+                          title="Move" aria-label="Move">
+                    <i class="bi bi-folder-symlink"></i>
+                  </button>
+
+                  <ul class="dropdown-menu dropdown-menu-end">
+                    {% set current_type = email.type %}
+                    {% for t, label in [
+                      ('response-needed', 'Response needed'),
+                      ('read-only', 'Read only'),
+                      ('junk', 'Junk')
+                    ] %}
+                      {% if t != current_type %}
+                        <li>
+                          <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
+                            <input type="hidden" name="new_type" value="{{ t }}">
+                            <input type="hidden" name="next" value="{{ request.path }}">
+                            <button class="dropdown-item" type="submit">Move to {{ label }}</button>
+                          </form>
+                        </li>
+                      {% endif %}
+                    {% endfor %}
+                  </ul>
+                </div>
+
+                <!-- Mark read/unread -->
+                <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
+                  <input type="hidden" name="next" value="{{ request.path }}">
+                  <button type="submit" class="row-action-btn"
+                          title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
+                          aria-label="Toggle read">
+                    {% if email.is_read %}
+                      <i class="bi bi-envelope"></i>
+                    {% else %}
+                      <i class="bi bi-envelope-open"></i>
+                    {% endif %}
+                  </button>
+                </form>
+              </div>
+            </div>
           {% endfor %}
         {% else %}
           <div class="email-row empty-row">
-            <div class="muted">No junk mail to display.</div>
+            <div class="muted">Your Response Needed tab is empty.</div>
           </div>
         {% endif %}
       </div>

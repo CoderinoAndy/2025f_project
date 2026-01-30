@@ -13,6 +13,8 @@ EMAILS = [
         "body": "Can you send your draft by Friday?",
         "summary": "Teacher asking for draft by Friday.",
         "draft": "Hi, thanks for the reminder! I will send it by Friday.",
+        "is_read": False,
+
     },
     {
         "id": 2,
@@ -24,6 +26,7 @@ EMAILS = [
         "body": "This is an informational newsletter.",
         "summary": None,
         "draft": None,
+        "is_read": False,
     },
 ]
 
@@ -67,6 +70,7 @@ def junk():
 
 @main.route("/email/<int:id>")
 def email(id):
+    email_data["is_read"] = True
     email_data = get_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -106,8 +110,9 @@ def set_email_type(id):
     # Return the user back to wherever they were.
     next_url = request.form.get("next") or request.args.get("next")
     if next_url and next_url.startswith("/"):
-        return redirect(url_for("main.email", id=id, next=next_url))
-    return redirect(url_for("main.email", id=id))
+        return redirect(next_url)
+    return redirect(url_for("main.allemails"))
+
 
 @main.route("/search")
 def search():
@@ -155,4 +160,23 @@ def generate_draft(id):
         return redirect(url_for("main.email", id=id, next=next_url))
     return redirect(url_for("main.email", id=id))
 
+@main.route("/email/<int:id>/delete", methods=["POST"])
+def delete_email(id):
+    global EMAILS
+    next_url = request.form.get("next") or request.args.get("next")
+    EMAILS = [e for e in EMAILS if e["id"] != id]
+    if next_url and next_url.startswith("/"):
+        return redirect(next_url)
+    return redirect(url_for("main.allemails"))
+
+@main.route("/email/<int:id>/toggle-read", methods=["POST"])
+def toggle_read(id):
+    email_data = get_email_by_id(id)
+    if email_data is None:
+        abort(404)
+    email_data["is_read"] = not bool(email_data.get("is_read"))
+    next_url = request.form.get("next") or request.args.get("next")
+    if next_url and next_url.startswith("/"):
+        return redirect(next_url)
+    return redirect(url_for("main.allemails"))
 

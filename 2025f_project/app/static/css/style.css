@@ -67,48 +67,92 @@ body{
   border-color: var(--accent-2) !important;
 }
 
-/* Shared list container (header + rows + empty state) */
+/* Utilities used across templates */
+.muted{ color: var(--muted) !important; }
+.wrap-ellipsis{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.priority{ margin-left: 8px; letter-spacing: 1px; }
+.empty-state{
+  padding: 18px 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* Full-width Gmail-like list frame */
 .list-shell{
-background: rgba(255,255,255,0.03);
-border: 1px solid rgba(255,255,255,0.10);
-border-radius: 14px;
-padding: 10px;
-margin-top: 14px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;           /* makes rows look like one clean list */
+  margin-top: 12px;
 }
 
-
-/* Header row inside the shell */
+/* Header row (optional, but cleaner + flatter) */
 .tablehead{
-background: rgba(255,255,255,0.02);
-border-radius: 10px;
-padding: 6px 12px;
-margin-top: 0; /* shell already handles spacing */
-border: 1px solid rgba(255,255,255,0.06);
+  background: transparent !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--border) !important;
+  border-radius: 0 !important;
+  padding: 10px 14px;
 }
-
-
-/* Header labels: smaller + table-like */
 .headlabel{
-font-weight: 600;
-font-size: 0.88rem;
-opacity: 0.95;
-text-decoration: underline;
+  font-weight: 600;
+  font-size: 0.86rem;
+  opacity: 0.9;
+  text-decoration: none;      /* remove “playful underline” look */
 }
 
-
-/* Email rows stronger than header */
+/* Gmail-like rows: flat bars, separators, hover highlight */
 .email-row{
-display: block;
-background: rgba(255,255,255,0.05);
-border-radius: 10px;
-padding: 12px 16px;
-margin-top: 10px;
-color: var(--text);
-text-decoration: none;
-}
-.email-row:hover{ background: rgba(255,255,255,0.08); }
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 
+  padding: 10px 14px;
+  margin: 0;
+  border: 0 !important;
+  border-bottom: 1px solid var(--border) !important;
+  border-radius: 0 !important;
 
-.empty-row{
-background: rgba(255,255,255,0.03);
+  background: transparent !important;
+  color: var(--text) !important;
 }
+.email-row:hover{
+  background: rgba(255,255,255,0.04) !important;
+}
+
+/* Unread = bold (Gmail behavior) */
+.email-row.unread .mail-title{
+  font-weight: 700;
+}
+
+/* Make the whole row clickable using stretched-link */
+.email-row .stretched-link::after{ z-index: 1; }
+.row-actions{
+  margin-left: auto;
+  display: flex;
+  gap: 10px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.email-row:hover .row-actions,
+.email-row:focus-within .row-actions{
+  opacity: 1;
+}
+
+/* Action buttons */
+.row-action-btn{
+  position: relative;
+  z-index: 2;                 /* must be above stretched-link */
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+.row-action-btn:hover{
+  color: var(--text);
+  background: rgba(255,255,255,0.06);
+}
+
+/* Dropdown should sit above the stretched-link too */
+.dropdown-menu{ z-index: 2000; }

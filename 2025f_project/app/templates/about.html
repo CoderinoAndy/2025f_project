@@ -55,7 +55,7 @@
   <body>
     <div class="topbar d-flex align-items-center justify-content-between">
       <div class="d-flex align-items-center gap-3">
-        <div class="brand">Email Dashboard</div>
+        <div class="brand">Proton</div>
         <a class="navlink" href="{{ url_for('main.allemails') }}">All Emails</a>
         <a class="navlink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
         <a class="navlink" href="{{ url_for('main.readonly') }}">Read only</a>
@@ -71,8 +71,9 @@
       <div class="panel">
         <h3 class="mb-2">About</h3>
         <p class="muted mb-3">
-          This dashboard organizes emails into four views (All Emails, Response needed, Read only, Junk Confirmation),
-          and lets you expand an email to view full contents, generate summaries, draft replies, revise, send, and move messages to junk.
+          The Proton web application organizes emails into four views (All Emails, Response needed, Read only, Junk, Junk Confirmation),
+          and lets you view the full contents and summaries of emails, with the ability to draft replies, and send them, all locally.
+          This web application was developed by Andy Yu for the International Baccalureate program as an individual assessment.
         </p>
 
         <hr style="border-color:#3a3a3a" />
@@ -87,8 +88,7 @@
         </ul>
 
         <div class="d-flex gap-2 mt-3">
-          <a class="btn btn-light" href="{{ url_for('main.allemails') }}">Go to All Emails</a>
-          <a class="btn btn-ghost" href="{{ url_for('main.responseneeded') }}">Go to Response needed</a>
+          <a class="btn btn-light" href="{{ url_for('main.allemails') }}">Get started!</a>
         </div>
       </div>
     </div>

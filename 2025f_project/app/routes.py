@@ -70,11 +70,10 @@ def junk():
 
 @main.route("/email/<int:id>")
 def email(id):
-    email_data["is_read"] = True
     email_data = get_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
-
+    email_data["is_read"] = True
     next_url = request.args.get("next")
 
     # Safety + sanity: only allow local paths

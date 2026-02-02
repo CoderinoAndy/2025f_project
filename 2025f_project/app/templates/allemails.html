@@ -77,6 +77,13 @@
         opacity: 0.9;
       }
       .search-link:hover{ opacity: 1; text-decoration: underline; }
+      
+      .brand{
+        color: var(--text);
+        text-decoration: none;
+        margin-right: 16px;
+        opacity: 0.9;
+      }
     </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
@@ -100,16 +107,10 @@
     <div class="container-fluid py-3 px-4">
       <h2 class="mb-2">All Emails</h2>
       <div class="list-shell">
-        <div class="tablehead">
-          <div class="row g-0">
-            <div class="col-6 headlabel">Email title</div>
-            <div class="col-3 headlabel text-center">Type</div>
-          </div>
-        </div>
 
         {% if emails and emails|length > 0 %}
           {% for email in emails %}
-            <div class="email-row {% if not email.is_read %}unread{% endif %} position-relative">
+            <div class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative">
               <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=request.path) }}"></a>
 
               <div class="row g-0 align-items-center flex-grow-1">

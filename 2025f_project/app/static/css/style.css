@@ -81,7 +81,7 @@ body{
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 12px;
-  overflow: hidden;           /* makes rows look like one clean list */
+  overflow: visible;
   margin-top: 12px;
 }
 
@@ -107,7 +107,7 @@ body{
   align-items: center;
   gap: 12px;
 
-  padding: 10px 14px;
+  padding: 6px 12px;
   margin: 0;
   border: 0 !important;
   border-bottom: 1px solid var(--border) !important;
@@ -115,8 +115,19 @@ body{
 
   background: transparent !important;
   color: var(--text) !important;
+
+  font-size: 0.92rem;
+  line-height: 1.2;
+
 }
 .email-row:hover{
+  background: rgba(255,255,255,0.04) !important;
+}
+
+.email-row.alt{
+  background: rgba(255,255,255,0.015) !important;
+}
+.email-row.alt:hover{
   background: rgba(255,255,255,0.04) !important;
 }
 
@@ -155,4 +166,14 @@ body{
 }
 
 /* Dropdown should sit above the stretched-link too */
-.dropdown-menu{ z-index: 2000; }
+
+.email-row{ z-index: 0; }
+
+.email-row:hover,
+.email-row:focus-within{
+  z-index: 5;
+}
+
+.row-actions{ position: relative; z-index: 10; }
+.dropdown-menu{ z-index: 3000 !important; }
+

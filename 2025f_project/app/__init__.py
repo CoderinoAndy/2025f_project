@@ -2,6 +2,7 @@ from flask import Flask
 from datetime import datetime
 def create_app():
     app = Flask(__name__, instance_relative_config=True)
+    
     @app.template_filter("fmt_dt")
 
     def fmt_dt(value):

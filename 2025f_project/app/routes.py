@@ -1,4 +1,5 @@
 from flask import Blueprint, render_template, request, redirect, url_for, abort
+from datetime import datetime
 
 main = Blueprint("main", __name__)
 
@@ -30,6 +31,70 @@ EMAILS = [
     },
 ]
 
+VALID_SORTS = {
+    "date_desc",
+    "date_asc",
+    "priority_desc",
+    "priority_asc",
+    "unread_first",
+    "read_first",
+}
+
+def _parse_dt(value):
+    """Parse your existing date strings safely."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
+    return None
+
+def _dt_sort_value(dt):
+    """
+    Turn datetime into a comparable number without using timestamp()
+    (timestamp can be annoying for very old dates on some systems).
+    """
+    if dt is None:
+        return -1
+    return dt.toordinal() * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+
+def sort_emails(emails, sort_code):
+    sort_code = sort_code if sort_code in VALID_SORTS else "date_desc"
+
+    def dt_val(e):
+        return _dt_sort_value(_parse_dt(e.get("date")))
+
+    def pr_val(e):
+        return int(e.get("priority") or 0)
+
+    # Default: newest first
+    if sort_code == "date_desc":
+        return sorted(emails, key=dt_val, reverse=True)
+
+    if sort_code == "date_asc":
+        return sorted(emails, key=dt_val)
+
+    # Priority: bigger number = more stars = more urgent
+    if sort_code == "priority_desc":
+        return sorted(emails, key=lambda e: (pr_val(e), dt_val(e)), reverse=True)
+
+    if sort_code == "priority_asc":
+        # low priority first, but keep newest first inside each priority group
+        return sorted(emails, key=lambda e: (pr_val(e), -dt_val(e)))
+
+    # Unread/read grouping, then newest first inside the group
+    if sort_code == "unread_first":
+        return sorted(emails, key=lambda e: (bool(e.get("is_read")), -dt_val(e)))
+
+    if sort_code == "read_first":
+        return sorted(emails, key=lambda e: (not bool(e.get("is_read")), -dt_val(e)))
+
+    return sorted(emails, key=dt_val, reverse=True)
+
+
 def get_email_by_id(email_id: int):
     for e in EMAILS:
         if e["id"] == email_id:
@@ -46,27 +111,67 @@ def about():
 
 @main.route("/allemails")
 def allemails():
-    return render_template("allemails.html", emails=EMAILS)
+    sort_code = request.args.get("sort", "date_desc")
+    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
+    emails_sorted = sort_emails(EMAILS, sort_code)
+    return render_template(
+        "allemails.html",
+        emails=emails_sorted,
+        sort=sort_code,
+        current_list_url=current_list_url,
+    )
 
 @main.route("/readonly")
 def readonly():
+    sort_code = request.args.get("sort", "date_desc")
+    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
     filtered = [e for e in EMAILS if e["type"] == "read-only"]
-    return render_template("readonly.html", emails=filtered)
+    filtered_sorted = sort_emails(filtered, sort_code)
+    return render_template(
+        "readonly.html",
+        emails=filtered_sorted,
+        sort=sort_code,
+        current_list_url=current_list_url,
+    )
 
 @main.route("/responseneeded")
 def responseneeded():
+    sort_code = request.args.get("sort", "date_desc")
+    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
     filtered = [e for e in EMAILS if e["type"] == "response-needed"]
-    return render_template("responseneeded.html", emails=filtered)
+    filtered_sorted = sort_emails(filtered, sort_code)
+    return render_template(
+        "responseneeded.html",
+        emails=filtered_sorted,
+        sort=sort_code,
+        current_list_url=current_list_url,
+    )
 
 @main.route("/junkmailconfirm")
 def junkmailconfirm():
+    sort_code = request.args.get("sort", "date_desc")
+    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
     filtered = [e for e in EMAILS if e["type"] == "junk-uncertain"]
-    return render_template("junkmailconfirm.html", emails=filtered)
+    filtered_sorted = sort_emails(filtered, sort_code)
+    return render_template(
+        "junkmailconfirm.html",
+        emails=filtered_sorted,
+        sort=sort_code,
+        current_list_url=current_list_url,
+    )
 
 @main.route("/junk")
 def junk():
+    sort_code = request.args.get("sort", "date_desc")
+    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
     filtered = [e for e in EMAILS if e["type"] == "junk"]
-    return render_template("junk.html", emails=filtered)
+    filtered_sorted = sort_emails(filtered, sort_code)
+    return render_template(
+        "junk.html",
+        emails=filtered_sorted,
+        sort=sort_code,
+        current_list_url=current_list_url,
+    )
 
 @main.route("/email/<int:id>")
 def email(id):

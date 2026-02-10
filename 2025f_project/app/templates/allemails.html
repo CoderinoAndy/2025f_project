@@ -99,11 +99,26 @@
         <a class="tablink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
       </div>
       <div class="d-flex align-items-center gap-2">
+        <form method="get" class="m-0">
+          <select name="sort" class="form-select form-select-sm sort-select" aria-label="Sort emails">
+            <option value="date_desc" {% if sort == "date_desc" %}selected{% endif %}>Date sent (newest first)</option>
+            <option value="date_asc" {% if sort == "date_asc" %}selected{% endif %}>Date sent (oldest first)</option>
+
+            <option value="priority_desc" {% if sort == "priority_desc" %}selected{% endif %}>Priority (high → low)</option>
+            <option value="priority_asc" {% if sort == "priority_asc" %}selected{% endif %}>Priority (low → high)</option>
+
+            <option value="unread_first" {% if sort == "unread_first" %}selected{% endif %}>Unread first</option>
+            <option value="read_first" {% if sort == "read_first" %}selected{% endif %}>Read first</option>
+          </select>
+
+          <!-- No-JS version: user selects, then clicks Apply -->
+          <button class="btn btn-sm btn-primary ms-2" type="submit">Apply</button>
+        </form>
+
         <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
         <i class="bi bi-search" aria-hidden="true"></i>
       </div>
     </div>
-
     <div class="container-fluid py-3 px-4">
       <h2 class="mb-2">All Emails</h2>
       <div class="list-shell">
@@ -111,7 +126,7 @@
         {% if emails and emails|length > 0 %}
           {% for email in emails %}
             <div class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative">
-              <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=request.path) }}"></a>
+              <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=current_list_url) }}"></a>
 
               <div class="row g-0 align-items-center flex-grow-1">
                 <div class="col-6 wrap-ellipsis pe-2">
@@ -133,7 +148,7 @@
               <div class="row-actions">
                 <!-- Delete -->
                 <form method="post" action="{{ url_for('main.delete_email', id=email.id) }}" class="m-0">
-                  <input type="hidden" name="next" value="{{ request.path }}">
+                  <input type="hidden" name="next" value="{{ current_list_url }}">
                   <button type="submit" class="row-action-btn" title="Delete" aria-label="Delete">
                     <i class="bi bi-trash"></i>
                   </button>
@@ -157,7 +172,7 @@
                         <li>
                           <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
                             <input type="hidden" name="new_type" value="{{ t }}">
-                            <input type="hidden" name="next" value="{{ request.path }}">
+                            <input type="hidden" name="next" value="{{ current_list_url }}">
                             <button class="dropdown-item" type="submit">Move to {{ label }}</button>
                           </form>
                         </li>
@@ -168,7 +183,7 @@
 
                 <!-- Mark read/unread -->
                 <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
-                  <input type="hidden" name="next" value="{{ request.path }}">
+                  <input type="hidden" name="next" value="{{ current_list_url }}">
                   <button type="submit" class="row-action-btn"
                           title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
                           aria-label="Toggle read">

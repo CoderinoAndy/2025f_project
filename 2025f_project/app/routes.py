@@ -1,35 +1,16 @@
 from flask import Blueprint, render_template, request, redirect, url_for, abort
 from datetime import datetime
+from .db import (
+    fetch_emails,
+    fetch_email_by_id,
+    set_email_type as db_set_email_type,
+    toggle_read_state,
+    delete_email as db_delete_email,
+    mark_read,
+    update_draft,
+)
 
 main = Blueprint("main", __name__)
-
-EMAILS = [
-    {
-        "id": 1,
-        "title": "Meeting follow-up",
-        "sender": "teacher@school.org",
-        "date": "2026-01-10 22:58",
-        "type": "response-needed",
-        "priority": 3,
-        "body": "Can you send your draft by Friday?",
-        "summary": "Teacher asking for draft by Friday.",
-        "draft": "Hi, thanks for the reminder! I will send it by Friday.",
-        "is_read": False,
-
-    },
-    {
-        "id": 2,
-        "title": "Newsletter",
-        "sender": "news@service.com",
-        "date": "2026-01-09 14:12",
-        "type": "read-only",
-        "priority": 1,
-        "body": "This is an informational newsletter.",
-        "summary": None,
-        "draft": None,
-        "is_read": False,
-    },
-]
 
 VALID_SORTS = {
     "date_desc",
@@ -95,12 +76,6 @@ def sort_emails(emails, sort_code):
     return sorted(emails, key=dt_val, reverse=True)
 
 
-def get_email_by_id(email_id: int):
-    for e in EMAILS:
-        if e["id"] == email_id:
-            return e
-    return None
-
 @main.route("/")
 def index():
     return redirect(url_for("main.about"))
@@ -113,7 +88,8 @@ def about():
 def allemails():
     sort_code = request.args.get("sort", "date_desc")
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails_sorted = sort_emails(EMAILS, sort_code)
+    emails = fetch_emails()
+    emails_sorted = sort_emails(emails, sort_code)
     return render_template(
         "allemails.html",
         emails=emails_sorted,
@@ -125,8 +101,7 @@ def allemails():
 def readonly():
     sort_code = request.args.get("sort", "date_desc")
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered = [e for e in EMAILS if e["type"] == "read-only"]
-    filtered_sorted = sort_emails(filtered, sort_code)
+    filtered_sorted = sort_emails(fetch_emails(email_type="read-only"), sort_code)
     return render_template(
         "readonly.html",
         emails=filtered_sorted,
@@ -138,8 +113,7 @@ def readonly():
 def responseneeded():
     sort_code = request.args.get("sort", "date_desc")
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered = [e for e in EMAILS if e["type"] == "response-needed"]
-    filtered_sorted = sort_emails(filtered, sort_code)
+    filtered_sorted = sort_emails(fetch_emails(email_type="response-needed"), sort_code)
     return render_template(
         "responseneeded.html",
         emails=filtered_sorted,
@@ -151,8 +125,7 @@ def responseneeded():
 def junkmailconfirm():
     sort_code = request.args.get("sort", "date_desc")
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered = [e for e in EMAILS if e["type"] == "junk-uncertain"]
-    filtered_sorted = sort_emails(filtered, sort_code)
+    filtered_sorted = sort_emails(fetch_emails(email_type="junk-uncertain"), sort_code)
     return render_template(
         "junkmailconfirm.html",
         emails=filtered_sorted,
@@ -164,8 +137,7 @@ def junkmailconfirm():
 def junk():
     sort_code = request.args.get("sort", "date_desc")
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered = [e for e in EMAILS if e["type"] == "junk"]
-    filtered_sorted = sort_emails(filtered, sort_code)
+    filtered_sorted = sort_emails(fetch_emails(email_type="junk"), sort_code)
     return render_template(
         "junk.html",
         emails=filtered_sorted,
@@ -175,9 +147,10 @@ def junk():
 
 @main.route("/email/<int:id>")
 def email(id):
-    email_data = get_email_by_id(id)
+    email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
+    mark_read(id, True)
     email_data["is_read"] = True
     next_url = request.args.get("next")
 
@@ -204,12 +177,12 @@ def set_email_type(id):
     if new_type not in allowed:
         abort(400)
 
-    email_data = get_email_by_id(id)
+    email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
 
     if email_data.get("type") != new_type:
-        email_data["type"] = new_type
+        db_set_email_type(id, new_type)
 
     # Return the user back to wherever they were.
     next_url = request.form.get("next") or request.args.get("next")
@@ -225,8 +198,8 @@ def search():
         return render_template("search.html", query="", emails=None)
 
     results = []
-    for e in EMAILS:
-        haystack = f"{e['title']} {e['sender']} {e['body']}".lower()
+    for e in fetch_emails():
+        haystack = f"{e['title']} {e['sender']} {e.get('body','')}".lower()
         if q in haystack:
             results.append(e)
 
@@ -245,7 +218,7 @@ def revise_draft(id):
 
 @main.route("/generate_draft/<int:id>", methods=["POST"])
 def generate_draft(id):
-    email_data = get_email_by_id(id)
+    email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
 
@@ -258,7 +231,7 @@ def generate_draft(id):
         f"Best regards,"
     )
 
-    email_data["draft"] = draft
+    update_draft(id, draft)
     next_url = request.form.get("next") or request.args.get("next")
     if next_url and next_url.startswith("/"):
         return redirect(url_for("main.email", id=id, next=next_url))
@@ -266,19 +239,18 @@ def generate_draft(id):
 
 @main.route("/email/<int:id>/delete", methods=["POST"])
 def delete_email(id):
-    global EMAILS
     next_url = request.form.get("next") or request.args.get("next")
-    EMAILS = [e for e in EMAILS if e["id"] != id]
+    db_delete_email(id)
     if next_url and next_url.startswith("/"):
         return redirect(next_url)
     return redirect(url_for("main.allemails"))
 
 @main.route("/email/<int:id>/toggle-read", methods=["POST"])
 def toggle_read(id):
-    email_data = get_email_by_id(id)
+    email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
-    email_data["is_read"] = not bool(email_data.get("is_read"))
+    toggle_read_state(id)
     next_url = request.form.get("next") or request.args.get("next")
     if next_url and next_url.startswith("/"):
         return redirect(next_url)

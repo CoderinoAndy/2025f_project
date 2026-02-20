@@ -1,6 +1,7 @@
 :root{
   --bg: #15121a;
   --bar: #0f0d13;
+
   --panel: #221e2b;
   --panel-2: #2b2636;
 
@@ -13,7 +14,8 @@
   --accent: #7c3aed;
   --accent-2: #a78bfa;
 
-  --border: #3a3348;
+  --border: rgba(236, 233, 245, 0.24);
+  --list-border: rgba(189, 181, 212, 0.22);
 }
 
 body{
@@ -23,7 +25,24 @@ body{
 
 .topnav, .topbar, .headerbar{
   background: var(--bar) !important;
-  border-bottom: 1px solid var(--border) !important;
+}
+
+.brand-link{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 500px
+}
+
+.brand-link:hover{
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.brand-logo{
+  width: 34px;
+  height: 34px;
+  display: block;
 }
 
 .tablink, .navlink{
@@ -73,13 +92,13 @@ body{
 .priority{ margin-left: 8px; letter-spacing: 1px; }
 .empty-state{
   padding: 18px 14px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--list-border);
 }
 
 /* Full-width Gmail-like list frame */
 .list-shell{
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--list-border);
   border-radius: 12px;
   overflow: visible;
   margin-top: 12px;
@@ -89,7 +108,7 @@ body{
 .tablehead{
   background: transparent !important;
   border: 0 !important;
-  border-bottom: 1px solid var(--border) !important;
+  border-bottom: 1px solid var(--list-border) !important;
   border-radius: 0 !important;
   padding: 10px 14px;
 }
@@ -110,7 +129,7 @@ body{
   padding: 6px 12px;
   margin: 0;
   border: 0 !important;
-  border-bottom: 1px solid var(--border) !important;
+  border-bottom: 1px solid var(--list-border) !important;
   border-radius: 0 !important;
 
   background: transparent !important;

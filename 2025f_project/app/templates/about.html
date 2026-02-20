@@ -10,60 +10,162 @@
       href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
       rel="stylesheet"
     />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    />
 
     <style>
       :root{
-        --bg: #1f1f1f;
-        --panel: #2a2a2a;
-        --panel-2: #3a3a3a;
-        --card: #4a4a4a;
-        --text: #e8e8e8;
-        --muted: #bdbdbd;
-        --accent: #ffffff;
+        --text: #edf4f0;
+        --muted: #d2dfd8;
+        --card-border: rgba(224, 240, 232, 0.62);
+        --card-bg: rgba(7, 14, 16, 0.34);
+        --shadow: rgba(0, 0, 0, 0.46);
       }
-      body { background: var(--bg); color: var(--text); }
+
+      body.about-page{
+        margin: 0;
+        color: var(--text) !important;
+        /* Override shared body background in style.css and keep a real forest photo visible */
+        background:
+          linear-gradient(115deg, rgba(6, 11, 13, 0.26), rgba(8, 14, 17, 0.52)),
+          url("{{ url_for('static', filename='img/forest-bg.jpg') }}")
+          center/cover no-repeat fixed !important;
+      }
+
+      body.about-page::before{
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(circle at 18% 18%, rgba(230, 243, 237, 0.12), transparent 44%),
+          radial-gradient(circle at 84% 76%, rgba(120, 179, 149, 0.1), transparent 42%);
+      }
+
       .topbar{
         background: #121212;
         padding: 14px 18px;
         border-bottom: 1px solid #2b2b2b;
       }
-      .brand { font-weight: 600; letter-spacing: 0.2px; }
-      .panel{
-        background: var(--panel);
-        border: 1px solid #333;
-        border-radius: 12px;
-        padding: 18px;
-      }
-      .muted { color: var(--muted); }
+
       .navlink{
         color: var(--text);
         text-decoration: none;
         margin-right: 16px;
         opacity: 0.9;
       }
-      .navlink:hover{ opacity: 1; text-decoration: underline; }
-      .btn-ghost{
-        background: transparent;
-        border: 1px solid #444;
-        color: var(--text);
-      }
-      .btn-ghost:hover{ border-color: #666; }
 
-      .brand{
+      .navlink:hover{
+        opacity: 1;
+        text-decoration: underline;
+      }
+
+      .search-link{
         color: var(--text);
         text-decoration: none;
-        margin-right: 16px;
         opacity: 0.9;
       }
-      
+
+      .search-link:hover{
+        opacity: 1;
+        text-decoration: underline;
+      }
+
+      .about-shell{
+        min-height: calc(100vh - 68px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: clamp(1.2rem, 3vw, 3rem) 0;
+      }
+
+      .about-card{
+        position: relative;
+        overflow: hidden;
+        width: min(940px, 96%);
+        border-radius: 22px;
+        border: 1.5px solid var(--card-border);
+        background:
+          linear-gradient(130deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.01) 45%),
+          var(--card-bg);
+        padding: clamp(1.35rem, 2.8vw, 2.8rem);
+        backdrop-filter: blur(18px) saturate(155%);
+        -webkit-backdrop-filter: blur(18px) saturate(155%);
+        box-shadow:
+          0 24px 56px var(--shadow),
+          inset 0 1px 0 rgba(255, 255, 255, 0.34),
+          inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+      }
+
+      .about-card::before{
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        border-radius: inherit;
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 48%);
+      }
+
+      .about-card > *{
+        position: relative;
+        z-index: 1;
+      }
+
+      .about-title{
+        margin-bottom: 0.7rem;
+        font-size: clamp(2rem, 4vw, 2.9rem);
+        letter-spacing: 0.03em;
+        font-weight: 600;
+      }
+
+      .about-text{
+        color: var(--muted);
+        font-size: 1.02rem;
+      }
+
+      .about-divider{
+        margin: 1.3rem 0;
+        border-color: rgba(218, 240, 229, 0.32);
+      }
+
+      .about-list{
+        color: var(--muted);
+        margin-bottom: 0;
+      }
+
+      .about-list li{
+        margin-bottom: 0.42rem;
+      }
+
+      .btn-start{
+        border: 1px solid rgba(255, 255, 255, 0.95);
+        background: rgba(255, 255, 255, 0.88);
+        color: #102f20;
+        font-weight: 600;
+        padding: 0.48rem 1.05rem;
+      }
+
+      .btn-start:hover{
+        background: #ffffff;
+        color: #0b2116;
+      }
+
+      @media (max-width: 768px){
+        .about-card{
+          border-radius: 16px;
+        }
+      }
     </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
-
-  <body>
+  <body class="about-page">
     <div class="topbar d-flex align-items-center justify-content-between">
       <div class="d-flex align-items-center gap-3">
-        <div class="brand">Proton</div>
+        <a class="brand-link" href="{{ url_for('main.about') }}" aria-label="About">
+          <img class="brand-logo" src="{{ url_for('static', filename='img/atom-logo-violet.svg') }}" alt="App logo">
+        </a>
         <a class="navlink" href="{{ url_for('main.allemails') }}">All Emails</a>
         <a class="navlink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
         <a class="navlink" href="{{ url_for('main.readonly') }}">Read only</a>
@@ -71,34 +173,35 @@
         <a class="navlink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
       </div>
       <div class="d-flex align-items-center gap-2">
-        <a class="btn btn-ghost btn-sm" href="{{ url_for('main.search') }}">Search</a>
+        <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
+        <i class="bi bi-search" aria-hidden="true"></i>
       </div>
     </div>
 
-    <div class="container py-4">
-      <div class="panel">
-        <h3 class="mb-2">About</h3>
-        <p class="muted mb-3">
+    <div class="container about-shell">
+      <section class="about-card">
+        <h1 class="about-title">About</h1>
+        <p class="about-text mb-3">
           The Proton web application organizes emails into four views (All Emails, Response needed, Read only, Junk, Junk Confirmation),
-          and lets you view the full contents and summaries of emails, with the ability to draft replies, and send them, all locally.
-          This web application was developed by Andy Yu for the International Baccalureate program as an individual assessment.
+          and lets you view the full contents and summaries of emails, with the ability to draft replies and send them, all locally.
+          This web application was developed by Andy Yu for the International Baccalaureate program as an individual assessment.
         </p>
 
-        <hr style="border-color:#3a3a3a" />
+        <hr class="about-divider" />
 
         <h5 class="mt-3">How to use</h5>
-        <ul class="muted">
+        <ul class="about-list">
           <li><strong>All Emails</strong>: shows everything by recency, with type and priority (stars).</li>
           <li><strong>Response needed</strong>: emails that require a reply.</li>
-          <li><strong>Read only</strong>: informational emails that don’t require a reply.</li>
+          <li><strong>Read only</strong>: informational emails that do not require a reply.</li>
           <li><strong>Junk Confirmation</strong>: uncertain junk mail that needs user confirmation.</li>
           <li>Click any email row to open the <strong>expanded email view</strong>.</li>
         </ul>
 
-        <div class="d-flex gap-2 mt-3">
-          <a class="btn btn-light" href="{{ url_for('main.allemails') }}">Get started!</a>
+        <div class="d-flex gap-2 mt-4">
+          <a class="btn btn-start" href="{{ url_for('main.allemails') }}">Get started!</a>
         </div>
-      </div>
+      </section>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

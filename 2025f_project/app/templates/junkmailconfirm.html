@@ -64,7 +64,9 @@
   <body>
     <div class="topnav d-flex align-items-center justify-content-between">
       <div class="d-flex align-items-center flex-wrap">
-        <div class="brand">Proton</div>
+        <a class="brand-link" href="{{ url_for('main.about') }}" aria-label="About">
+          <img class="brand-logo" src="{{ url_for('static', filename='img/atom-logo-violet.svg') }}" alt="App logo">
+        </a>
         <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
         <a class="tablink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
         <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>

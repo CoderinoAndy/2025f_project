@@ -22,6 +22,7 @@
         --panel-2: #3b3b3b;
         --text: #e8e8e8;
         --muted: #bdbdbd;
+        --border: #4a4a4a;
       }
       body{ background: var(--bg); color: var(--text); }
 
@@ -123,24 +124,63 @@
         margin-bottom: 10px;
       }
 
-      .reply-panel textarea.form-control{
+      .reply-panel .form-control{
         background: rgba(255,255,255,0.05) !important;
         color: var(--text) !important;
         border: 1px solid var(--border) !important;
         border-radius: 10px;
         padding: 12px 14px;
         line-height: 1.35;
+      }
+
+      .reply-panel textarea.form-control{
         resize: vertical;
       }
 
-      .reply-panel textarea.form-control::placeholder{
+      .reply-panel .form-control::placeholder{
         color: var(--muted);
         opacity: 0.8;
       }
 
-      .reply-panel textarea.form-control:focus{
+      .reply-panel .form-control:focus{
         border-color: rgba(167, 139, 250, 0.55) !important;
         box-shadow: 0 0 0 0.15rem rgba(124, 58, 237, 0.22) !important;
+      }
+
+      .reply-field-label{
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin-bottom: 4px;
+      }
+
+      .thread-list{
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .thread-item{
+        display: block;
+        text-decoration: none;
+        color: var(--text);
+        border: 1px solid #4a4a4a;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .thread-item:hover{
+        border-color: #666;
+      }
+
+      .thread-item.active{
+        border-color: #7c3aed;
+        background: rgba(124, 58, 237, 0.12);
+      }
+
+      .thread-meta{
+        color: var(--muted);
+        font-size: 0.9rem;
       }
 
       .actions{
@@ -181,20 +221,41 @@
         <!-- Left column: Message + Reply -->
         <div class="col-12 col-md-8">
         <div class="meta-wrap mb-3">
-          <div class="row align-items-start">
-            <div class="col-12 col-md-4">
+          <div class="row align-items-start g-3">
+            <div class="col-12 col-md-6">
               <div class="meta-title">Author</div>
               <div class="meta-sub">From {{ email.sender }}</div>
             </div>
 
-            <div class="col-12 col-md-4 mt-3 mt-md-0">
+            <div class="col-12 col-md-6">
               <div class="meta-title">Date Sent</div>
               <div class="meta-sub">{{ email.date|fmt_dt }}</div>
             </div>
 
-            <div class="col-12 col-md-4 mt-3 mt-md-0">
+            <div class="col-12 col-md-6">
               <div class="meta-title">Type</div>
               <div class="meta-sub">{{ email.type }}</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <div class="meta-title">To</div>
+              <div class="meta-sub">{{ email.recipients or email.sender }}</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <div class="meta-title">Cc</div>
+              <div class="meta-sub">{{ email.cc or "None" }}</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <div class="meta-title">Thread</div>
+              <div class="meta-sub">
+                {% if email.thread_id %}
+                  {{ email.thread_id }} ({{ thread_count }} message{% if thread_count != 1 %}s{% endif %})
+                {% else %}
+                  No thread id
+                {% endif %}
+              </div>
             </div>
           </div>
         </div>
@@ -246,6 +307,30 @@
 
             <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}">
               <input type="hidden" name="next" value="{{ next_url }}" />
+              <div class="mb-2">
+                <label class="reply-field-label" for="to-field">To</label>
+                <input
+                  id="to-field"
+                  class="form-control"
+                  name="to"
+                  type="text"
+                  value="{{ email.recipients if email.sender == current_user_email else email.sender }}"
+                  placeholder="recipient@example.com"
+                />
+              </div>
+
+              <div class="mb-2">
+                <label class="reply-field-label" for="cc-field">Cc</label>
+                <input
+                  id="cc-field"
+                  class="form-control"
+                  name="cc"
+                  type="text"
+                  value="{{ email.cc or '' }}"
+                  placeholder="optional"
+                />
+              </div>
+
               <textarea
                 class="form-control"
                 name="reply_text"
@@ -297,6 +382,29 @@
                 Email is short; summary not needed.
               {%- endif -%}
             </div>
+          </div>
+
+          <div class="panel-card mt-3">
+            <div class="panel-header">
+              <div class="panel-title">Thread</div>
+            </div>
+            {% if thread_count > 0 %}
+              <div class="thread-list">
+                {% for thread_email in thread_emails %}
+                  <a
+                    class="thread-item {% if thread_email.id == email.id %}active{% endif %}"
+                    href="{{ url_for('main.email', id=thread_email.id, next=next_url) }}"
+                  >
+                    <div>{{ thread_email.title }}</div>
+                    <div class="thread-meta">
+                      {{ thread_email.sender }} | {{ thread_email.date|fmt_dt }}
+                    </div>
+                  </a>
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="summary-text">No thread messages available.</div>
+            {% endif %}
           </div>
         </div>
       </div>

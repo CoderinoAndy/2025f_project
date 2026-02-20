@@ -1,16 +1,20 @@
 from flask import Blueprint, render_template, request, redirect, url_for, abort
 from datetime import datetime
+from urllib.parse import urlsplit, parse_qs
 from .db import (
     fetch_emails,
     fetch_email_by_id,
+    fetch_thread_emails,
     set_email_type as db_set_email_type,
     toggle_read_state,
     delete_email as db_delete_email,
     mark_read,
     update_draft,
+    create_reply_email,
 )
 
 main = Blueprint("main", __name__)
+LOCAL_USER_EMAIL = "you@example.com"
 
 VALID_SORTS = {
     "date_desc",
@@ -20,6 +24,56 @@ VALID_SORTS = {
     "unread_first",
     "read_first",
 }
+
+def _normalize_addresses(raw_value):
+    if raw_value is None:
+        return None
+    text = str(raw_value).replace(";", ",")
+    cleaned = [part.strip() for part in text.split(",") if part.strip()]
+    return ", ".join(cleaned) if cleaned else None
+
+def _collect_reply_fields(email_data):
+    to_value = _normalize_addresses(request.form.get("to"))
+    if not to_value:
+        sender = _normalize_addresses(email_data.get("sender"))
+        recipients = _normalize_addresses(email_data.get("recipients"))
+        if sender and sender.lower() == LOCAL_USER_EMAIL:
+            to_value = recipients or sender
+        else:
+            to_value = sender or recipients
+    cc_value = _normalize_addresses(request.form.get("cc"))
+    reply_text = (request.form.get("reply_text") or "").strip()
+    return to_value, cc_value, reply_text
+
+def _safe_next_url(raw_next):
+    """Return a local list-style URL and collapse nested /email/... next chains."""
+    fallback = url_for("main.allemails")
+    candidate = (raw_next or "").strip()
+    if not candidate:
+        return fallback
+
+    seen = set()
+    while candidate and candidate not in seen:
+        seen.add(candidate)
+        if not candidate.startswith("/"):
+            return fallback
+
+        parsed = urlsplit(candidate)
+        if parsed.scheme or parsed.netloc:
+            return fallback
+
+        path = parsed.path or "/"
+        query = parsed.query
+        if path.startswith("/email/"):
+            nested = parse_qs(query).get("next", [None])[0]
+            if nested:
+                candidate = nested
+                continue
+            return fallback
+
+        return f"{path}?{query}" if query else path
+
+    return fallback
 
 def _parse_dt(value):
     """Parse your existing date strings safely."""
@@ -152,13 +206,17 @@ def email(id):
         return "Email not found", 404
     mark_read(id, True)
     email_data["is_read"] = True
-    next_url = request.args.get("next")
+    thread_emails = fetch_thread_emails(email_data.get("thread_id"))
+    next_url = _safe_next_url(request.args.get("next"))
 
-    # Safety + sanity: only allow local paths
-    if not next_url or not next_url.startswith("/"):
-        next_url = url_for("main.allemails")
-
-    return render_template("email.html", email=email_data, next_url=next_url)
+    return render_template(
+        "email.html",
+        email=email_data,
+        next_url=next_url,
+        thread_emails=thread_emails,
+        thread_count=len(thread_emails),
+        current_user_email=LOCAL_USER_EMAIL,
+    )
 
 @main.route("/email/<int:id>/set-type", methods=["POST"])
 def set_email_type(id):
@@ -185,10 +243,8 @@ def set_email_type(id):
         db_set_email_type(id, new_type)
 
     # Return the user back to wherever they were.
-    next_url = request.form.get("next") or request.args.get("next")
-    if next_url and next_url.startswith("/"):
-        return redirect(next_url)
-    return redirect(url_for("main.allemails"))
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    return redirect(next_url)
 
 
 @main.route("/search")
@@ -199,7 +255,15 @@ def search():
 
     results = []
     for e in fetch_emails():
-        haystack = f"{e['title']} {e['sender']} {e.get('body','')}".lower()
+        haystack = " ".join(
+            [
+                e.get("title") or "",
+                e.get("sender") or "",
+                e.get("recipients") or "",
+                e.get("cc") or "",
+                e.get("body") or "",
+            ]
+        ).lower()
         if q in haystack:
             results.append(e)
 
@@ -207,10 +271,17 @@ def search():
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
 def send_reply(id):
-    next_url = request.form.get("next") or request.args.get("next")
-    if next_url and next_url.startswith("/"):
-        return redirect(url_for("main.email", id=id, next=next_url))
-    return redirect(url_for("main.email", id=id))
+    email_data = fetch_email_by_id(id)
+    if email_data is None:
+        return "Email not found", 404
+
+    to_value, cc_value, reply_text = _collect_reply_fields(email_data)
+    if reply_text:
+        update_draft(id, reply_text)
+        create_reply_email(id, reply_text, to_value, cc_value)
+
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    return redirect(url_for("main.email", id=id, next=next_url))
 
 @main.route("/revise_draft/<int:id>", methods=["POST"])
 def revise_draft(id):
@@ -227,23 +298,19 @@ def generate_draft(id):
     draft = (
         f"Hi,\n\n"
         f"Thanks for your message about \"{title}\". "
-        f"I’ve received it and will get back to you shortly.\n\n"
+        f"I've received it and will get back to you shortly.\n\n"
         f"Best regards,"
     )
 
     update_draft(id, draft)
-    next_url = request.form.get("next") or request.args.get("next")
-    if next_url and next_url.startswith("/"):
-        return redirect(url_for("main.email", id=id, next=next_url))
-    return redirect(url_for("main.email", id=id))
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    return redirect(url_for("main.email", id=id, next=next_url))
 
 @main.route("/email/<int:id>/delete", methods=["POST"])
 def delete_email(id):
-    next_url = request.form.get("next") or request.args.get("next")
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
     db_delete_email(id)
-    if next_url and next_url.startswith("/"):
-        return redirect(next_url)
-    return redirect(url_for("main.allemails"))
+    return redirect(next_url)
 
 @main.route("/email/<int:id>/toggle-read", methods=["POST"])
 def toggle_read(id):
@@ -251,8 +318,6 @@ def toggle_read(id):
     if email_data is None:
         abort(404)
     toggle_read_state(id)
-    next_url = request.form.get("next") or request.args.get("next")
-    if next_url and next_url.startswith("/"):
-        return redirect(next_url)
-    return redirect(url_for("main.allemails"))
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    return redirect(next_url)
 

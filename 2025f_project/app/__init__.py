@@ -1,7 +1,10 @@
 from flask import Flask
 from datetime import datetime
+from .db import init_db
+
 def create_app():
     app = Flask(__name__, instance_relative_config=True)
+    init_db()
     
     @app.template_filter("fmt_dt")
 

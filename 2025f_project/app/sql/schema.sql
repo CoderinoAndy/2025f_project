@@ -4,12 +4,14 @@
 CREATE TABLE IF NOT EXISTS email_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   external_id TEXT UNIQUE,                        -- provider-specific message ID (optional)
+  provider_draft_id TEXT UNIQUE,                  -- provider draft ID (optional)
   thread_id TEXT,                               -- conversation/thread identifier
   title TEXT NOT NULL,                      -- subject line
   sender TEXT NOT NULL,                      -- single sender address
   body TEXT,
+  body_html TEXT,
   type TEXT NOT NULL DEFAULT 'read-only'
-    CHECK (type IN ('response-needed','read-only','junk','junk-uncertain')),
+    CHECK (type IN ('response-needed','read-only','junk','junk-uncertain','sent','draft')),
   priority INTEGER NOT NULL DEFAULT 1
     CHECK (priority BETWEEN 1 AND 3),
   is_read INTEGER NOT NULL DEFAULT 0

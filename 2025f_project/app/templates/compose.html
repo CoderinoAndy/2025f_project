@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Compose</title>
+
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+      :root{
+        --bg: #1f1f1f;
+        --panel: #2d2d2d;
+        --text: #e8e8e8;
+        --muted: #bdbdbd;
+        --border: #4a4a4a;
+      }
+      body{ background: var(--bg); color: var(--text); }
+      .compose-shell{
+        max-width: min(1200px, 96vw);
+      }
+      .compose-card{
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 18px;
+      }
+      .compose-card .form-control{
+        background: rgba(255,255,255,0.04);
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+      .compose-card .form-control:focus{
+        background: rgba(255,255,255,0.06);
+        color: var(--text);
+      }
+      .compose-card .form-control::placeholder{ color: var(--muted); }
+      .hint{ color: var(--muted); font-size: 0.9rem; }
+      .headerbar{
+        background: var(--bar);
+        padding: 14px 18px;
+        border-bottom: 1px solid #2b2b2b;
+      }
+      .backlink{
+        color: var(--text);
+        text-decoration: none;
+        font-size: 26px;
+        opacity: 0.9;
+      }
+      .backlink:hover{ opacity: 1; }
+      .attachment-list{
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .attachment-item{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.03);
+      }
+      .attachment-name{
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .attachment-meta{
+        color: var(--muted);
+        font-size: 0.85rem;
+        margin-left: 6px;
+      }
+      .attachment-remove{
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1;
+        padding: 4px 6px;
+        border-radius: 6px;
+      }
+      .attachment-remove:hover{
+        color: var(--text);
+        background: rgba(255,255,255,0.08);
+      }
+      .file-picker-input{
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .file-picker-label{
+        margin: 0;
+      }
+      .attachment-item.existing .attachment-name::after{
+        content: " (existing)";
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    {% include "_navbar.html" %}
+
+    <div class="container compose-shell py-4">
+      <a id="compose-backlink" class="backlink d-inline-flex mb-3" href="{{ next_url }}" aria-label="Back">
+        <i class="bi bi-arrow-left"></i>
+      </a>
+      <div class="compose-card">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <h2 class="mb-0">Compose Email</h2>
+          <a class="btn btn-outline-light btn-sm" href="{{ url_for('main.drafts') }}">Open Drafts</a>
+        </div>
+        <p class="hint mb-3">Leaving this page with unsent changes autosaves a draft.</p>
+
+        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data">
+          <input type="hidden" name="local_draft_id" value="{{ draft_email.id or '' }}">
+          <input type="hidden" name="provider_draft_id" value="{{ draft_email.provider_draft_id or '' }}">
+          <input type="hidden" name="thread_id" value="{{ draft_email.thread_id or '' }}">
+          <input type="hidden" name="next" value="{{ next_url }}">
+
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label" for="compose-to">To</label>
+              <input id="compose-to" class="form-control" type="text" name="to" value="{{ draft_email.recipients or '' }}" placeholder="recipient@example.com" required>
+            </div>
+
+            <div class="col-12">
+              <label class="form-label" for="compose-cc">Cc</label>
+              <input id="compose-cc" class="form-control" type="text" name="cc" value="{{ draft_email.cc or '' }}" placeholder="optional">
+            </div>
+
+            <div class="col-12">
+              <label class="form-label" for="compose-subject">Subject</label>
+              <input id="compose-subject" class="form-control" type="text" name="subject" value="{{ draft_email.title or '' }}" placeholder="Email subject">
+            </div>
+
+            <div class="col-12">
+              <label class="form-label" for="compose-body">Message</label>
+              <textarea id="compose-body" class="form-control" rows="12" name="body" placeholder="Write your email...">{{ draft_email.body or '' }}</textarea>
+            </div>
+
+            <div class="col-12">
+              <label class="form-label" for="compose-attachments">Attachments</label>
+              <input
+                id="compose-attachments"
+                class="file-picker-input"
+                type="file"
+                name="attachments"
+                multiple
+              >
+              <label for="compose-attachments" class="btn btn-outline-light btn-sm file-picker-label">
+                <i class="bi bi-paperclip me-1"></i> Choose Files
+              </label>
+              <div
+                id="attachment-list"
+                class="attachment-list mt-2"
+                data-existing-attachments='{{ draft_attachments|tojson }}'
+              ></div>
+            </div>
+          </div>
+
+          <div class="d-flex gap-2 mt-4">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-send me-1"></i> Send
+            </button>
+            <button type="submit" class="btn btn-outline-light" formaction="{{ url_for('main.compose_save') }}">
+              <i class="bi bi-save me-1"></i> Save Draft
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const form = document.getElementById("compose-form");
+        if (!form) {
+          return;
+        }
+
+        let dirty = false;
+        let isSubmitting = false;
+        const autosaveUrl = "{{ url_for('main.compose_autosave') }}";
+        const composeBackLink = document.getElementById("compose-backlink");
+        const attachmentInput = document.getElementById("compose-attachments");
+        const attachmentList = document.getElementById("attachment-list");
+        let selectedAttachments = [];
+        let existingAttachments = [];
+
+        if (attachmentList) {
+          try {
+            existingAttachments = JSON.parse(attachmentList.dataset.existingAttachments || "[]");
+          } catch {
+            existingAttachments = [];
+          }
+        }
+
+        const fileKey = (file) =>
+          [file.name || "", file.size || 0, file.lastModified || 0].join("::");
+
+        const formatBytes = (bytes) => {
+          const value = Number(bytes) || 0;
+          if (value < 1024) {
+            return `${value} B`;
+          }
+          if (value < 1024 * 1024) {
+            return `${(value / 1024).toFixed(1)} KB`;
+          }
+          return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+        };
+
+        const syncAttachmentInput = () => {
+          if (!attachmentInput || typeof DataTransfer === "undefined") {
+            return;
+          }
+          const transfer = new DataTransfer();
+          selectedAttachments.forEach((file) => {
+            transfer.items.add(file);
+          });
+          attachmentInput.files = transfer.files;
+        };
+
+        const renderAttachmentList = () => {
+          if (!attachmentList) {
+            return;
+          }
+          attachmentList.innerHTML = "";
+
+          existingAttachments.forEach((file) => {
+            const item = document.createElement("div");
+            item.className = "attachment-item existing";
+
+            const info = document.createElement("div");
+            info.className = "attachment-name";
+            info.textContent = file.filename || "attachment";
+
+            const size = document.createElement("span");
+            size.className = "attachment-meta";
+            const sizeValue = Number(file.size || 0);
+            size.textContent = sizeValue > 0 ? formatBytes(sizeValue) : "size unknown";
+            info.appendChild(size);
+
+            item.appendChild(info);
+            attachmentList.appendChild(item);
+          });
+
+          selectedAttachments.forEach((file, index) => {
+            const item = document.createElement("div");
+            item.className = "attachment-item";
+
+            const info = document.createElement("div");
+            info.className = "attachment-name";
+            info.textContent = file.name || "attachment";
+
+            const size = document.createElement("span");
+            size.className = "attachment-meta";
+            size.textContent = formatBytes(file.size);
+            info.appendChild(size);
+
+            const removeButton = document.createElement("button");
+            removeButton.type = "button";
+            removeButton.className = "attachment-remove";
+            removeButton.setAttribute("aria-label", `Remove ${file.name || "attachment"}`);
+            removeButton.innerHTML = '<i class="bi bi-x-lg"></i>';
+            removeButton.addEventListener("click", () => {
+              selectedAttachments = selectedAttachments.filter((_, fileIndex) => fileIndex !== index);
+              syncAttachmentInput();
+              renderAttachmentList();
+              dirty = true;
+            });
+
+            item.appendChild(info);
+            item.appendChild(removeButton);
+            attachmentList.appendChild(item);
+          });
+        };
+
+        const watchSelectors = ["input[type='text']", "textarea"];
+        watchSelectors.forEach((selector) => {
+          form.querySelectorAll(selector).forEach((element) => {
+            element.addEventListener("input", () => {
+              dirty = true;
+            });
+          });
+        });
+
+        if (attachmentInput) {
+          attachmentInput.addEventListener("change", () => {
+            const incomingFiles = Array.from(attachmentInput.files || []);
+            incomingFiles.forEach((incoming) => {
+              const incomingKey = fileKey(incoming);
+              const exists = selectedAttachments.some((existing) => fileKey(existing) === incomingKey);
+              if (!exists) {
+                selectedAttachments.push(incoming);
+              }
+            });
+            syncAttachmentInput();
+            renderAttachmentList();
+            if (incomingFiles.length > 0) {
+              dirty = true;
+            }
+          });
+        }
+
+        renderAttachmentList();
+
+        if (composeBackLink) {
+          composeBackLink.addEventListener("click", (event) => {
+            if (window.history.length > 1) {
+              event.preventDefault();
+              window.history.back();
+            }
+          });
+        }
+
+        form.addEventListener("submit", () => {
+          isSubmitting = true;
+        });
+
+        window.addEventListener("beforeunload", () => {
+          if (isSubmitting || !dirty) {
+            return;
+          }
+
+          const toField = form.querySelector("input[name='to']");
+          const ccField = form.querySelector("input[name='cc']");
+          const subjectField = form.querySelector("input[name='subject']");
+          const bodyField = form.querySelector("textarea[name='body']");
+          const localDraftField = form.querySelector("input[name='local_draft_id']");
+          const providerDraftField = form.querySelector("input[name='provider_draft_id']");
+          const threadField = form.querySelector("input[name='thread_id']");
+
+          const toValue = (toField?.value || "").trim();
+          const ccValue = (ccField?.value || "").trim();
+          const subjectValue = (subjectField?.value || "").trim();
+          const bodyValue = (bodyField?.value || "").trim();
+          const localDraftValue = (localDraftField?.value || "").trim();
+          const providerDraftValue = (providerDraftField?.value || "").trim();
+          const threadValue = (threadField?.value || "").trim();
+
+          if (!toValue && !ccValue && !subjectValue && !bodyValue) {
+            return;
+          }
+
+          const payload = new URLSearchParams();
+          payload.set("to", toValue);
+          payload.set("cc", ccValue);
+          payload.set("subject", subjectValue);
+          payload.set("body", bodyValue);
+          payload.set("local_draft_id", localDraftValue);
+          payload.set("provider_draft_id", providerDraftValue);
+          payload.set("thread_id", threadValue);
+          navigator.sendBeacon(autosaveUrl, payload);
+        });
+      })();
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

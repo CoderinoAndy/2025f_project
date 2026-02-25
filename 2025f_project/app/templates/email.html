@@ -76,6 +76,14 @@
         color: var(--text);
       }
 
+      .message-html-frame{
+        width: 100%;
+        min-height: 320px;
+        border: 1px solid #505050;
+        border-radius: 10px;
+        background: #ffffff;
+      }
+
       .summary-text{
       white-space: pre-line;
       color: var(--muted);
@@ -197,29 +205,71 @@
         opacity: 0.9;
       }
       .action-icon:hover{ opacity: 1; }
+      .file-picker-input{
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .file-picker-label{
+        margin: 0;
+      }
+      .attachment-list{
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .attachment-item{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(255,255,255,0.03);
+      }
+      .attachment-name{
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .attachment-meta{
+        color: var(--muted);
+        font-size: 0.85rem;
+        margin-left: 6px;
+      }
+      .attachment-remove{
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 1rem;
+        line-height: 1;
+        padding: 4px 6px;
+        border-radius: 6px;
+      }
+      .attachment-remove:hover{
+        color: var(--text);
+        background: rgba(255,255,255,0.08);
+      }
     </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
   <body>
-    <div class="headerbar d-flex align-items-center justify-content-between">
-      <!-- Back arrow (go to previous page) -->
-      <a class="backlink" href="{{ next_url }}" aria-label="Back">
+    {% include "_navbar.html" %}
+
+    <div class="container-fluid py-3 px-3" style="max-width: min(1600px, 98vw);">
+      <a class="backlink d-inline-flex mb-2" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
-
-      <div class="text-end">
-        <a href="{{ url_for('main.allemails') }}" class="text-decoration-none" style="color:#e8e8e8; opacity:0.85;">
-          All Emails
-        </a>
-      </div>
-    </div>
-
-    <div class="container py-3" style="max-width: 980px;">
       <!-- Expect: email = object/dict with title, sender, date, type, body, summary, draft -->
       <div class="row g-3 mt-3 align-items-start">
         <!-- Left column: Message + Reply -->
-        <div class="col-12 col-md-8">
+        <div class="col-12 col-md-9">
         <div class="meta-wrap mb-3">
           <div class="row align-items-start g-3">
             <div class="col-12 col-md-6">
@@ -235,6 +285,11 @@
             <div class="col-12 col-md-6">
               <div class="meta-title">Type</div>
               <div class="meta-sub">{{ email.type }}</div>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <div class="meta-title">Priority</div>
+              <div class="meta-sub">{{ email.priority or 1 }} / 3</div>
             </div>
 
             <div class="col-12 col-md-6">
@@ -263,39 +318,55 @@
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">{{ email.title }}</div>
-          <div class="dropdown">
-            <button
-              class="dots-btn"
-              type="button"
-              data-bs-toggle="dropdown"
-              aria-expanded="false"
-              aria-label="Email actions"
-            >
-              <i class="bi bi-three-dots-vertical"></i>
-            </button>
+          {% if email.type not in ['sent', 'draft'] %}
+            <div class="dropdown">
+              <button
+                class="dots-btn"
+                type="button"
+                data-bs-toggle="dropdown"
+                aria-expanded="false"
+                aria-label="Email actions"
+              >
+                <i class="bi bi-three-dots-vertical"></i>
+              </button>
 
-            <ul class="dropdown-menu dropdown-menu-end">
-              {% set current_type = email.type %}
+              <ul class="dropdown-menu dropdown-menu-end">
+                {% set current_type = email.type %}
 
-              {% for t, label in [
-                ('response-needed', 'Move to response needed'),
-                ('read-only', 'Move to read only'),
-                ('junk', 'Move to junk')
-              ] %}
-                {% if t != current_type %}
-                  <li>
-                    <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
-                      <input type="hidden" name="new_type" value="{{ t }}" />
-                      <input type="hidden" name="next" value="{{ next_url }}" />
-                      <button class="dropdown-item" type="submit">{{ label }}</button>
-                    </form>
-                  </li>
-                {% endif %}
-              {% endfor %}
-            </ul>
-          </div>
+                {% for t, label in [
+                  ('response-needed', 'Move to response needed'),
+                  ('read-only', 'Move to read only'),
+                  ('junk-uncertain', 'Move to junk mail confirm'),
+                  ('junk', 'Move to junk')
+                ] %}
+                  {% if t != current_type %}
+                    <li>
+                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
+                        <input type="hidden" name="new_type" value="{{ t }}" />
+                        <input type="hidden" name="next" value="{{ next_url }}" />
+                        <button class="dropdown-item" type="submit">{{ label }}</button>
+                      </form>
+                    </li>
+                  {% endif %}
+                {% endfor %}
+              </ul>
             </div>
-            <div class="message-content">{{ email.body }}</div>
+          {% else %}
+            <small class="text-secondary">Category locked</small>
+          {% endif %}
+            </div>
+            {% if email.body_html %}
+              <iframe
+                id="message-html-frame"
+                class="message-html-frame"
+                sandbox="allow-same-origin"
+                referrerpolicy="no-referrer"
+                title="Rendered email"
+              ></iframe>
+              <script id="message-html-source" type="application/json">{{ email.body_html|tojson }}</script>
+            {% else %}
+              <div class="message-content">{{ email.body }}</div>
+            {% endif %}
           </div>
 
           <!-- Reply panel (now contained in left column) -->
@@ -305,7 +376,7 @@
               Generate a draft, edit if needed, then send!
             </div>
 
-            <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}">
+            <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}" enctype="multipart/form-data">
               <input type="hidden" name="next" value="{{ next_url }}" />
               <div class="mb-2">
                 <label class="reply-field-label" for="to-field">To</label>
@@ -338,6 +409,21 @@
                 placeholder="Write your reply here..."
               >{% if email.draft %}{{ email.draft }}{% endif %}</textarea>
 
+              <div class="mt-3">
+                <label class="reply-field-label" for="reply-attachments">Attachments</label>
+                <input
+                  id="reply-attachments"
+                  class="file-picker-input"
+                  type="file"
+                  name="attachments"
+                  multiple
+                >
+                <label for="reply-attachments" class="btn btn-outline-light btn-sm file-picker-label">
+                  <i class="bi bi-paperclip me-1"></i> Choose Files
+                </label>
+                <div id="reply-attachment-list" class="attachment-list mt-2"></div>
+              </div>
+
               <div class="actions">
                 <button
                   type="submit"
@@ -367,10 +453,18 @@
         </div>
 
         <!-- Right column: Summary -->
-        <div class="col-12 col-md-4">
+        <div class="col-12 col-md-3">
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">Summary</div>
+              {% if ai_enabled and email.type not in ['sent', 'draft'] %}
+                <form method="post" action="{{ url_for('main.analyze_email_route', id=email.id) }}" class="m-0">
+                  <input type="hidden" name="next" value="{{ next_url }}">
+                  <button type="submit" class="action-icon" title="Analyze email" aria-label="Analyze email" style="font-size:20px;">
+                    <i class="bi bi-stars"></i>
+                  </button>
+                </form>
+              {% endif %}
             </div>
 
             <div class="summary-text">
@@ -410,5 +504,141 @@
       </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      (() => {
+        const frame = document.getElementById("message-html-frame");
+        const source = document.getElementById("message-html-source");
+        if (!frame || !source) {
+          return;
+        }
+
+        let rawHtml = "";
+        try {
+          rawHtml = JSON.parse(source.textContent || "\"\"");
+        } catch {
+          rawHtml = "";
+        }
+
+        const wrappedHtml = `
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <base target="_blank">
+    <style>
+      html, body { margin: 0; padding: 0; }
+      body { padding: 12px; color: #111; background: #fff; font: 14px/1.45 Arial, sans-serif; }
+      img { max-width: 100%; height: auto; }
+      table { max-width: 100%; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>${rawHtml}</body>
+</html>`.trim();
+
+        const resizeFrame = () => {
+          try {
+            const doc = frame.contentDocument;
+            if (!doc) {
+              return;
+            }
+            const bodyHeight = doc.body ? doc.body.scrollHeight : 0;
+            const rootHeight = doc.documentElement ? doc.documentElement.scrollHeight : 0;
+            const nextHeight = Math.max(320, Math.min(5000, Math.max(bodyHeight, rootHeight) + 8));
+            frame.style.height = `${nextHeight}px`;
+          } catch {
+            frame.style.height = "700px";
+          }
+        };
+
+        frame.addEventListener("load", () => {
+          resizeFrame();
+          setTimeout(resizeFrame, 250);
+          setTimeout(resizeFrame, 750);
+        });
+        frame.srcdoc = wrappedHtml;
+      })();
+
+      (() => {
+        const attachmentInput = document.getElementById("reply-attachments");
+        const attachmentList = document.getElementById("reply-attachment-list");
+        if (!attachmentInput || !attachmentList) {
+          return;
+        }
+
+        let selectedAttachments = [];
+
+        const fileKey = (file) =>
+          [file.name || "", file.size || 0, file.lastModified || 0].join("::");
+
+        const formatBytes = (bytes) => {
+          const value = Number(bytes) || 0;
+          if (value < 1024) {
+            return `${value} B`;
+          }
+          if (value < 1024 * 1024) {
+            return `${(value / 1024).toFixed(1)} KB`;
+          }
+          return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+        };
+
+        const syncAttachmentInput = () => {
+          if (typeof DataTransfer === "undefined") {
+            return;
+          }
+          const transfer = new DataTransfer();
+          selectedAttachments.forEach((file) => {
+            transfer.items.add(file);
+          });
+          attachmentInput.files = transfer.files;
+        };
+
+        const renderAttachmentList = () => {
+          attachmentList.innerHTML = "";
+          selectedAttachments.forEach((file, index) => {
+            const item = document.createElement("div");
+            item.className = "attachment-item";
+
+            const info = document.createElement("div");
+            info.className = "attachment-name";
+            info.textContent = file.name || "attachment";
+
+            const size = document.createElement("span");
+            size.className = "attachment-meta";
+            size.textContent = formatBytes(file.size);
+            info.appendChild(size);
+
+            const removeButton = document.createElement("button");
+            removeButton.type = "button";
+            removeButton.className = "attachment-remove";
+            removeButton.setAttribute("aria-label", `Remove ${file.name || "attachment"}`);
+            removeButton.innerHTML = '<i class="bi bi-x-lg"></i>';
+            removeButton.addEventListener("click", () => {
+              selectedAttachments = selectedAttachments.filter((_, fileIndex) => fileIndex !== index);
+              syncAttachmentInput();
+              renderAttachmentList();
+            });
+
+            item.appendChild(info);
+            item.appendChild(removeButton);
+            attachmentList.appendChild(item);
+          });
+        };
+
+        attachmentInput.addEventListener("change", () => {
+          const incomingFiles = Array.from(attachmentInput.files || []);
+          incomingFiles.forEach((incoming) => {
+            const incomingKey = fileKey(incoming);
+            const exists = selectedAttachments.some((existing) => fileKey(existing) === incomingKey);
+            if (!exists) {
+              selectedAttachments.push(incoming);
+            }
+          });
+          syncAttachmentInput();
+          renderAttachmentList();
+        });
+      })();
+    </script>
   </body>
 </html>

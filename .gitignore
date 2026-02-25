@@ -208,3 +208,6 @@ __marimo__/
 
 # My own stuff
 instance/
+
+# Secrets / local credentials
+credentials.json

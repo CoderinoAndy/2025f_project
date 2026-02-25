@@ -1,0 +1,79 @@
+{% if emails and emails|length > 0 %}
+  {% for email in emails %}
+    <div class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative">
+      <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=current_list_url) }}"></a>
+
+      <div class="row g-0 align-items-center flex-grow-1">
+        <div class="col-6 wrap-ellipsis pe-2">
+          <span class="mail-title">{{ email.title }}</span>
+          {% if email.priority %}
+            <span class="priority">{{ "*" * email.priority }}</span>
+          {% endif %}
+        </div>
+
+        <div class="col-3 text-center muted wrap-ellipsis px-2">
+          {{ email.type }}
+        </div>
+
+        <div class="col-3 text-end muted ps-2">
+          {{ email.date|fmt_dt }}
+        </div>
+      </div>
+
+      <div class="row-actions">
+        <form method="post" action="{{ url_for('main.delete_email', id=email.id) }}" class="m-0">
+          <input type="hidden" name="next" value="{{ current_list_url }}">
+          <button type="submit" class="row-action-btn" title="Delete" aria-label="Delete">
+            <i class="bi bi-trash"></i>
+          </button>
+        </form>
+
+        {% if email.type not in ['sent', 'draft'] %}
+          <div class="dropdown">
+            <button class="row-action-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false"
+                    title="Move" aria-label="Move">
+              <i class="bi bi-folder-symlink"></i>
+            </button>
+
+            <ul class="dropdown-menu dropdown-menu-end">
+              {% set current_type = email.type %}
+              {% for t, label in [
+                ('response-needed', 'Response needed'),
+                ('read-only', 'Read only'),
+                ('junk-uncertain', 'Junk mail confirm'),
+                ('junk', 'Junk')
+              ] %}
+                {% if t != current_type %}
+                  <li>
+                    <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
+                      <input type="hidden" name="new_type" value="{{ t }}">
+                      <input type="hidden" name="next" value="{{ current_list_url }}">
+                      <button class="dropdown-item" type="submit">Move to {{ label }}</button>
+                    </form>
+                  </li>
+                {% endif %}
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
+          <input type="hidden" name="next" value="{{ current_list_url }}">
+          <button type="submit" class="row-action-btn"
+                  title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
+                  aria-label="Toggle read">
+            {% if email.is_read %}
+              <i class="bi bi-envelope"></i>
+            {% else %}
+              <i class="bi bi-envelope-open"></i>
+            {% endif %}
+          </button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="email-row empty-row">
+    <div class="muted">{{ empty_message }}</div>
+  </div>
+{% endif %}

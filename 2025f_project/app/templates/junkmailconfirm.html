@@ -61,23 +61,13 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <body>
-    <div class="topnav d-flex align-items-center justify-content-between">
-      <div class="d-flex align-items-center flex-wrap">
-        <a class="brand-link" href="{{ url_for('main.about') }}" aria-label="About">
-          <img class="brand-logo" src="{{ url_for('static', filename='img/atom-logo-violet.svg') }}" alt="App logo">
-        </a>
-        <a class="tablink" href="{{ url_for('main.allemails') }}">All Emails</a>
-        <a class="tablink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
-        <a class="tablink" href="{{ url_for('main.readonly') }}">Read only</a>
-        <a class="tablink" href="{{ url_for('main.junk') }}">Junk</a>
-        <a class="tablink active" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
-      </div>
-      <div class="d-flex align-items-center gap-2">
-        <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
-        <i class="bi bi-search" aria-hidden="true"></i>
-      </div>
-    </div>
+  <body
+    data-live-email-view="junk-uncertain"
+    data-sort="{{ sort }}"
+    data-fingerprint="{{ list_fingerprint }}"
+    data-poll-interval-ms="5000"
+  >
+    {% include "_navbar.html" %}
     <div class="container-fluid py-3 px-4">
       <div class="list-header">
         <h2 class="mb-0">Junk Confirmation</h2>
@@ -128,32 +118,34 @@
                   </button>
                 </form>
 
-                <!-- Move (smart: only show other categories) -->
-                <div class="dropdown">
-                  <button class="row-action-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false"
-                          title="Move" aria-label="Move">
-                    <i class="bi bi-folder-symlink"></i>
-                  </button>
+                {% if email.type not in ['sent', 'draft'] %}
+                  <!-- Move (smart: only show other categories) -->
+                  <div class="dropdown">
+                    <button class="row-action-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false"
+                            title="Move" aria-label="Move">
+                      <i class="bi bi-folder-symlink"></i>
+                    </button>
 
-                  <ul class="dropdown-menu dropdown-menu-end">
-                    {% set current_type = email.type %}
-                    {% for t, label in [
-                      ('response-needed', 'Response needed'),
-                      ('read-only', 'Read only'),
-                      ('junk', 'Junk')
-                    ] %}
-                      {% if t != current_type %}
-                        <li>
-                          <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
-                            <input type="hidden" name="new_type" value="{{ t }}">
-                            <input type="hidden" name="next" value="{{ current_list_url }}">
-                            <button class="dropdown-item" type="submit">Move to {{ label }}</button>
-                          </form>
-                        </li>
-                      {% endif %}
-                    {% endfor %}
-                  </ul>
-                </div>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                      {% set current_type = email.type %}
+                      {% for t, label in [
+                        ('response-needed', 'Response needed'),
+                        ('read-only', 'Read only'),
+                        ('junk', 'Junk')
+                      ] %}
+                        {% if t != current_type %}
+                          <li>
+                            <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
+                              <input type="hidden" name="new_type" value="{{ t }}">
+                              <input type="hidden" name="next" value="{{ current_list_url }}">
+                              <button class="dropdown-item" type="submit">Move to {{ label }}</button>
+                            </form>
+                          </li>
+                        {% endif %}
+                      {% endfor %}
+                    </ul>
+                  </div>
+                {% endif %}
 
                 <!-- Mark read/unread -->
                 <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
@@ -178,6 +170,11 @@
         {% endif %}
       </div>
     </div>
+    <a class="compose-fab" href="{{ url_for('main.compose', next=current_list_url) }}" aria-label="Compose email">
+      <i class="bi bi-pencil" aria-hidden="true"></i>
+      <span>Compose</span>
+    </a>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/live-email-list.js') }}"></script>
   </body>
 </html>

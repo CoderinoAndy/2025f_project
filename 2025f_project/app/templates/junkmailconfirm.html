@@ -13,52 +13,7 @@
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
     />
-
-    <style>
-      :root{
-        --bg: #1f1f1f;
-        --bar: #121212;
-        --headrow: #2f2f2f;
-        --card: #4a4a4a;
-        --text: #e8e8e8;
-        --muted: #bdbdbd;
-      }
-      body{ background: var(--bg); color: var(--text); }
-      .topnav{ background: var(--bar); padding: 14px 18px; border-bottom: 1px solid #2b2b2b; }
-      .tablink{ color: var(--text); text-decoration: none; margin-right: 18px; opacity: 0.85; }
-      .tablink:hover{ opacity: 1; text-decoration: underline; }
-      .tablink.active{ opacity: 1; text-decoration: underline; font-weight: 600; }
-
-      .tablehead{ background: var(--headrow); border-radius: 10px; padding: 10px 16px; margin-top: 14px; }
-      .headlabel{ text-decoration: underline; font-weight: 600; }
-
-      .email-card{
-        background: var(--card);
-        border-radius: 10px;
-        padding: 14px 16px;
-        margin-top: 12px;
-        border: 1px solid #3f3f3f;
-      }
-      .email-title-link{ color: var(--text); text-decoration: none; }
-      .email-title-link:hover{ text-decoration: underline; }
-
-      .muted{ color: var(--muted); }
-      .priority{ margin-left: 8px; letter-spacing: 1px; }
-
-      .icon-btn{
-        border: 0;
-        background: transparent;
-        font-size: 26px;
-        line-height: 1;
-        padding: 0 6px;
-      }
-      .ok{ color: #6ad66a; }
-      .no{ color: #ff6b6b; }
-
-      .search-link{ color: var(--text); text-decoration:none; opacity:0.9; }
-      .search-link:hover{ opacity:1; text-decoration:underline; }
-    </style>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
   <body
@@ -78,8 +33,8 @@
             <option value="date_desc" {% if sort == "date_desc" %}selected{% endif %}>Date sent (newest first)</option>
             <option value="date_asc" {% if sort == "date_asc" %}selected{% endif %}>Date sent (oldest first)</option>
 
-            <option value="priority_desc" {% if sort == "priority_desc" %}selected{% endif %}>Priority (high → low)</option>
-            <option value="priority_asc" {% if sort == "priority_asc" %}selected{% endif %}>Priority (low → high)</option>
+            <option value="priority_desc" {% if sort == "priority_desc" %}selected{% endif %}>Priority (high to low)</option>
+            <option value="priority_asc" {% if sort == "priority_asc" %}selected{% endif %}>Priority (low to high)</option>
 
             <option value="unread_first" {% if sort == "unread_first" %}selected{% endif %}>Unread first</option>
             <option value="read_first" {% if sort == "read_first" %}selected{% endif %}>Read first</option>
@@ -87,87 +42,8 @@
         </form>
       </div>
       <div class="list-shell">
-        {% if emails and emails|length > 0 %}
-          {% for email in emails %}
-            <div class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative">
-              <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=current_list_url) }}"></a>
-
-              <div class="row g-0 align-items-center flex-grow-1">
-                <div class="col-6 wrap-ellipsis pe-2">
-                  <span class="mail-title">{{ email.title }}</span>
-                  {% if email.priority %}
-                    <span class="priority">{{ "★" * email.priority }}</span>
-                  {% endif %}
-                </div>
-
-                <div class="col-3 text-center muted wrap-ellipsis px-2">
-                  {{ email.type }}
-                </div>
-
-                <div class="col-3 text-end muted ps-2">
-                  {{ email.date|fmt_dt }}
-                </div>
-              </div>
-
-              <div class="row-actions">
-                <!-- Delete -->
-                <form method="post" action="{{ url_for('main.delete_email', id=email.id) }}" class="m-0">
-                  <input type="hidden" name="next" value="{{ current_list_url }}">
-                  <button type="submit" class="row-action-btn" title="Delete" aria-label="Delete">
-                    <i class="bi bi-trash"></i>
-                  </button>
-                </form>
-
-                {% if email.type not in ['sent', 'draft'] %}
-                  <!-- Move (smart: only show other categories) -->
-                  <div class="dropdown">
-                    <button class="row-action-btn" type="button" data-bs-toggle="dropdown" aria-expanded="false"
-                            title="Move" aria-label="Move">
-                      <i class="bi bi-folder-symlink"></i>
-                    </button>
-
-                    <ul class="dropdown-menu dropdown-menu-end">
-                      {% set current_type = email.type %}
-                      {% for t, label in [
-                        ('response-needed', 'Response needed'),
-                        ('read-only', 'Read only'),
-                        ('junk', 'Junk')
-                      ] %}
-                        {% if t != current_type %}
-                          <li>
-                            <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
-                              <input type="hidden" name="new_type" value="{{ t }}">
-                              <input type="hidden" name="next" value="{{ current_list_url }}">
-                              <button class="dropdown-item" type="submit">Move to {{ label }}</button>
-                            </form>
-                          </li>
-                        {% endif %}
-                      {% endfor %}
-                    </ul>
-                  </div>
-                {% endif %}
-
-                <!-- Mark read/unread -->
-                <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
-                  <input type="hidden" name="next" value="{{ current_list_url }}">
-                  <button type="submit" class="row-action-btn"
-                          title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
-                          aria-label="Toggle read">
-                    {% if email.is_read %}
-                      <i class="bi bi-envelope"></i>
-                    {% else %}
-                      <i class="bi bi-envelope-open"></i>
-                    {% endif %}
-                  </button>
-                </form>
-              </div>
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="email-row empty-row">
-            <div class="muted">You have no Junk Mail to confirm.</div>
-          </div>
-        {% endif %}
+        {% set empty_message = "You have no Junk Mail to confirm." %}
+        {% include "_live_email_rows.html" %}
       </div>
     </div>
     <a class="compose-fab" href="{{ url_for('main.compose', next=current_list_url) }}" aria-label="Compose email">

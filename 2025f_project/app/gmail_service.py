@@ -126,13 +126,6 @@ def _extract_header(payload, header_name):
     return ""
 
 
-def _decode_body_part(raw_data):
-    decoded = _decode_body_bytes(raw_data)
-    if not decoded:
-        return ""
-    return decoded.decode("utf-8", errors="ignore")
-
-
 def _decode_body_bytes(raw_data):
     if not raw_data:
         return b""
@@ -591,23 +584,6 @@ def sync_recent_emails(db_path="instance/app.sqlite", max_results=None):
             break
 
     return synced
-
-
-def maybe_sync_recent_emails(db_path="instance/app.sqlite", force=False, max_results=None):
-    global _LAST_SYNC_AT
-    now = time.time()
-    if not force and now - _LAST_SYNC_AT < SYNC_INTERVAL_SECONDS:
-        return 0
-
-    if not _SYNC_LOCK.acquire(blocking=False):
-        return 0
-
-    try:
-        synced = sync_recent_emails(db_path=db_path, max_results=max_results)
-        _LAST_SYNC_AT = time.time()
-        return synced
-    finally:
-        _SYNC_LOCK.release()
 
 
 def trigger_background_sync(db_path="instance/app.sqlite", force=False, max_results=None):

@@ -5,7 +5,6 @@ from pathlib import Path
 
 DB_DEFAULT = "instance/app.sqlite"
 LOCAL_USER_EMAIL = "you@example.com"
-ALLOWED_TABLES = {"emails"}
 ALLOWED_TYPES = {
     "response-needed",
     "read-only",
@@ -240,15 +239,6 @@ def _insert_recipients(conn, email_id, recipient_type, raw_value):
             (email_id, recipient_type, address),
         )
 
-
-def get_table(table_name, db_path=DB_DEFAULT):
-    if table_name not in ALLOWED_TABLES:
-        raise ValueError("Invalid table name.")
-    if table_name == "emails":
-        return fetch_emails(db_path=db_path)
-    return []
-
-
 def fetch_emails(email_type=None, exclude_types=None, db_path=DB_DEFAULT):
     where_clauses = []
     params = []
@@ -284,22 +274,6 @@ def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
         )
         row = cur.fetchone()
         return _row_to_dict(row) if row else None
-
-
-def fetch_email_by_external_id(external_id, db_path=DB_DEFAULT):
-    if not external_id:
-        return None
-    with db_session(db_path) as conn:
-        cur = conn.execute(
-            f"""
-            {EMAIL_SELECT_SQL}
-            WHERE m.external_id = ?
-            """,
-            (external_id,),
-        )
-        row = cur.fetchone()
-        return _row_to_dict(row) if row else None
-
 
 def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
     if not provider_draft_id:

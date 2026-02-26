@@ -4,7 +4,6 @@ from urllib.parse import urlsplit, parse_qs
 from .db import (
     fetch_emails,
     fetch_email_by_id,
-    fetch_email_by_external_id,
     fetch_email_by_provider_draft_id,
     fetch_thread_emails,
     set_email_type as db_set_email_type,
@@ -78,11 +77,6 @@ def _normalize_addresses(raw_value):
     return ", ".join(cleaned) if cleaned else None
 
 
-def _normalize_subject(raw_value):
-    text = (raw_value or "").strip()
-    return text or "(No subject)"
-
-
 def _parse_optional_int(raw_value):
     try:
         return int(raw_value) if raw_value else None
@@ -94,7 +88,7 @@ def _collect_compose_fields():
     return {
         "to": _normalize_addresses(request.form.get("to")) or "",
         "cc": _normalize_addresses(request.form.get("cc")) or "",
-        "subject": _normalize_subject(request.form.get("subject")),
+        "subject": (request.form.get("subject") or "").strip(),
         "body": (request.form.get("body") or "").strip(),
         "local_draft_id": _parse_optional_int(request.form.get("local_draft_id")),
         "provider_draft_id": (request.form.get("provider_draft_id") or "").strip() or None,
@@ -720,10 +714,6 @@ def compose_send():
 
     trigger_background_sync(force=True, max_results=20)
     return redirect(url_for("main.sent"))
-
-@main.route("/revise_draft/<int:id>", methods=["POST"])
-def revise_draft(id):
-    return redirect(url_for("main.email", id=id))
 
 @main.route("/generate_draft/<int:id>", methods=["POST"])
 def generate_draft(id):

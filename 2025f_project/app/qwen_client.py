@@ -1,4 +1,4 @@
-import json
+﻿import json
 import ipaddress
 import os
 import re
@@ -17,6 +17,7 @@ LOCALHOST_NAMES = {"localhost"}
 def _api_key():
     """Api key.
     """
+    # Internal helper for api key used by higher-level request and sync workflows.
     return (
         os.getenv("QWEN_API_KEY")
         or os.getenv("HF_TOKEN")
@@ -27,18 +28,21 @@ def _api_key():
 def ai_enabled():
     """Ai enabled.
     """
+    # Internal helper for ai enabled used by higher-level request and sync workflows.
     return _endpoint_allowed()
 
 
 def _base_url():
     """Base url.
     """
+    # Resolve base url using configuration defaults and safe fallback behavior.
     return (os.getenv("QWEN_API_BASE_URL") or BASE_URL_DEFAULT).strip().rstrip("/")
 
 
 def _allow_remote():
     """Allow remote.
     """
+    # Internal helper for allow remote used by higher-level request and sync workflows.
     return str(os.getenv("QWEN_ALLOW_REMOTE", "0")).strip().lower() in {
         "1",
         "true",
@@ -50,6 +54,7 @@ def _allow_remote():
 def _is_local_hostname(hostname):
     """Return whether local hostname.
     """
+    # Internal helper for is local hostname used by higher-level request and sync workflows.
     if not hostname:
         return False
     lower = hostname.lower()
@@ -64,6 +69,7 @@ def _is_local_hostname(hostname):
 def _endpoint_allowed():
     """Endpoint allowed.
     """
+    # Internal helper for endpoint allowed used by higher-level request and sync workflows.
     base_url = _base_url()
     parsed = urlparse(base_url)
     if not parsed.scheme or not parsed.netloc:
@@ -99,6 +105,7 @@ def _endpoint_allowed():
 def _request_headers():
     """Request headers.
     """
+    # Internal helper for request headers used by higher-level request and sync workflows.
     headers = {"Content-Type": "application/json"}
     api_key = _api_key()
     if api_key:
@@ -175,6 +182,7 @@ def _chat_completion(messages, temperature=0.1, max_tokens=600):
 def _extract_json_block(text):
     """Extract JSON block.
     """
+    # Extract json block from provider/user payloads while handling missing fields safely.
     if not text:
         return None
     stripped = text.strip()
@@ -187,6 +195,7 @@ def _extract_json_block(text):
 def _clean_summary(raw_summary):
     """Clean summary.
     """
+    # Sanitize clean summary so downstream code receives safe, normalized text values.
     summary = " ".join(str(raw_summary or "").split())
     if not summary:
         return None
@@ -198,6 +207,7 @@ def _clean_summary(raw_summary):
 def _profile_prompt_block(user_profile):
     """Profile prompt block.
     """
+    # Build profile prompt block text that is passed into model prompts.
     if not isinstance(user_profile, dict):
         return ""
 
@@ -216,6 +226,7 @@ def _profile_prompt_block(user_profile):
 def analyze_email(email_data, user_profile=None):
     """Analyze email.
     """
+    # Transform analyze email data between provider payloads and local mailbox records.
     body = (email_data.get("body") or "").strip()
     title = (email_data.get("title") or "(No subject)").strip()
     sender = (email_data.get("sender") or "").strip()
@@ -295,6 +306,7 @@ def generate_reply_draft(
 ):
     """Generate reply draft.
     """
+    # Generate, revise, or validate generate reply draft used by reply and draft workflows.
     body = (email_data.get("body") or "").strip()
     title = (email_data.get("title") or "(No subject)").strip()
     sender = (email_data.get("sender") or "").strip()

@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
+﻿from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 from datetime import datetime
 import os
 import threading
@@ -131,6 +131,7 @@ VALID_SORTS = {
     "unread_first",
     "read_first",
 }
+BUBBLE_SORT_MAX_ITEMS = 300
 
 NON_MAIN_TYPES = {"sent", "draft"}
 HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
@@ -173,6 +174,7 @@ AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
 def _env_int(name, default):
     """Environment int.
     """
+    # Read environment configuration and clamp to safe bounds.
     try:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -193,6 +195,7 @@ _LAST_DEEP_LIVE_SYNC_AT = 0.0
 def _normalize_addresses(raw_value):
     """Normalize addresses.
     """
+    # Normalize addresses into a canonical value used across the app.
     if raw_value is None:
         return None
     text = str(raw_value).replace(";", ",")
@@ -203,6 +206,7 @@ def _normalize_addresses(raw_value):
 def _parse_optional_int(raw_value):
     """Parse optional int.
     """
+    # Parse raw optional int input into validated values for downstream logic.
     try:
         return int(raw_value) if raw_value else None
     except (TypeError, ValueError):
@@ -212,6 +216,7 @@ def _parse_optional_int(raw_value):
 def _collect_compose_fields():
     """Collect compose fields.
     """
+    # Collect compose fields from request/context and return normalized values.
     return {
         "to": _normalize_addresses(request.form.get("to")) or "",
         "cc": _normalize_addresses(request.form.get("cc")) or "",
@@ -226,6 +231,7 @@ def _collect_compose_fields():
 def _has_compose_content(fields):
     """Return whether compose content.
     """
+    # Check whether compose content exists before running heavier work.
     return bool(
         fields.get("to")
         or fields.get("cc")
@@ -237,6 +243,7 @@ def _has_compose_content(fields):
 def _collect_attachment_payloads():
     """Collect attachment payloads.
     """
+    # Collect attachment payloads from request/context and return normalized values.
     payloads = []
     for item in request.files.getlist("attachments"):
         if item is None:
@@ -260,6 +267,7 @@ def _collect_attachment_payloads():
 def _save_profile_photo(file_obj):
     """Save profile photo.
     """
+    # Save profile photo after sanitizing user-provided values.
     if file_obj is None:
         return None
     original_name = (file_obj.filename or "").strip()
@@ -282,6 +290,7 @@ def _save_profile_photo(file_obj):
 def _collect_reply_fields(email_data):
     """Collect reply fields.
     """
+    # Collect reply fields from request/context and return normalized values.
     to_value = _normalize_addresses(request.form.get("to"))
     if not to_value:
         sender = _normalize_addresses(email_data.get("sender"))
@@ -298,6 +307,7 @@ def _collect_reply_fields(email_data):
 def _contextual_reply_fallback(email_data):
     """Contextual reply fallback.
     """
+    # Build contextual reply fallback text that is passed into model prompts.
     sender_raw = str(email_data.get("sender") or "").strip()
     sender_label = sender_raw.split("<", 1)[0].strip().strip('"')
     if "@" in sender_label and " " not in sender_label:
@@ -392,6 +402,7 @@ def _contextual_reply_fallback(email_data):
 
 
 def _summary_looks_unusable(email_data):
+    # Internal helper for summary looks unusable used by higher-level request and sync workflows.
     summary = " ".join(str(email_data.get("summary") or "").split()).strip().lower()
     if not summary:
         return False
@@ -416,6 +427,7 @@ def _summary_looks_unusable(email_data):
 def _should_auto_analyze_email(email_data):
     """Return whether auto analyze email.
     """
+    # Keep this decision logic centralized for predictable control flow.
     if not ai_enabled():
         return False
     if not email_data:
@@ -442,6 +454,7 @@ def _should_auto_analyze_email(email_data):
 def _run_ai_analysis(email_data, force=False):
     """Run ai analysis.
     """
+    # Execute the full workflow and report whether persisted state changed.
     profile = get_user_profile()
     updated = False
     classification_missing = (
@@ -521,6 +534,7 @@ def _safe_next_url(raw_next):
 
 def _parse_dt(value):
     """Parse your existing date strings safely."""
+    # Parse raw dt input into validated values for downstream logic.
     if value is None:
         return None
     s = str(value).strip()
@@ -536,6 +550,7 @@ def _dt_sort_value(dt):
     Turn datetime into a comparable number without using timestamp()
     (timestamp can be annoying for very old dates on some systems).
     """
+    # Convert datetime values into sortable integers without platform-dependent timestamp calls.
     if dt is None:
         return -1
     return dt.toordinal() * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
@@ -545,37 +560,45 @@ def sort_emails(emails, sort_code):
     """
     sort_code = sort_code if sort_code in VALID_SORTS else "date_desc"
 
-    def dt_val(e):
-        """Return a sortable numeric date value for one email row."""
-        return _dt_sort_value(_parse_dt(e.get("date")))
+    def row_key(email):
+        """Return the sortable tuple used for mailbox ordering."""
+        dt_value = _dt_sort_value(_parse_dt(email.get("date")))
+        pr_value = int(email.get("priority") or 0)
 
-    def pr_val(e):
-        """Return the numeric priority used by the sort keys below."""
-        return int(e.get("priority") or 0)
+        # Normalize all sorts into ascending tuple comparison so one sorter can handle every mode.
+        if sort_code == "date_desc":
+            return (-dt_value,)
+        if sort_code == "date_asc":
+            return (dt_value,)
+        if sort_code == "priority_desc":
+            return (-pr_value, -dt_value)
+        if sort_code == "priority_asc":
+            return (pr_value, -dt_value)
+        if sort_code == "unread_first":
+            return (bool(email.get("is_read")), -dt_value)
+        if sort_code == "read_first":
+            return (not bool(email.get("is_read")), -dt_value)
+        return (-dt_value,)
 
-    # Default: newest first
-    if sort_code == "date_desc":
-        return sorted(emails, key=dt_val, reverse=True)
+    rows = [(email, row_key(email)) for email in emails]
+    if len(rows) <= 1:
+        return [row[0] for row in rows]
 
-    if sort_code == "date_asc":
-        return sorted(emails, key=dt_val)
+    # Use bubble sort for educational/algorithm requirements on normal mailbox list sizes.
+    if len(rows) <= BUBBLE_SORT_MAX_ITEMS:
+        rows = list(rows)
+        for end in range(len(rows) - 1, 0, -1):
+            swapped = False
+            for index in range(end):
+                if rows[index][1] > rows[index + 1][1]:
+                    rows[index], rows[index + 1] = rows[index + 1], rows[index]
+                    swapped = True
+            if not swapped:
+                break
+        return [row[0] for row in rows]
 
-    # Priority: bigger number = more stars = more urgent
-    if sort_code == "priority_desc":
-        return sorted(emails, key=lambda e: (pr_val(e), dt_val(e)), reverse=True)
-
-    if sort_code == "priority_asc":
-        # low priority first, but keep newest first inside each priority group
-        return sorted(emails, key=lambda e: (pr_val(e), -dt_val(e)))
-
-    # Unread/read grouping, then newest first inside the group
-    if sort_code == "unread_first":
-        return sorted(emails, key=lambda e: (bool(e.get("is_read")), -dt_val(e)))
-
-    if sort_code == "read_first":
-        return sorted(emails, key=lambda e: (not bool(e.get("is_read")), -dt_val(e)))
-
-    return sorted(emails, key=dt_val, reverse=True)
+    # Keep performance predictable for very large mailboxes.
+    return [row[0] for row in sorted(rows, key=lambda row: row[1])]
 
 
 def _emails_fingerprint(emails):
@@ -602,6 +625,7 @@ def _emails_fingerprint(emails):
 def _prune_ai_tasks_locked():
     """Prune AI tasks locked.
     """
+    # Drop completed/old task entries so in-memory task tracking stays bounded.
     if len(AI_TASKS) <= AI_TASK_MAX_ITEMS:
         return
     removable = [
@@ -650,6 +674,7 @@ def _create_or_get_ai_task(task_type, email_id):
 def _set_ai_task_status(task_id, status, result=None, error=None):
     """Set AI task status.
     """
+    # Update task status/result atomically so polling clients always see consistent state.
     with AI_TASK_LOCK:
         task = AI_TASKS.get(task_id)
         if not task:
@@ -670,6 +695,7 @@ def _set_ai_task_status(task_id, status, result=None, error=None):
 def _get_ai_task(task_id):
     """Get AI task.
     """
+    # Return the requested value while keeping failure behavior explicit for callers.
     with AI_TASK_LOCK:
         task = AI_TASKS.get(task_id)
         return dict(task) if task else None
@@ -678,6 +704,7 @@ def _get_ai_task(task_id):
 def _serialize_ai_task(task):
     """Serialize AI task.
     """
+    # Manage serialize ai task lifecycle so asynchronous UI polling stays consistent.
     payload = {
         "task_id": task["id"],
         "task_type": task["type"],
@@ -694,6 +721,7 @@ def _serialize_ai_task(task):
 def _analysis_task_worker(task_id, email_id):
     """Analysis task worker.
     """
+    # Run AI analysis in a background thread and publish task result payloads for the UI.
     _set_ai_task_status(task_id, "running")
     try:
         email_data = fetch_email_by_id(email_id)
@@ -726,6 +754,7 @@ def _analysis_task_worker(task_id, email_id):
 def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text):
     """Draft task worker.
     """
+    # Generate/revise draft text in background and store the finished draft in task state.
     _set_ai_task_status(task_id, "running")
     try:
         email_data = fetch_email_by_id(email_id)
@@ -778,6 +807,7 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
 def _start_analysis_task(email_id):
     """Start analysis task.
     """
+    # Start background work and return task metadata for polling.
     task, created = _create_or_get_ai_task("analyze", email_id)
     if created:
         threading.Thread(
@@ -791,6 +821,7 @@ def _start_analysis_task(email_id):
 def _start_draft_task(email_id, to_value, cc_value, current_reply_text):
     """Start draft task.
     """
+    # Start background work and return task metadata for polling.
     task, created = _create_or_get_ai_task("draft", email_id)
     if created:
         threading.Thread(
@@ -810,6 +841,7 @@ def _start_draft_task(email_id, to_value, cc_value, current_reply_text):
 def _set_message_read_state_async(external_id, read=True):
     """Set message read state async.
     """
+    # Set message read state async and keep local/provider state aligned when possible.
     if not external_id:
         return
     threading.Thread(
@@ -822,6 +854,7 @@ def _set_message_read_state_async(external_id, read=True):
 def _fetch_live_list_emails(list_view):
     """Fetch live list emails.
     """
+    # Fetch live list emails from storage without mutating persistent state.
     config = LIVE_LIST_CONFIGS.get(list_view)
     if not config:
         return None, None
@@ -844,6 +877,7 @@ def _fetch_live_list_emails(list_view):
 def _filter_emails_by_query(emails, query_text):
     """Filter emails by query.
     """
+    # Filter emails by query using the active query/criteria.
     query = (query_text or "").strip()
     if not query:
         return emails
@@ -868,12 +902,14 @@ def _filter_emails_by_query(emails, query_text):
 def _current_list_url():
     """Current list url.
     """
+    # Resolve current list url using configuration defaults and safe fallback behavior.
     return request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
 
 
 def _list_query_state():
     """List query state.
     """
+    # Apply list query state rules to shape list output for the active mailbox view.
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
     return sort_code, search_query, _current_list_url()
@@ -882,6 +918,7 @@ def _list_query_state():
 def _next_url_from_request():
     """Next url from request.
     """
+    # Resolve next url from request using configuration defaults and safe fallback behavior.
     return _safe_next_url(request.form.get("next") or request.args.get("next"))
 
 
@@ -896,6 +933,7 @@ def _render_mailbox_page(
 ):
     """Render mailbox page.
     """
+    # Render the target template using already-prepared view-model data.
     sort_code, search_query, current_list_url = _list_query_state()
     if sync_drafts:
         sync_drafts_from_gmail(max_results=40)
@@ -922,6 +960,7 @@ def _render_mailbox_page(
 def _persist_compose_draft(fields, attachments=None):
     """Persist compose draft.
     """
+    # Persist compose form state to provider + local DB and return the local draft id.
     draft_info = upsert_gmail_draft(
         to_value=fields["to"],
         cc_value=fields["cc"],
@@ -977,6 +1016,7 @@ def _set_read_state_with_fallback(email_id, email_data, target_read_state):
 def _parse_bulk_email_ids(raw_ids):
     """Parse bulk email IDs.
     """
+    # Parse raw bulk email ids input into validated values for downstream logic.
     seen = set()
     parsed = []
     for token in str(raw_ids or "").split(","):
@@ -1037,6 +1077,7 @@ def list_emails_api():
 def start_ai_analyze(id):
     """Start AI analyze.
     """
+    # Start ai analyze in background and return metadata for API polling.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1052,6 +1093,7 @@ def start_ai_analyze(id):
 def start_ai_draft(id):
     """Start AI draft.
     """
+    # Start ai draft in background and return metadata for API polling.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1072,6 +1114,7 @@ def start_ai_draft(id):
 def ai_task_status(task_id):
     """Ai task status.
     """
+    # Manage ai task status lifecycle so asynchronous UI polling stays consistent.
     task = _get_ai_task(task_id)
     if not task:
         abort(404)
@@ -1082,6 +1125,7 @@ def ai_task_status(task_id):
 def sync_from_gmail():
     """Sync from Gmail.
     """
+    # Sync from gmail between Gmail and the local database.
     if request.endpoint == "static":
         return
     if request.method != "GET":
@@ -1100,12 +1144,14 @@ def sync_from_gmail():
 def index():
     """Index.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return redirect(url_for("main.about"))
 
 @main.route("/about")
 def about():
     """About.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return render_template("about.html")
 
 
@@ -1113,6 +1159,7 @@ def about():
 def profile():
     """Profile.
     """
+    # Route handler: validate request inputs, then render or redirect.
     profile_data = get_user_profile()
     if request.method == "POST":
         name_value = (request.form.get("name") or "").strip()
@@ -1143,6 +1190,7 @@ def profile():
 def allemails():
     """Allemails.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "allemails.html",
         exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -1152,6 +1200,7 @@ def allemails():
 def readonly():
     """Readonly.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "readonly.html",
         email_type="read-only",
@@ -1161,6 +1210,7 @@ def readonly():
 def responseneeded():
     """Responseneeded.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "responseneeded.html",
         email_type="response-needed",
@@ -1170,6 +1220,7 @@ def responseneeded():
 def junkmailconfirm():
     """Junkmailconfirm.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "junkmailconfirm.html",
         email_type="junk-uncertain",
@@ -1179,6 +1230,7 @@ def junkmailconfirm():
 def junk():
     """Junk.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "junk.html",
         email_type="junk",
@@ -1189,6 +1241,7 @@ def junk():
 def sent():
     """Sent.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "sent.html",
         email_type="sent",
@@ -1200,6 +1253,7 @@ def sent():
 def drafts():
     """Drafts.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "drafts.html",
         email_type="draft",
@@ -1212,6 +1266,7 @@ def drafts():
 def archive():
     """Archive.
     """
+    # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "archive.html",
         exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -1222,6 +1277,7 @@ def archive():
 def email(id):
     """Email.
     """
+    # Route handler: validate request inputs, then render or redirect.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -1292,6 +1348,7 @@ def set_email_type(id):
 def bulk_email_action():
     """Bulk email action.
     """
+    # Transform bulk email action data between provider payloads and local mailbox records.
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
     email_ids = _parse_bulk_email_ids(request.form.get("ids"))
@@ -1364,6 +1421,7 @@ def bulk_email_action():
 def archive_email(id):
     """Archive email.
     """
+    # Transform archive email data between provider payloads and local mailbox records.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1378,6 +1436,7 @@ def archive_email(id):
 def unarchive_email(id):
     """Unarchive email.
     """
+    # Transform unarchive email data between provider payloads and local mailbox records.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1390,6 +1449,7 @@ def unarchive_email(id):
 def search():
     """Search.
     """
+    # Route handler: validate request inputs, then render or redirect.
     q = (request.args.get("q") or "").strip()
     if not q:
         return redirect(url_for("main.allemails"))
@@ -1400,6 +1460,7 @@ def search():
 def analyze_email_route(id):
     """Analyze email route.
     """
+    # Transform analyze email route data between provider payloads and local mailbox records.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1416,6 +1477,7 @@ def analyze_email_route(id):
 def send_reply(id):
     """Send reply.
     """
+    # Generate, revise, or validate send reply used by reply and draft workflows.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -1499,6 +1561,7 @@ def compose():
 def compose_save():
     """Compose save.
     """
+    # Internal helper for compose save used by higher-level request and sync workflows.
     next_url = _next_url_from_request()
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
@@ -1513,6 +1576,7 @@ def compose_save():
 def compose_autosave():
     """Compose autosave.
     """
+    # Internal helper for compose autosave used by higher-level request and sync workflows.
     fields = _collect_compose_fields()
     if not _has_compose_content(fields):
         return Response(status=204)
@@ -1570,6 +1634,7 @@ def compose_send():
 def generate_draft(id):
     """Generate draft.
     """
+    # Generate, revise, or validate generate draft used by reply and draft workflows.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -1608,6 +1673,7 @@ def generate_draft(id):
 def delete_email(id):
     """Delete email.
     """
+    # Delete email and clean dependent state where required.
     email_data = fetch_email_by_id(id)
     if email_data:
         if email_data.get("type") == "draft" and email_data.get("provider_draft_id"):
@@ -1622,6 +1688,7 @@ def delete_email(id):
 def toggle_read(id):
     """Toggle read.
     """
+    # Internal helper for toggle read used by higher-level request and sync workflows.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)

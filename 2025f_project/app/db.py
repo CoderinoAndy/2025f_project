@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +97,7 @@ def db_session(db_path):
 def init_db(db_path=DB_DEFAULT):
     """Initialize database.
     """
+    # Internal helper for init db used by higher-level request and sync workflows.
     schema_path = Path(__file__).resolve().parent / "sql" / "schema.sql"
     if not schema_path.exists():
         raise FileNotFoundError("schema.sql not found in app/sql/")
@@ -338,6 +339,7 @@ def _row_to_dict(row):
 def _split_addresses(raw_value):
     """Split addresses.
     """
+    # Internal helper for split addresses used by higher-level request and sync workflows.
     if raw_value is None:
         return []
     text = str(raw_value).replace(";", ",")
@@ -358,6 +360,7 @@ def _split_addresses(raw_value):
 def _insert_recipients(conn, email_id, recipient_type, raw_value):
     """Insert recipients.
     """
+    # Internal helper for insert recipients used by higher-level request and sync workflows.
     for address in _split_addresses(raw_value):
         conn.execute(
             """
@@ -371,6 +374,7 @@ def _insert_recipients(conn, email_id, recipient_type, raw_value):
 def _normalize_ai_category(value):
     """Normalize AI category.
     """
+    # Normalize ai category into a canonical value used across the app.
     category = str(value or "").strip().lower()
     return category if category in AI_CATEGORIES else None
 
@@ -378,6 +382,7 @@ def _normalize_ai_category(value):
 def _normalize_ai_needs_response(value):
     """Normalize AI needs response.
     """
+    # Normalize ai needs response into a canonical value used across the app.
     if value is None:
         return None
     if isinstance(value, bool):
@@ -393,6 +398,7 @@ def _normalize_ai_needs_response(value):
 def _normalize_ai_confidence(value):
     """Normalize AI confidence.
     """
+    # Normalize ai confidence into a canonical value used across the app.
     if value is None or value == "":
         return None
     try:
@@ -405,6 +411,7 @@ def _normalize_ai_confidence(value):
 def _normalize_archived_flag(value):
     """Normalize archived flag.
     """
+    # Normalize archived flag into a canonical value used across the app.
     if isinstance(value, bool):
         return 1 if value else 0
     if value is None:
@@ -457,6 +464,7 @@ def fetch_emails(
 def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
     """Fetch email by ID.
     """
+    # Fetch email by id from storage and return normalized rows.
     with db_session(db_path) as conn:
         cur = conn.execute(
             f"""
@@ -471,6 +479,7 @@ def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
 def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
     """Fetch email by provider draft ID.
     """
+    # Fetch email by provider draft id from storage and return normalized rows.
     if not provider_draft_id:
         return None
     with db_session(db_path) as conn:
@@ -488,6 +497,7 @@ def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
 def fetch_thread_emails(thread_id, db_path=DB_DEFAULT):
     """Fetch thread emails.
     """
+    # Fetch thread emails from storage and return normalized rows.
     if not thread_id:
         return []
     with db_session(db_path) as conn:
@@ -505,6 +515,7 @@ def fetch_thread_emails(thread_id, db_path=DB_DEFAULT):
 def mark_read(email_id, read=True, db_path=DB_DEFAULT):
     """Mark read.
     """
+    # Update read state without mutating unrelated fields.
     with db_session(db_path) as conn:
         conn.execute(
             "UPDATE email_messages SET is_read = ? WHERE id = ?",
@@ -727,6 +738,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
 def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
     """Set email type.
     """
+    # Set email type while keeping local and provider state aligned when possible.
     if new_type not in ALLOWED_TYPES:
         raise ValueError("Invalid email type.")
     with db_session(db_path) as conn:
@@ -736,6 +748,7 @@ def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
 def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
     """Set email archived.
     """
+    # Set email archived while keeping local and provider state aligned when possible.
     with db_session(db_path) as conn:
         conn.execute(
             "UPDATE email_messages SET is_archived = ? WHERE id = ?",
@@ -746,6 +759,7 @@ def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
 def toggle_read_state(email_id, db_path=DB_DEFAULT):
     """Toggle read state.
     """
+    # Internal helper for toggle read state used by higher-level request and sync workflows.
     with db_session(db_path) as conn:
         conn.execute(
             """
@@ -760,6 +774,7 @@ def toggle_read_state(email_id, db_path=DB_DEFAULT):
 def update_draft(email_id, draft_text, db_path=DB_DEFAULT):
     """Update draft.
     """
+    # Update draft fields while preserving schema and business constraints.
     with db_session(db_path) as conn:
         conn.execute("UPDATE email_messages SET draft = ? WHERE id = ?", (draft_text, email_id))
 
@@ -767,6 +782,7 @@ def update_draft(email_id, draft_text, db_path=DB_DEFAULT):
 def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_DEFAULT):
     """Create reply email.
     """
+    # Create reply email from validated inputs and return the new identifier.
     with db_session(db_path) as conn:
         cur = conn.execute(
             """
@@ -816,6 +832,7 @@ def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_D
 def delete_email(email_id, db_path=DB_DEFAULT):
     """Delete email.
     """
+    # Delete email and clean dependent state where required.
     with db_session(db_path) as conn:
         conn.execute("DELETE FROM email_messages WHERE id = ?", (email_id,))
 
@@ -1005,6 +1022,7 @@ def create_local_sent_email(
 ):
     """Create local sent email.
     """
+    # Create local sent email from validated inputs and return the new identifier.
     clean_title = (title or "(No subject)").strip()
     with db_session(db_path) as conn:
         cur = conn.execute(
@@ -1034,6 +1052,7 @@ def create_local_sent_email(
 def get_user_profile(db_path=DB_DEFAULT):
     """Get user profile.
     """
+    # Return user profile with explicit fallback behavior for callers.
     with db_session(db_path) as conn:
         row = conn.execute(
             """
@@ -1052,6 +1071,7 @@ def get_user_profile(db_path=DB_DEFAULT):
 def save_user_profile(name, occupation, photo_path=None, db_path=DB_DEFAULT):
     """Save user profile.
     """
+    # Save user profile after sanitizing user-provided input.
     name_value = (name or "").strip()
     occupation_value = (occupation or "").strip()
     photo_value = (photo_path or "").strip()

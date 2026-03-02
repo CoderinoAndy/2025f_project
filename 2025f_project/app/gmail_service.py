@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import hashlib
 import mimetypes
 import os
@@ -65,6 +65,7 @@ _SYNC_LOCK = threading.Lock()
 def _candidate_credentials_paths():
     """Candidate credentials paths.
     """
+    # Construct fallback candidates in priority order.
     configured_path = os.getenv("GMAIL_CREDENTIALS_FILE")
     candidates = []
     if configured_path:
@@ -77,6 +78,7 @@ def _candidate_credentials_paths():
 def _resolve_credentials_path():
     """Resolve credentials path.
     """
+    # Resolve resolve credentials path using configuration defaults and safe fallback behavior.
     for path in _candidate_credentials_paths():
         if path.exists():
             return path
@@ -86,6 +88,7 @@ def _resolve_credentials_path():
 def gmail_available():
     """Gmail available.
     """
+    # Internal helper for gmail available used by higher-level request and sync workflows.
     return bool(
         _resolve_credentials_path()
         and Request
@@ -98,6 +101,7 @@ def gmail_available():
 def _save_token(credentials):
     """Save token.
     """
+    # Save token after sanitizing user-provided values.
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_PATH.write_text(credentials.to_json(), encoding="utf-8")
 
@@ -152,6 +156,7 @@ def _load_credentials():
 def _get_service():
     """Get service.
     """
+    # Return the requested value while keeping failure behavior explicit for callers.
     credentials = _load_credentials()
     if not credentials:
         return None
@@ -171,6 +176,7 @@ def _get_service():
 def _extract_header(payload, header_name):
     """Extract header.
     """
+    # Extract header from provider/user payloads while handling missing fields safely.
     for header in payload.get("headers", []) or []:
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
@@ -180,6 +186,7 @@ def _extract_header(payload, header_name):
 def _decode_body_bytes(raw_data):
     """Decode body bytes.
     """
+    # Internal helper for decode body bytes used by higher-level request and sync workflows.
     if not raw_data:
         return b""
     padded = f"{raw_data}{'=' * (-len(raw_data) % 4)}"
@@ -192,6 +199,7 @@ def _decode_body_bytes(raw_data):
 def _extract_part_header(part, header_name):
     """Extract part header.
     """
+    # Extract part header from provider/user payloads while handling missing fields safely.
     for header in part.get("headers", []) or []:
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
@@ -201,6 +209,7 @@ def _extract_part_header(part, header_name):
 def _normalize_cid(raw_value):
     """Normalize cid.
     """
+    # Normalize cid into a canonical value used across the app.
     if not raw_value:
         return ""
     return raw_value.strip().strip("<>").lower()
@@ -209,6 +218,7 @@ def _normalize_cid(raw_value):
 def _attachment_bytes(service, message_id, attachment_id):
     """Attachment bytes.
     """
+    # Process attachment bytes while preserving filename/type metadata for send/save flows.
     if not service or not message_id or not attachment_id:
         return b""
     try:
@@ -227,6 +237,7 @@ def _attachment_bytes(service, message_id, attachment_id):
 def _iter_parts(payload):
     """Iter parts.
     """
+    # Internal helper for iter parts used by higher-level request and sync workflows.
     if not payload:
         return
     stack = [payload]
@@ -241,6 +252,7 @@ def _iter_parts(payload):
 def _guess_filename(content_type, index):
     """Guess filename.
     """
+    # Internal helper for guess filename used by higher-level request and sync workflows.
     mime = (content_type or "").split(";", 1)[0].strip().lower()
     extension = mimetypes.guess_extension(mime) if mime else None
     suffix = extension or ".bin"
@@ -250,6 +262,7 @@ def _guess_filename(content_type, index):
 def _extract_attachment_payloads(payload, service=None, message_id=None):
     """Extract attachment payloads.
     """
+    # Extract attachment payloads from provider/user payloads while handling missing fields safely.
     attachments = []
     for part in _iter_parts(payload):
         body_info = part.get("body") or {}
@@ -282,6 +295,7 @@ def _extract_attachment_payloads(payload, service=None, message_id=None):
 def _extract_attachment_metadata(payload):
     """Extract attachment metadata.
     """
+    # Extract attachment metadata from provider/user payloads while handling missing fields safely.
     metadata = []
     for part in _iter_parts(payload):
         body_info = part.get("body") or {}
@@ -340,6 +354,7 @@ def _merge_attachment_payloads(existing_attachments, incoming_attachments):
 def _get_draft_data(service, provider_draft_id):
     """Get draft data.
     """
+    # Return the requested value while keeping failure behavior explicit for callers.
     if not service or not provider_draft_id:
         return None
     try:
@@ -364,6 +379,7 @@ def _get_draft_data(service, provider_draft_id):
 def _get_message_data(service, external_id):
     """Get message data.
     """
+    # Return the requested value while keeping failure behavior explicit for callers.
     if not service or not external_id:
         return None
     try:
@@ -388,6 +404,7 @@ def _get_message_data(service, external_id):
 def fetch_draft_attachments(provider_draft_id):
     """Fetch draft attachments.
     """
+    # Fetch draft attachments from storage and return normalized rows.
     service = _get_service()
     if not service or not provider_draft_id:
         return []
@@ -405,6 +422,7 @@ def fetch_draft_attachments(provider_draft_id):
 def fetch_draft_attachment_metadata(provider_draft_id):
     """Fetch draft attachment metadata.
     """
+    # Fetch draft attachment metadata from storage and return normalized rows.
     service = _get_service()
     if not service or not provider_draft_id:
         return []
@@ -418,6 +436,7 @@ def fetch_draft_attachment_metadata(provider_draft_id):
 def fetch_message_attachments(external_id):
     """Fetch message attachments.
     """
+    # Fetch message attachments from storage and return normalized rows.
     service = _get_service()
     if not service or not external_id:
         return []
@@ -434,6 +453,7 @@ def fetch_message_attachments(external_id):
 def fetch_message_attachment_metadata(external_id):
     """Fetch message attachment metadata.
     """
+    # Fetch message attachment metadata from storage and return normalized rows.
     service = _get_service()
     if not service or not external_id:
         return []
@@ -446,6 +466,7 @@ def fetch_message_attachment_metadata(external_id):
 def _html_to_text(raw_html):
     """Html recipient text.
     """
+    # Internal helper for html to text used by higher-level request and sync workflows.
     if not raw_html:
         return ""
     no_scripts = re.sub(
@@ -461,11 +482,13 @@ def _html_to_text(raw_html):
 def _replace_inline_cid_sources(raw_html, cid_sources):
     """Replace inline cid sources.
     """
+    # Internal helper for replace inline cid sources used by higher-level request and sync workflows.
     if not raw_html or not cid_sources:
         return raw_html
 
     def replacer(match):
         """Swap `cid:` image references with resolved inline data URLs when available."""
+        # Internal helper for replacer used by higher-level request and sync workflows.
         quote = match.group(1)
         cid_key = _normalize_cid(match.group(2))
         resolved = cid_sources.get(cid_key)
@@ -543,6 +566,7 @@ def _extract_message_content(payload, service=None, message_id=None):
 def _parse_addresses(raw_value):
     """Parse addresses.
     """
+    # Parse raw addresses input into validated values for downstream logic.
     if not raw_value:
         return ""
     parsed_addresses = [addr for _, addr in getaddresses([raw_value]) if addr]
@@ -552,12 +576,14 @@ def _parse_addresses(raw_value):
 def _header_value(payload, name):
     """Header value.
     """
+    # Internal helper for header value used by higher-level request and sync workflows.
     return (_extract_header(payload, name) or "").strip()
 
 
 def _sender_looks_bulk(payload):
     """Sender looks bulk.
     """
+    # Internal helper for sender looks bulk used by higher-level request and sync workflows.
     sender_value = _header_value(payload, "From").lower()
     if any(marker in sender_value for marker in BULK_SENDER_MARKERS):
         return True
@@ -581,6 +607,7 @@ def _sender_looks_bulk(payload):
 def _labels_to_type(label_ids, payload=None):
     """Labels recipient type.
     """
+    # Internal helper for labels to type used by higher-level request and sync workflows.
     labels = set(label_ids or [])
     if "DRAFT" in labels:
         return "draft"
@@ -598,6 +625,7 @@ def _labels_to_type(label_ids, payload=None):
 def _labels_to_priority(label_ids):
     """Labels recipient priority.
     """
+    # Internal helper for labels to priority used by higher-level request and sync workflows.
     labels = set(label_ids or [])
     if "STARRED" in labels:
         return 3
@@ -609,6 +637,7 @@ def _labels_to_priority(label_ids):
 def _received_at(internal_date):
     """Received at.
     """
+    # Internal helper for received at used by higher-level request and sync workflows.
     try:
         timestamp = int(internal_date) / 1000
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -657,6 +686,7 @@ def sync_message_by_external_id(
 ):
     """Sync message by external ID.
     """
+    # Sync message by external id between Gmail and the local database.
     if not external_id:
         return None
     service = service or _get_service()
@@ -696,6 +726,7 @@ def sync_message_by_external_id(
 def _should_ai_triage_email(email_data):
     """Return whether AI triage email.
     """
+    # Keep this decision logic centralized for predictable control flow.
     if not email_data:
         return False
     if email_data.get("type") in {"sent", "draft"}:
@@ -717,6 +748,7 @@ def _should_ai_triage_email(email_data):
 def _triage_email_with_ai(email_data, user_profile, db_path):
     """Triage email with ai.
     """
+    # Normalize triage email with ai into constrained labels used by mailbox triage logic.
     classification = classify_email(
         email_data=email_data,
         user_profile=user_profile,
@@ -877,6 +909,7 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
 
     def _worker():
         """Run one background sync cycle and always release the sync lock afterward."""
+        # Manage worker lifecycle so asynchronous UI polling stays consistent.
         global _LAST_SYNC_AT
         try:
             sync_recent_emails(db_path=db_path, max_results=max_results)
@@ -913,6 +946,7 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
 def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
     """Modify labels.
     """
+    # Internal helper for modify labels used by higher-level request and sync workflows.
     body = {}
     if add_labels:
         body["addLabelIds"] = sorted(set(add_labels))
@@ -939,6 +973,7 @@ def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
 def _build_email_message(to_value, cc_value, subject, body_text, attachments=None):
     """Build email message.
     """
+    # Build email message in the exact shape expected by the next API/database call.
     message = EmailMessage()
     if to_value:
         message["To"] = to_value
@@ -973,6 +1008,7 @@ def send_compose_message(
 ):
     """Send compose message.
     """
+    # Transform send compose message data between provider payloads and local mailbox records.
     service = _get_service()
     if not service:
         return None
@@ -1117,6 +1153,7 @@ def upsert_gmail_draft(
 def delete_draft_message(provider_draft_id):
     """Delete draft message.
     """
+    # Delete draft message and clean dependent state where required.
     service = _get_service()
     if not service or not provider_draft_id:
         return False
@@ -1146,6 +1183,7 @@ def delete_draft_message(provider_draft_id):
 def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
     """Sync drafts from Gmail.
     """
+    # Sync drafts from gmail between Gmail and the local database.
     service = _get_service()
     if not service:
         return 0
@@ -1228,6 +1266,7 @@ def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
 def set_message_read_state(external_id, read, db_path=DB_DEFAULT):
     """Set message read state.
     """
+    # Set message read state while keeping local and provider state aligned when possible.
     service = _get_service()
     if not service or not external_id:
         return False
@@ -1292,6 +1331,7 @@ def send_reply_message(
 ):
     """Send reply message.
     """
+    # Generate, revise, or validate send reply message used by reply and draft workflows.
     service = _get_service()
     if not service:
         return None
@@ -1358,6 +1398,7 @@ def send_reply_message(
 def trash_message(external_id):
     """Trash message.
     """
+    # Transform trash message data between provider payloads and local mailbox records.
     service = _get_service()
     if not service or not external_id:
         return False

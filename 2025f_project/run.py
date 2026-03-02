@@ -1,4 +1,4 @@
-from app import create_app  # Import the app factory that wires config, DB, and routes.
+﻿from app import create_app  # Import the app factory that wires config, DB, and routes.
 
 app = create_app()  # Build one Flask app instance for both CLI and WSGI use.
 

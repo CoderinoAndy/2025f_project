@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -14,6 +14,7 @@ _CONFIG_LOCK = Lock()
 def _clean_value(value):
     """Clean value.
     """
+    # Sanitize clean value so downstream code receives safe, normalized text values.
     text = str(value if value is not None else "")
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
     if len(text) > MAX_FIELD_LENGTH:
@@ -24,6 +25,7 @@ def _clean_value(value):
 def _clean_key(value):
     """Clean key.
     """
+    # Sanitize clean key so downstream code receives safe, normalized text values.
     raw = _clean_value(value).lower()
     if not raw:
         return "meta"
@@ -35,6 +37,7 @@ def _clean_key(value):
 def _log_path():
     """Log path.
     """
+    # Write log path details in the app's structured log format for debugging and traceability.
     configured = (os.getenv("APP_DEBUG_LOG_PATH") or "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -44,12 +47,14 @@ def _log_path():
 def get_debug_log_path():
     """Get debug log path.
     """
+    # Return debug log path with explicit fallback behavior for callers.
     return str(_log_path())
 
 
 def configure_debug_logger():
     """Configure debug logger.
     """
+    # Write configure debug logger details in the app's structured log format for debugging and traceability.
     logger = logging.getLogger(LOGGER_NAME)
     target_path = _log_path()
 
@@ -77,6 +82,7 @@ def configure_debug_logger():
 def _logger():
     """Logger.
     """
+    # Write logger details in the app's structured log format for debugging and traceability.
     return configure_debug_logger()
 
 
@@ -132,6 +138,7 @@ def log_exception(
 ):
     """Log exception.
     """
+    # Write log exception details in the app's structured log format for debugging and traceability.
     error_name = type(error).__name__
     fallback_details = details or str(error)
     log_event(  # Log the exception as a normalized structured event.

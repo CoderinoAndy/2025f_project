@@ -1,4 +1,4 @@
-import ipaddress
+﻿import ipaddress
 import json
 import os
 import re
@@ -106,12 +106,14 @@ REQUEST_SENTENCE_MARKERS = (
 def _utc_now():
     """Utc now.
     """
+    # Internal helper for utc now used by higher-level request and sync workflows.
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _action_log_path():
     """Action log path.
     """
+    # Write action log path details in the app's structured log format for debugging and traceability.
     configured = (os.getenv("AI_ACTION_LOG_PATH") or "").strip()
     if configured:
         return Path(configured)
@@ -121,6 +123,7 @@ def _action_log_path():
 def _one_line(value):
     """One line.
     """
+    # Internal helper for one line used by higher-level request and sync workflows.
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     return text[:500]
 
@@ -159,12 +162,14 @@ def _log_action(task, status, email_id=None, detail=""):
 def log_ai_event(task, status, email_id=None, detail=""):
     """Log AI event.
     """
+    # Write log ai event details in the app's structured log format for debugging and traceability.
     _log_action(task=task, status=status, email_id=email_id, detail=detail)
 
 
 def _api_url():
     """Api url.
     """
+    # Resolve api url using configuration defaults and safe fallback behavior.
     value = (os.getenv("OLLAMA_API_URL") or OLLAMA_API_URL_DEFAULT).strip()
     return value or OLLAMA_API_URL_DEFAULT
 
@@ -172,6 +177,7 @@ def _api_url():
 def _model_name():
     """Model name.
     """
+    # Internal helper for model name used by higher-level request and sync workflows.
     value = (os.getenv("OLLAMA_MODEL") or OLLAMA_MODEL_DEFAULT).strip()
     return value or OLLAMA_MODEL_DEFAULT
 
@@ -179,6 +185,7 @@ def _model_name():
 def _timeout_seconds():
     """Timeout seconds.
     """
+    # Internal helper for timeout seconds used by higher-level request and sync workflows.
     raw = (os.getenv("OLLAMA_TIMEOUT_SECONDS") or "").strip()
     try:
         parsed = float(raw) if raw else float(OLLAMA_TIMEOUT_SECONDS_DEFAULT)
@@ -190,6 +197,7 @@ def _timeout_seconds():
 def _summary_min_chars():
     """Summary min chars.
     """
+    # Internal helper for summary min chars used by higher-level request and sync workflows.
     raw = (os.getenv("OLLAMA_SUMMARY_MIN_CHARS") or "").strip()
     try:
         parsed = int(raw) if raw else SUMMARY_MIN_CHARS_DEFAULT
@@ -201,6 +209,7 @@ def _summary_min_chars():
 def _is_loopback_host(hostname):
     """Return whether loopback host.
     """
+    # Internal helper for is loopback host used by higher-level request and sync workflows.
     if not hostname:
         return False
     lowered = hostname.lower()
@@ -215,6 +224,7 @@ def _is_loopback_host(hostname):
 def _endpoint_allowed():
     """Endpoint allowed.
     """
+    # Internal helper for endpoint allowed used by higher-level request and sync workflows.
     parsed = urlparse(_api_url())
     if parsed.scheme != "http":
         return False
@@ -224,12 +234,14 @@ def _endpoint_allowed():
 def ai_enabled():
     """Ai enabled.
     """
+    # Internal helper for ai enabled used by higher-level request and sync workflows.
     return _endpoint_allowed()
 
 
 def should_summarize_email(email_data):
     """Return whether summarize email.
     """
+    # Return whether summarize email should run based on current message/context state.
     body = (email_data.get("body") or "").strip()
     return len(body) >= _summary_min_chars()
 
@@ -237,6 +249,7 @@ def should_summarize_email(email_data):
 def classification_to_email_type(classification):
     """Classification recipient email type.
     """
+    # Normalize classification to email type into constrained labels used by mailbox triage logic.
     if not isinstance(classification, dict):
         return "read-only"
     explicit_type = str(classification.get("email_type") or "").strip().lower()
@@ -260,12 +273,14 @@ def classification_to_email_type(classification):
 def _compact_text(value):
     """Compact text.
     """
+    # Internal helper for compact text used by higher-level request and sync workflows.
     return " ".join(str(value or "").split()).strip()
 
 
 def _text_tokens(value):
     """Text tokens.
     """
+    # Internal helper for text tokens used by higher-level request and sync workflows.
     text = str(value or "").lower()
     return [token for token in re.findall(r"[a-z0-9']+", text) if len(token) > 2]
 
@@ -273,6 +288,7 @@ def _text_tokens(value):
 def _token_overlap_ratio(left, right):
     """Token overlap ratio.
     """
+    # Internal helper for token overlap ratio used by higher-level request and sync workflows.
     left_tokens = set(_text_tokens(left))
     right_tokens = set(_text_tokens(right))
     if not left_tokens or not right_tokens:
@@ -283,6 +299,7 @@ def _token_overlap_ratio(left, right):
 def _is_noise_fragment(text):
     """Return whether noise fragment.
     """
+    # Internal helper for is noise fragment used by higher-level request and sync workflows.
     normalized = _compact_text(text).lower()
     if not normalized or normalized == "[link]":
         return True
@@ -292,6 +309,7 @@ def _is_noise_fragment(text):
 def _is_near_subject_copy(candidate_text, title_text):
     """Return whether near subject copy.
     """
+    # Internal helper for is near subject copy used by higher-level request and sync workflows.
     candidate = _compact_text(candidate_text)
     title = _compact_text(title_text)
     if not candidate or not title or title.lower() == "(no subject)":
@@ -332,6 +350,7 @@ def _strip_reply_chain(text):
 def _clean_body_for_prompt(body, max_chars=8000):
     """Clean body for prompt.
     """
+    # Sanitize clean body for prompt so downstream code receives safe, normalized text values.
     text = str(body or "").replace("\r\n", "\n").replace("\r", "\n")
     text = _strip_reply_chain(text)
     cleaned_lines = []
@@ -354,6 +373,7 @@ def _clean_body_for_prompt(body, max_chars=8000):
 def _extract_key_sentences(body_text, max_sentences=8):
     """Extract key sentences.
     """
+    # Extract key sentences from provider/user payloads while handling missing fields safely.
     cleaned_body = _clean_body_for_prompt(body_text or "", max_chars=5000)
     if not cleaned_body:
         return []
@@ -394,6 +414,7 @@ def _extract_key_sentences(body_text, max_sentences=8):
 def _body_for_context(email_data, max_chars=8000):
     """Body for context.
     """
+    # Build body for context text that is passed into model prompts.
     key_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=14)
     if key_sentences:
         text = " ".join(key_sentences)
@@ -410,6 +431,7 @@ def _body_for_context(email_data, max_chars=8000):
 def _looks_summary_failure(summary_text):
     """Looks summary failure.
     """
+    # Keep this decision logic centralized for predictable control flow.
     normalized = _compact_text(summary_text).lower()
     if not normalized:
         return True
@@ -425,6 +447,7 @@ def _looks_summary_failure(summary_text):
 def _extractive_summary_fallback(email_data):
     """Extractive summary fallback.
     """
+    # Internal helper for extractive summary fallback used by higher-level request and sync workflows.
     title = _compact_text(email_data.get("title") or "")
     candidate_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=4)
     if not candidate_sentences:
@@ -454,6 +477,7 @@ def _extractive_summary_fallback(email_data):
 def _normalized_email_for_classification(email_data):
     """Normalized email for classification.
     """
+    # Normalize normalized email for classification into constrained labels used by mailbox triage logic.
     return {
         "title": _compact_text(email_data.get("title") or "(No subject)"),
         "sender": _compact_text(email_data.get("sender")),
@@ -466,6 +490,7 @@ def _normalized_email_for_classification(email_data):
 def _profile_prompt_block(user_profile):
     """Profile prompt block.
     """
+    # Build profile prompt block text that is passed into model prompts.
     if not isinstance(user_profile, dict):
         return ""
     name_value = _compact_text(user_profile.get("name"))
@@ -483,6 +508,7 @@ def _profile_prompt_block(user_profile):
 def _email_context_block(email_data):
     """Email context block.
     """
+    # Build email context block text that is passed into model prompts.
     title = _compact_text(email_data.get("title") or "(No subject)")
     sender = _compact_text(email_data.get("sender"))
     recipients = _compact_text(email_data.get("recipients"))
@@ -509,6 +535,7 @@ def _email_context_block(email_data):
 def _sender_parts(sender_text):
     """Sender parts.
     """
+    # Split sender text into structured parts used by heuristic classification logic.
     raw = _compact_text(sender_text).lower()
     if not raw:
         return {
@@ -556,12 +583,14 @@ def _sender_parts(sender_text):
 def _sender_address(sender_text):
     """Sender address.
     """
+    # Internal helper for sender address used by higher-level request and sync workflows.
     return _sender_parts(sender_text).get("email", "")
 
 
 def _has_any_pattern(text, patterns):
     """Return whether any pattern.
     """
+    # Check whether any pattern exists before running heavier work.
     value = str(text or "").lower()
     return any(pattern in value for pattern in patterns)
 
@@ -569,6 +598,7 @@ def _has_any_pattern(text, patterns):
 def _sender_looks_automated(sender_info):
     """Sender looks automated.
     """
+    # Internal helper for sender looks automated used by higher-level request and sync workflows.
     if not isinstance(sender_info, dict):
         return False
     identity = sender_info.get("identity", "")
@@ -578,6 +608,7 @@ def _sender_looks_automated(sender_info):
 def _sender_uses_personal_domain(sender_info):
     """Sender uses personal domain.
     """
+    # Internal helper for sender uses personal domain used by higher-level request and sync workflows.
     if not isinstance(sender_info, dict):
         return False
     domain = str(sender_info.get("domain") or "").strip().lower()
@@ -589,6 +620,7 @@ def _sender_uses_personal_domain(sender_info):
 def _sender_hint_block(email_data):
     """Sender hint block.
     """
+    # Internal helper for sender hint block used by higher-level request and sync workflows.
     sender_info = _sender_parts(email_data.get("sender"))
     sender_automated = _sender_looks_automated(sender_info)
     sender_personal_domain = _sender_uses_personal_domain(sender_info)
@@ -605,6 +637,7 @@ def _sender_hint_block(email_data):
 def _classification_few_shot_block():
     """Classification few shot block.
     """
+    # Normalize classification few shot block into constrained labels used by mailbox triage logic.
     return (
         "Few-shot examples:\n"
         "1) From: promotions@store-updates.example\n"
@@ -629,6 +662,7 @@ def _classification_few_shot_block():
 def _looks_bulk_or_newsletter(email_data):
     """Looks bulk or newsletter.
     """
+    # Keep this decision logic centralized for predictable control flow.
     sender = _sender_address(email_data.get("sender"))
     body = str(email_data.get("body") or "").lower()
     title = str(email_data.get("title") or "").lower()
@@ -714,6 +748,7 @@ def _looks_actionable(email_data):
 def _looks_probable_junk(email_data):
     """Looks probable junk.
     """
+    # Keep this decision logic centralized for predictable control flow.
     sender = _sender_address(email_data.get("sender"))
     title = str(email_data.get("title") or "").lower()
     body = str(email_data.get("body") or "").lower()
@@ -749,6 +784,7 @@ def _looks_probable_junk(email_data):
 def _heuristic_classification(email_data):
     """Heuristic classification.
     """
+    # Normalize heuristic classification into constrained labels used by mailbox triage logic.
     actionable = _looks_actionable(email_data)
     bulk_signal = _looks_bulk_or_newsletter(email_data)
     junk_signal = _looks_probable_junk(email_data)
@@ -835,6 +871,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
 def _extract_json_block(text):
     """Extract JSON block.
     """
+    # Extract json block from provider/user payloads while handling missing fields safely.
     stripped = str(text or "").strip()
     if stripped.startswith("{") and stripped.endswith("}"):
         return stripped
@@ -848,6 +885,7 @@ def _extract_json_block(text):
 def _parse_bool(value):
     """Parse bool.
     """
+    # Parse raw bool input into validated values for downstream logic.
     if isinstance(value, bool):
         return value
     if value is None:
@@ -863,6 +901,7 @@ def _parse_bool(value):
 def _normalize_classification(raw_value):
     """Normalize classification.
     """
+    # Normalize classification into a canonical value used across the app.
     category = str(raw_value.get("category") or "").strip().lower()
     try:
         priority = int(raw_value.get("priority"))
@@ -923,6 +962,7 @@ def _normalize_classification(raw_value):
 def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320):
     """Call ollama.
     """
+    # Send one non-streaming chat request to Ollama and return the model text payload.
     _log_action(task=task, status="call_start", email_id=email_id, detail="ollama_chat")
 
     if not _endpoint_allowed():
@@ -981,6 +1021,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
 def classify_email(email_data, user_profile=None, email_id=None):
     """Classify email.
     """
+    # Normalize classify email into constrained labels used by mailbox triage logic.
     normalized_email = _normalized_email_for_classification(email_data)
     body = (normalized_email.get("body") or "").strip()
     title = (normalized_email.get("title") or "").strip()
@@ -1048,6 +1089,7 @@ def classify_email(email_data, user_profile=None, email_id=None):
 def summarize_email(email_data, user_profile=None, email_id=None):
     """Summarize email.
     """
+    # Transform summarize email data between provider payloads and local mailbox records.
     if not should_summarize_email(email_data):
         return None
     title = _compact_text(email_data.get("title") or "")
@@ -1108,6 +1150,7 @@ def summarize_email(email_data, user_profile=None, email_id=None):
 
 def _sender_display_name(sender_text):
     """Extract a readable sender name from the raw sender field."""
+    # Internal helper for sender display name used by higher-level request and sync workflows.
     sender_raw = _compact_text(sender_text)
     if not sender_raw:
         return ""
@@ -1120,6 +1163,7 @@ def _sender_display_name(sender_text):
 
 def _first_request_sentence(email_data):
     """Return the first sentence that looks like an explicit request."""
+    # Internal helper for first request sentence used by higher-level request and sync workflows.
     for sentence in _extract_key_sentences(email_data.get("body") or "", max_sentences=8):
         lowered = sentence.lower()
         if "?" in sentence:
@@ -1131,6 +1175,7 @@ def _first_request_sentence(email_data):
 
 def _draft_reply_fallback(email_data):
     """Build a safe fallback draft when model output is missing or unusable."""
+    # Generate, revise, or validate draft reply fallback used by reply and draft workflows.
     sender_name = _sender_display_name(email_data.get("sender"))
     greeting = f"Hi {sender_name}," if sender_name else "Hi,"
 
@@ -1169,6 +1214,7 @@ def _draft_reply_fallback(email_data):
 
 def _looks_draft_failure(draft_text, email_data):
     """Detect placeholder or low-quality drafts that should be replaced."""
+    # Keep this decision logic centralized for predictable control flow.
     cleaned = _compact_text(draft_text)
     if not cleaned:
         return True
@@ -1195,6 +1241,7 @@ def _looks_draft_failure(draft_text, email_data):
 def draft_reply(email_data, to_value="", cc_value="", user_profile=None, email_id=None):
     """Draft reply.
     """
+    # Generate, revise, or validate draft reply used by reply and draft workflows.
     body = (email_data.get("body") or "").strip()
     title = _compact_text(email_data.get("title") or "(No subject)")
     if not body and not title:
@@ -1257,6 +1304,7 @@ def revise_reply(
 ):
     """Revise reply.
     """
+    # Generate, revise, or validate revise reply used by reply and draft workflows.
     current_draft_text = str(current_draft_text or "").strip()
     if not current_draft_text:
         return None

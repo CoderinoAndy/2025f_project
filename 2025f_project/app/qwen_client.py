@@ -5,6 +5,7 @@ import re
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
+from .debug_logger import log_event, log_exception
 
 MODEL_DEFAULT = "qwen2.5-7b-instruct"
 BASE_URL_DEFAULT = "http://127.0.0.1:8080/v1"
@@ -54,15 +55,31 @@ def _endpoint_allowed():
     base_url = _base_url()
     parsed = urlparse(base_url)
     if not parsed.scheme or not parsed.netloc:
-        print(f"Qwen disabled: invalid QWEN_API_BASE_URL '{base_url}'")
+        log_event(
+            action_type="qwen_endpoint",
+            action="endpoint_validate",
+            status="error",
+            level="WARNING",
+            component="qwen_client",
+            details="Invalid QWEN_API_BASE_URL.",
+            base_url=base_url,
+        )
         return False
     if _allow_remote():
         return True
     if _is_local_hostname(parsed.hostname):
         return True
-    print(
-        "Qwen blocked: external AI endpoint is not allowed while "
-        "QWEN_ALLOW_REMOTE is off."
+    log_event(
+        action_type="qwen_endpoint",
+        action="endpoint_validate",
+        status="blocked",
+        level="WARNING",
+        component="qwen_client",
+        details=(
+            "Qwen blocked: external endpoint is not allowed while "
+            "QWEN_ALLOW_REMOTE is off."
+        ),
+        base_url=base_url,
     )
     return False
 
@@ -105,7 +122,14 @@ def _chat_completion(messages, temperature=0.1, max_tokens=600):
         with urllib.request.urlopen(request_obj, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-        print(f"Qwen request failed: {exc}")
+        log_exception(
+            action_type="qwen_api",
+            action="chat_completion",
+            error=exc,
+            component="qwen_client",
+            details="Qwen request failed.",
+            endpoint=endpoint,
+        )
         return None
 
     try:

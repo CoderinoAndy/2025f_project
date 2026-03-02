@@ -10,7 +10,10 @@
     return;
   }
 
-  const pollIntervalMs = Number(pageRoot.dataset.pollIntervalMs || "5000");
+  const parsedPollIntervalMs = Number(pageRoot.dataset.pollIntervalMs || "2000");
+  const pollIntervalMs = Number.isFinite(parsedPollIntervalMs)
+    ? Math.max(1000, parsedPollIntervalMs)
+    : 2000;
   const sortSelect = document.querySelector(".sort-select");
   let currentSort = pageRoot.dataset.sort || "date_desc";
   let lastFingerprint = pageRoot.dataset.fingerprint || "";
@@ -88,5 +91,6 @@
   });
 
   window.addEventListener("beforeunload", stopPolling);
+  refreshList();
   startPolling();
 })();

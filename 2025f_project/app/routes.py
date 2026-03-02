@@ -1,5 +1,6 @@
 from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 from datetime import datetime
+import os
 import threading
 import time
 from pathlib import Path
@@ -168,6 +169,25 @@ AI_TASK_LOCK = threading.Lock()
 AI_TASK_MAX_ITEMS = 200
 AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
 
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+LIVE_EMAIL_POLL_INTERVAL_MS = max(1000, _env_int("LIVE_EMAIL_POLL_INTERVAL_MS", 2000))
+LIVE_EMAIL_SYNC_MAX_RESULTS = max(5, _env_int("LIVE_EMAIL_SYNC_MAX_RESULTS", 15))
+LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS = max(
+    5, _env_int("LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS", 30)
+)
+LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS = max(
+    LIVE_EMAIL_SYNC_MAX_RESULTS,
+    _env_int("LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS", 60),
+)
+_LAST_DEEP_LIVE_SYNC_AT = 0.0
+
 def _normalize_addresses(raw_value):
     if raw_value is None:
         return None
@@ -257,6 +277,45 @@ def _collect_reply_fields(email_data):
     cc_value = _normalize_addresses(request.form.get("cc"))
     reply_text = (request.form.get("reply_text") or "").strip()
     return to_value, cc_value, reply_text
+
+
+def _contextual_reply_fallback(email_data):
+    sender_raw = str(email_data.get("sender") or "").strip()
+    sender_label = sender_raw.split("<", 1)[0].strip().strip('"')
+    if "@" in sender_label and " " not in sender_label:
+        sender_label = sender_label.split("@", 1)[0]
+    sender_label = (
+        sender_label.replace(".", " ")
+        .replace("_", " ")
+        .replace("-", " ")
+        .strip()
+    )
+    sender_label = " ".join(sender_label.split())
+
+    title = str(email_data.get("title") or "").strip()
+    body = str(email_data.get("body") or "")
+    body_snippet = " ".join(body.replace("\r\n", "\n").replace("\r", "\n").split())
+    if len(body_snippet) > 140:
+        body_snippet = body_snippet[:137].rstrip() + "..."
+
+    topic = ""
+    if title and title != "(No subject)":
+        topic = f"\"{title}\""
+    elif body_snippet:
+        topic = body_snippet
+
+    greeting = f"Hi {sender_label}," if sender_label else "Hi,"
+    if topic:
+        acknowledgment = f"I reviewed your message about {topic}."
+    else:
+        acknowledgment = "I reviewed your message."
+
+    return (
+        f"{greeting}\n\n"
+        f"{acknowledgment} "
+        f"I will follow up with a detailed response shortly.\n\n"
+        f"Best regards,"
+    )
 
 
 def _should_auto_analyze_email(email_data):
@@ -546,26 +605,9 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
         if not email_data:
             raise ValueError("Email not found.")
 
-        if ai_enabled() and (
-            not str(email_data.get("ai_category") or "").strip()
-            or email_data.get("ai_needs_response") is None
-        ):
+        if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
             _run_ai_analysis(email_data, force=True)
             email_data = fetch_email_by_id(email_id) or email_data
-
-        needs_response = email_data.get("ai_needs_response")
-        if needs_response is None:
-            needs_response = email_data.get("type") == "response-needed"
-        if not bool(needs_response):
-            _set_ai_task_status(
-                task_id,
-                "completed",
-                result={
-                    "needs_response": False,
-                    "draft": current_reply_text or "",
-                },
-            )
-            return
 
         profile = get_user_profile()
         if current_reply_text:
@@ -586,20 +628,13 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
                 email_id=email_id,
             )
         if not draft_text:
-            title = email_data.get("title") or ""
-            draft_text = (
-                f"Hi,\n\n"
-                f"Thanks for your message about \"{title}\". "
-                f"I've received it and will get back to you shortly.\n\n"
-                f"Best regards,"
-            )
+            draft_text = _contextual_reply_fallback(email_data)
 
         update_draft(email_id, draft_text)
         _set_ai_task_status(
             task_id,
             "completed",
             result={
-                "needs_response": True,
                 "draft": draft_text,
             },
         )
@@ -732,6 +767,7 @@ def _render_mailbox_page(
         "sort": sort_code,
         "current_list_url": current_list_url,
         "search_query": search_query,
+        "live_poll_interval_ms": LIVE_EMAIL_POLL_INTERVAL_MS,
     }
     if include_fingerprint:
         context["list_fingerprint"] = _emails_fingerprint(emails_sorted)
@@ -805,9 +841,20 @@ def _parse_bulk_email_ids(raw_ids):
 
 @main.route("/api/list-emails")
 def list_emails_api():
+    global _LAST_DEEP_LIVE_SYNC_AT
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
     current_list_url = _safe_next_url(request.args.get("next"))
+
+    # Keep mailbox views fresh while users stay on the page.
+    # `force=True` bypasses interval gating, while the Gmail sync lock
+    # still prevents overlapping sync workers.
+    now = time.time()
+    sync_max_results = LIVE_EMAIL_SYNC_MAX_RESULTS
+    if now - _LAST_DEEP_LIVE_SYNC_AT >= LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS:
+        sync_max_results = max(sync_max_results, LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS)
+        _LAST_DEEP_LIVE_SYNC_AT = now
+    trigger_background_sync(force=True, max_results=sync_max_results)
 
     emails, empty_message = _fetch_live_list_emails(list_view)
     if emails is None:
@@ -874,9 +921,14 @@ def sync_from_gmail():
         return
     if request.method != "GET":
         return
-    if request.endpoint in {"main.about", "main.compose", "main.profile"}:
+    if request.endpoint in {
+        "main.about",
+        "main.compose",
+        "main.profile",
+        "main.list_emails_api",
+    }:
         return
-    trigger_background_sync(max_results=15)
+    trigger_background_sync(max_results=30)
 
 
 @main.route("/")
@@ -1315,19 +1367,9 @@ def generate_draft(id):
     if email_data is None:
         return "Email not found", 404
 
-    if ai_enabled() and (
-        not str(email_data.get("ai_category") or "").strip()
-        or email_data.get("ai_needs_response") is None
-    ):
+    if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
         _run_ai_analysis(email_data, force=True)
         email_data = fetch_email_by_id(id) or email_data
-
-    needs_response = email_data.get("ai_needs_response")
-    if needs_response is None:
-        needs_response = email_data.get("type") == "response-needed"
-    if not bool(needs_response):
-        next_url = _next_url_from_request()
-        return redirect(url_for("main.email", id=id, next=next_url))
 
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
     profile = get_user_profile()
@@ -1349,13 +1391,7 @@ def generate_draft(id):
             email_id=id,
         )
     if not draft:
-        title = email_data.get("title") or ""
-        draft = (
-            f"Hi,\n\n"
-            f"Thanks for your message about \"{title}\". "
-            f"I've received it and will get back to you shortly.\n\n"
-            f"Best regards,"
-        )
+        draft = _contextual_reply_fallback(email_data)
 
     update_draft(id, draft)
     next_url = _next_url_from_request()

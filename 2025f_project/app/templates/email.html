@@ -550,6 +550,19 @@
       </div>
     </div>
 
+    <script id="email-page-config" type="application/json">
+      {{
+        {
+          "aiEnabled": ai_enabled,
+          "analyzeUrl": url_for('main.start_ai_analyze', id=email.id),
+          "draftUrl": url_for('main.start_ai_draft', id=email.id),
+          "autoAnalyzeNeeded": ai_analysis_needed,
+          "summaryExpected": ai_summary_expected,
+          "initialAnalyzeTaskId": ai_analysis_task_id or "",
+          "initialSummaryText": (email.summary|trim if email.summary else "")
+        }|tojson
+      }}
+    </script>
     <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
     <script>
       (() => {
@@ -688,19 +701,30 @@
       })();
 
       (() => {
-        const aiEnabled = {{ "true" if ai_enabled else "false" }};
+        const pageConfigNode = document.getElementById("email-page-config");
+        if (!pageConfigNode) {
+          return;
+        }
+
+        let pageConfig = {};
+        try {
+          pageConfig = JSON.parse(pageConfigNode.textContent || "{}");
+        } catch {
+          pageConfig = {};
+        }
+
+        const aiEnabled = Boolean(pageConfig.aiEnabled);
         if (!aiEnabled) {
           return;
         }
 
-        const emailId = {{ email.id }};
-        const analyzeUrl = "{{ url_for('main.start_ai_analyze', id=email.id) }}";
-        const draftUrl = "{{ url_for('main.start_ai_draft', id=email.id) }}";
+        const analyzeUrl = String(pageConfig.analyzeUrl || "");
+        const draftUrl = String(pageConfig.draftUrl || "");
         const taskStatusBase = "/api/ai-task/";
-        const autoAnalyzeNeeded = {{ "true" if ai_analysis_needed else "false" }};
-        const summaryExpected = {{ "true" if ai_summary_expected else "false" }};
-        const initialAnalyzeTaskId = "{{ ai_analysis_task_id or '' }}";
-        const initialSummaryText = {{ (email.summary|trim if email.summary else "")|tojson }};
+        const autoAnalyzeNeeded = Boolean(pageConfig.autoAnalyzeNeeded);
+        const summaryExpected = Boolean(pageConfig.summaryExpected);
+        const initialAnalyzeTaskId = String(pageConfig.initialAnalyzeTaskId || "");
+        const initialSummaryText = String(pageConfig.initialSummaryText || "");
 
         const analyzeButton = document.getElementById("analyze-email-btn");
         const draftButton = document.getElementById("generate-draft-btn");
@@ -892,12 +916,6 @@
             });
             const completed = await pollTask(started.task_id);
             const result = completed.result || {};
-            if (result.needs_response === false) {
-              setDraftLoading(true, "No response needed for this email.");
-              await sleep(900);
-              setDraftLoading(false);
-              return;
-            }
             setDraftLoading(false);
             await typeIntoTarget(replyText, result.draft || "", true);
           } catch (error) {

@@ -2,8 +2,10 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from .debug_logger import log_event, log_exception
 
-DB_DEFAULT = "instance/app.sqlite"
+APP_ROOT = Path(__file__).resolve().parent.parent
+DB_DEFAULT = str(APP_ROOT / "instance" / "app.sqlite")
 LOCAL_USER_EMAIL = "you@example.com"
 DEFAULT_PROFILE = {
     "name": "",
@@ -76,13 +78,20 @@ def db_session(db_path):
         conn.commit()
     except sqlite3.Error as e:
         conn.rollback()
-        print(f"Database error: {e}")
+        log_exception(
+            action_type="database",
+            action="db_session",
+            error=e,
+            component="sqlite",
+            details="SQLite operation failed.",
+            db_path=db_path,
+        )
         raise
     finally:
         conn.close()
 
 
-def init_db(db_path="instance/app.sqlite"):
+def init_db(db_path=DB_DEFAULT):
     schema_path = Path(__file__).resolve().parent / "sql" / "schema.sql"
     if not schema_path.exists():
         raise FileNotFoundError("schema.sql not found in app/sql/")
@@ -93,6 +102,13 @@ def init_db(db_path="instance/app.sqlite"):
     with db_session(db_path) as conn:
         conn.executescript(schema_path.read_text(encoding="utf-8"))
         _apply_schema_migrations(conn)
+    log_event(
+        action_type="database",
+        action="init_schema",
+        status="ok",
+        component="sqlite",
+        db_path=db_path,
+    )
 
 
 def _apply_schema_migrations(conn):
@@ -568,11 +584,10 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             priority_value = max(1, min(3, priority_value))
             type_value = normalized["type"]
             existing_type = (existing["type"] or "").strip()
-            # Keep manual/local triage stable when Gmail only toggles read state
-            # (UNREAD label), which would otherwise flip response-needed/read-only.
-            if normalized["type"] in {"response-needed", "read-only"}:
-                if existing_type in {"response-needed", "read-only", "junk-uncertain"}:
-                    type_value = existing_type
+            # Preserve local/AI triage for existing rows; provider sync should
+            # refresh content/read state but not reclassify old emails.
+            if existing_type in ALLOWED_TYPES:
+                type_value = existing_type
             conn.execute(
                 """
                 UPDATE email_messages
@@ -851,53 +866,73 @@ def update_email_ai_fields(
     ai_category=None,
     ai_needs_response=None,
     ai_confidence=None,
+    lock_existing_classification=True,
     db_path=DB_DEFAULT,
 ):
-    assignments = []
-    params = []
-
-    if summary is not None:
-        assignments.append("summary = ?")
-        params.append(summary)
-
-    if email_type is not None:
-        if email_type not in ALLOWED_TYPES:
-            raise ValueError("Invalid email type.")
-        assignments.append("type = ?")
-        params.append(email_type)
-
-    if priority is not None:
-        safe_priority = max(1, min(3, int(priority)))
-        assignments.append("priority = ?")
-        params.append(safe_priority)
-
-    if ai_category is not None:
-        normalized_category = _normalize_ai_category(ai_category)
-        if normalized_category is None:
-            raise ValueError("Invalid AI category.")
-        assignments.append("ai_category = ?")
-        params.append(normalized_category)
-
-    if ai_needs_response is not None:
-        normalized_needs_response = _normalize_ai_needs_response(ai_needs_response)
-        if normalized_needs_response is None:
-            raise ValueError("Invalid AI needs_response value.")
-        assignments.append("ai_needs_response = ?")
-        params.append(normalized_needs_response)
-
-    if ai_confidence is not None:
-        normalized_confidence = _normalize_ai_confidence(ai_confidence)
-        if normalized_confidence is None:
-            raise ValueError("Invalid AI confidence value.")
-        assignments.append("ai_confidence = ?")
-        params.append(normalized_confidence)
-
-    if not assignments:
-        return
-
-    params.append(email_id)
-    sql = f"UPDATE email_messages SET {', '.join(assignments)} WHERE id = ?"
     with db_session(db_path) as conn:
+        existing = conn.execute(
+            """
+            SELECT type, priority, ai_category
+            FROM email_messages
+            WHERE id = ?
+            """,
+            (email_id,),
+        ).fetchone()
+        if existing is None:
+            return
+
+        assignments = []
+        params = []
+
+        if summary is not None:
+            assignments.append("summary = ?")
+            params.append(summary)
+
+        classification_locked = bool(
+            lock_existing_classification
+            and str(existing["ai_category"] or "").strip()
+        )
+        # Once AI classification exists, keep type/priority stable for this row.
+
+        if email_type is not None:
+            if email_type not in ALLOWED_TYPES:
+                raise ValueError("Invalid email type.")
+            if not classification_locked:
+                assignments.append("type = ?")
+                params.append(email_type)
+
+        if priority is not None:
+            safe_priority = max(1, min(3, int(priority)))
+            if not classification_locked:
+                assignments.append("priority = ?")
+                params.append(safe_priority)
+
+        if ai_category is not None:
+            normalized_category = _normalize_ai_category(ai_category)
+            if normalized_category is None:
+                raise ValueError("Invalid AI category.")
+            assignments.append("ai_category = ?")
+            params.append(normalized_category)
+
+        if ai_needs_response is not None:
+            normalized_needs_response = _normalize_ai_needs_response(ai_needs_response)
+            if normalized_needs_response is None:
+                raise ValueError("Invalid AI needs_response value.")
+            assignments.append("ai_needs_response = ?")
+            params.append(normalized_needs_response)
+
+        if ai_confidence is not None:
+            normalized_confidence = _normalize_ai_confidence(ai_confidence)
+            if normalized_confidence is None:
+                raise ValueError("Invalid AI confidence value.")
+            assignments.append("ai_confidence = ?")
+            params.append(normalized_confidence)
+
+        if not assignments:
+            return
+
+        params.append(email_id)
+        sql = f"UPDATE email_messages SET {', '.join(assignments)} WHERE id = ?"
         conn.execute(sql, params)
 
 

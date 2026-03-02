@@ -11,7 +11,18 @@ from email.utils import getaddresses
 from html import unescape
 from pathlib import Path
 
-from .db import upsert_email_from_provider
+from .db import (
+    fetch_email_by_id,
+    get_user_profile,
+    update_email_ai_fields,
+    upsert_email_from_provider,
+)
+from .ollama_client import (
+    ai_enabled as ai_triage_enabled,
+    classification_to_email_type,
+    classify_email,
+)
+from .debug_logger import log_event, log_exception
 
 try:
     from google.auth.transport.requests import Request
@@ -31,8 +42,21 @@ SCOPES = [
 ]
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOKEN_PATH = PROJECT_ROOT / "instance" / "gmail_token.json"
+DB_DEFAULT = str(PROJECT_ROOT / "instance" / "app.sqlite")
 SYNC_INTERVAL_SECONDS = int(os.getenv("GMAIL_SYNC_INTERVAL_SECONDS", "20"))
 SYNC_MAX_RESULTS = int(os.getenv("GMAIL_SYNC_MAX_RESULTS", "25"))
+AI_TRIAGE_PER_SYNC = int(os.getenv("GMAIL_AI_TRIAGE_PER_SYNC", "0"))
+BULK_SENDER_MARKERS = (
+    "no-reply",
+    "noreply",
+    "donotreply",
+    "newsletter",
+    "digest",
+    "news",
+    "notifications",
+    "announcements",
+    "marketing",
+)
 
 _LAST_SYNC_AT = 0.0
 _SYNC_LOCK = threading.Lock()
@@ -101,7 +125,13 @@ def _load_credentials():
         flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
         credentials = flow.run_local_server(port=0)
     except Exception as exc:
-        print(f"Gmail OAuth setup skipped: {exc}")
+        log_exception(
+            action_type="gmail_auth",
+            action="oauth_setup",
+            error=exc,
+            component="gmail_service",
+            details="Gmail OAuth setup skipped.",
+        )
         return None
 
     _save_token(credentials)
@@ -115,7 +145,13 @@ def _get_service():
     try:
         return build("gmail", "v1", credentials=credentials, cache_discovery=False)
     except Exception as exc:
-        print(f"Gmail service init failed: {exc}")
+        log_exception(
+            action_type="gmail_auth",
+            action="service_init",
+            error=exc,
+            component="gmail_service",
+            details="Gmail service initialization failed.",
+        )
         return None
 
 
@@ -278,7 +314,14 @@ def _get_draft_data(service, provider_draft_id):
             .execute()
         )
     except Exception as exc:
-        print(f"Gmail draft fetch failed for {provider_draft_id}: {exc}")
+        log_exception(
+            action_type="gmail_api",
+            action="draft_fetch",
+            error=exc,
+            component="gmail_service",
+            provider_draft_id=provider_draft_id,
+            details="Gmail draft fetch failed.",
+        )
         return None
 
 
@@ -293,7 +336,14 @@ def _get_message_data(service, external_id):
             .execute()
         )
     except Exception as exc:
-        print(f"Gmail message fetch failed for {external_id}: {exc}")
+        log_exception(
+            action_type="gmail_api",
+            action="message_fetch",
+            error=exc,
+            component="gmail_service",
+            external_id=external_id,
+            details="Gmail message fetch failed.",
+        )
         return None
 
 
@@ -443,7 +493,32 @@ def _parse_addresses(raw_value):
     return ", ".join(parsed_addresses) if parsed_addresses else raw_value.strip()
 
 
-def _labels_to_type(label_ids):
+def _header_value(payload, name):
+    return (_extract_header(payload, name) or "").strip()
+
+
+def _sender_looks_bulk(payload):
+    sender_value = _header_value(payload, "From").lower()
+    if any(marker in sender_value for marker in BULK_SENDER_MARKERS):
+        return True
+
+    precedence = _header_value(payload, "Precedence").lower()
+    if precedence in {"bulk", "list", "junk"}:
+        return True
+
+    if _header_value(payload, "List-Unsubscribe"):
+        return True
+    if _header_value(payload, "List-Id"):
+        return True
+
+    auto_submitted = _header_value(payload, "Auto-Submitted").lower()
+    if auto_submitted and auto_submitted != "no":
+        return True
+
+    return False
+
+
+def _labels_to_type(label_ids, payload=None):
     labels = set(label_ids or [])
     if "DRAFT" in labels:
         return "draft"
@@ -452,6 +527,8 @@ def _labels_to_type(label_ids):
     if "SPAM" in labels:
         return "junk"
     if "UNREAD" in labels:
+        if payload and _sender_looks_bulk(payload):
+            return "read-only"
         return "response-needed"
     return "read-only"
 
@@ -496,7 +573,7 @@ def _to_db_record(message, service=None, provider_draft_id=None):
         "cc": _parse_addresses(_extract_header(payload, "Cc")),
         "body": body,
         "body_html": body_html,
-        "type": _labels_to_type(label_ids),
+        "type": _labels_to_type(label_ids, payload=payload),
         "priority": _labels_to_priority(label_ids),
         "is_read": "UNREAD" not in label_ids,
         "received_at": _received_at(message.get("internalDate")),
@@ -505,7 +582,7 @@ def _to_db_record(message, service=None, provider_draft_id=None):
 
 def sync_message_by_external_id(
     external_id,
-    db_path="instance/app.sqlite",
+    db_path=DB_DEFAULT,
     service=None,
     provider_draft_id=None,
 ):
@@ -523,7 +600,14 @@ def sync_message_by_external_id(
             .execute()
         )
     except Exception as exc:
-        print(f"Gmail fetch failed for {external_id}: {exc}")
+        log_exception(
+            action_type="gmail_api",
+            action="sync_message_fetch",
+            error=exc,
+            component="gmail_service",
+            external_id=external_id,
+            details="Gmail sync fetch failed.",
+        )
         return None
 
     record = _to_db_record(
@@ -533,16 +617,81 @@ def sync_message_by_external_id(
     )
     if not record:
         return None
-    upsert_email_from_provider(record, db_path=db_path)
+    email_id = upsert_email_from_provider(record, db_path=db_path)
+    record["id"] = email_id
     return record
 
 
-def sync_recent_emails(db_path="instance/app.sqlite", max_results=None):
+def _should_ai_triage_email(email_data):
+    if not email_data:
+        return False
+    if email_data.get("type") in {"sent", "draft"}:
+        return False
+    if bool(email_data.get("is_archived")):
+        return False
+    body = str(email_data.get("body") or "").strip()
+    title = str(email_data.get("title") or "").strip()
+    if not body and not title:
+        return False
+    classification_missing = (
+        not str(email_data.get("ai_category") or "").strip()
+        or email_data.get("ai_needs_response") is None
+        or email_data.get("ai_confidence") is None
+    )
+    return classification_missing
+
+
+def _triage_email_with_ai(email_data, user_profile, db_path):
+    classification = classify_email(
+        email_data=email_data,
+        user_profile=user_profile,
+        email_id=email_data.get("id"),
+    )
+    if not classification:
+        return False
+
+    current_type = str(email_data.get("type") or "").strip()
+    ai_type = classification_to_email_type(classification)
+    if current_type in {"junk", "junk-uncertain"}:
+        ai_type = current_type
+
+    update_email_ai_fields(
+        email_id=email_data["id"],
+        email_type=ai_type,
+        priority=classification.get("priority"),
+        ai_category=classification.get("category"),
+        ai_needs_response=classification.get("needs_response"),
+        ai_confidence=classification.get("confidence"),
+        db_path=db_path,
+    )
+    return True
+
+
+def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
     service = _get_service()
     if not service:
+        log_event(
+            action_type="gmail_sync",
+            action="sync_recent_skip",
+            status="skipped",
+            component="gmail_service",
+            reason="service_unavailable",
+            details="Gmail service unavailable; skipping recent sync.",
+        )
         return 0
 
     target = max(1, int(max_results or SYNC_MAX_RESULTS))
+    log_event(
+        action_type="gmail_sync",
+        action="sync_recent_start",
+        status="start",
+        component="gmail_service",
+        db_path=db_path,
+        max_results=target,
+    )
+    triage_budget = max(0, min(10, int(AI_TRIAGE_PER_SYNC or 0)))
+    triage_used = 0
+    profile = get_user_profile(db_path=db_path) if ai_triage_enabled() and triage_budget else None
     page_token = None
     synced = 0
     visited = 0
@@ -562,7 +711,14 @@ def sync_recent_emails(db_path="instance/app.sqlite", max_results=None):
                 .execute()
             )
         except Exception as exc:
-            print(f"Gmail list failed: {exc}")
+            log_exception(
+                action_type="gmail_sync",
+                action="list_messages",
+                error=exc,
+                component="gmail_service",
+                details="Gmail message list failed.",
+                db_path=db_path,
+            )
             break
 
         messages = response.get("messages") or []
@@ -574,8 +730,29 @@ def sync_recent_emails(db_path="instance/app.sqlite", max_results=None):
             external_id = item.get("id")
             if not external_id:
                 continue
-            if sync_message_by_external_id(external_id, db_path=db_path, service=service):
+            synced_record = sync_message_by_external_id(
+                external_id,
+                db_path=db_path,
+                service=service,
+            )
+            if synced_record:
                 synced += 1
+                if triage_used < triage_budget and ai_triage_enabled():
+                    try:
+                        email_id = synced_record.get("id")
+                        email_data = fetch_email_by_id(email_id, db_path=db_path)
+                        if _should_ai_triage_email(email_data):
+                            if _triage_email_with_ai(email_data, profile, db_path):
+                                triage_used += 1
+                    except Exception as exc:
+                        log_exception(
+                            action_type="gmail_sync",
+                            action="ai_triage",
+                            error=exc,
+                            component="gmail_service",
+                            external_id=external_id,
+                            details="Gmail AI triage failed.",
+                        )
             if visited >= target:
                 break
 
@@ -583,15 +760,38 @@ def sync_recent_emails(db_path="instance/app.sqlite", max_results=None):
         if not page_token:
             break
 
+    log_event(
+        action_type="gmail_sync",
+        action="sync_recent_complete",
+        status="ok",
+        component="gmail_service",
+        synced=synced,
+        visited=visited,
+        triage_used=triage_used,
+    )
     return synced
 
 
-def trigger_background_sync(db_path="instance/app.sqlite", force=False, max_results=None):
+def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
     global _LAST_SYNC_AT
     now = time.time()
     if not force and now - _LAST_SYNC_AT < SYNC_INTERVAL_SECONDS:
+        log_event(
+            action_type="gmail_sync",
+            action="background_sync_skip",
+            status="skipped",
+            component="gmail_service",
+            reason="rate_limited",
+        )
         return False
     if not _SYNC_LOCK.acquire(blocking=False):
+        log_event(
+            action_type="gmail_sync",
+            action="background_sync_skip",
+            status="skipped",
+            component="gmail_service",
+            reason="already_running",
+        )
         return False
 
     def _worker():
@@ -599,9 +799,31 @@ def trigger_background_sync(db_path="instance/app.sqlite", force=False, max_resu
         try:
             sync_recent_emails(db_path=db_path, max_results=max_results)
             _LAST_SYNC_AT = time.time()
+            log_event(
+                action_type="gmail_sync",
+                action="background_sync_complete",
+                status="ok",
+                component="gmail_service",
+            )
+        except Exception as exc:
+            log_exception(
+                action_type="gmail_sync",
+                action="background_sync_worker",
+                error=exc,
+                component="gmail_service",
+                details="Background sync worker crashed.",
+            )
         finally:
             _SYNC_LOCK.release()
 
+    log_event(
+        action_type="gmail_sync",
+        action="background_sync_start",
+        status="start",
+        component="gmail_service",
+        force=bool(force),
+        max_results=max_results,
+    )
     threading.Thread(target=_worker, daemon=True).start()
     return True
 
@@ -619,7 +841,14 @@ def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
         service.users().messages().modify(userId="me", id=external_id, body=body).execute()
         return True
     except Exception as exc:
-        print(f"Gmail label update failed for {external_id}: {exc}")
+        log_exception(
+            action_type="gmail_api",
+            action="modify_labels",
+            error=exc,
+            component="gmail_service",
+            external_id=external_id,
+            details="Gmail label update failed.",
+        )
         return False
 
 
@@ -654,13 +883,23 @@ def send_compose_message(
     body_text,
     attachments=None,
     thread_id=None,
-    db_path="instance/app.sqlite",
+    db_path=DB_DEFAULT,
 ):
     service = _get_service()
     if not service:
         return None
     if not to_value:
         return None
+
+    log_event(
+        action_type="gmail_send",
+        action="compose_send_start",
+        status="start",
+        component="gmail_service",
+        to_value=to_value,
+        thread_id=thread_id,
+        attachment_count=len(attachments or []),
+    )
 
     message = _build_email_message(to_value, cc_value, subject, body_text, attachments)
     body = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")}
@@ -670,12 +909,26 @@ def send_compose_message(
     try:
         sent = service.users().messages().send(userId="me", body=body).execute()
     except Exception as exc:
-        print(f"Gmail send failed: {exc}")
+        log_exception(
+            action_type="gmail_send",
+            action="compose_send",
+            error=exc,
+            component="gmail_service",
+            details="Gmail compose send failed.",
+            to_value=to_value,
+        )
         return None
 
     sent_id = sent.get("id")
     if sent_id:
         sync_message_by_external_id(sent_id, db_path=db_path, service=service)
+    log_event(
+        action_type="gmail_send",
+        action="compose_send_complete",
+        status="ok",
+        component="gmail_service",
+        sent_id=sent_id,
+    )
     return sent_id
 
 
@@ -687,11 +940,21 @@ def upsert_gmail_draft(
     draft_id=None,
     attachments=None,
     thread_id=None,
-    db_path="instance/app.sqlite",
+    db_path=DB_DEFAULT,
 ):
     service = _get_service()
     if not service:
         return None
+
+    log_event(
+        action_type="gmail_draft",
+        action="upsert_start",
+        status="start",
+        component="gmail_service",
+        draft_id=draft_id or "",
+        thread_id=thread_id or "",
+        attachment_count=len(attachments or []),
+    )
 
     effective_attachments = attachments or []
     if draft_id:
@@ -723,7 +986,14 @@ def upsert_gmail_draft(
         else:
             draft_data = service.users().drafts().create(userId="me", body=body).execute()
     except Exception as exc:
-        print(f"Gmail draft upsert failed: {exc}")
+        log_exception(
+            action_type="gmail_draft",
+            action="upsert",
+            error=exc,
+            component="gmail_service",
+            details="Gmail draft upsert failed.",
+            draft_id=draft_id or "",
+        )
         return None
 
     provider_draft_id = draft_data.get("id")
@@ -739,6 +1009,14 @@ def upsert_gmail_draft(
             record["is_read"] = True
             upsert_email_from_provider(record, db_path=db_path)
 
+    log_event(
+        action_type="gmail_draft",
+        action="upsert_complete",
+        status="ok",
+        component="gmail_service",
+        provider_draft_id=provider_draft_id or "",
+        external_id=message_data.get("id") or "",
+    )
     return {
         "provider_draft_id": provider_draft_id,
         "external_id": message_data.get("id"),
@@ -753,18 +1031,39 @@ def delete_draft_message(provider_draft_id):
 
     try:
         service.users().drafts().delete(userId="me", id=provider_draft_id).execute()
+        log_event(
+            action_type="gmail_draft",
+            action="delete",
+            status="ok",
+            component="gmail_service",
+            provider_draft_id=provider_draft_id,
+        )
         return True
     except Exception as exc:
-        print(f"Gmail draft delete failed for {provider_draft_id}: {exc}")
+        log_exception(
+            action_type="gmail_draft",
+            action="delete",
+            error=exc,
+            component="gmail_service",
+            details="Gmail draft delete failed.",
+            provider_draft_id=provider_draft_id,
+        )
         return False
 
 
-def sync_drafts_from_gmail(db_path="instance/app.sqlite", max_results=50):
+def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
     service = _get_service()
     if not service:
         return 0
 
     target = max(1, int(max_results or 50))
+    log_event(
+        action_type="gmail_draft",
+        action="sync_start",
+        status="start",
+        component="gmail_service",
+        max_results=target,
+    )
     page_token = None
     synced = 0
     visited = 0
@@ -779,7 +1078,13 @@ def sync_drafts_from_gmail(db_path="instance/app.sqlite", max_results=50):
                 .execute()
             )
         except Exception as exc:
-            print(f"Gmail draft list failed: {exc}")
+            log_exception(
+                action_type="gmail_draft",
+                action="sync_list",
+                error=exc,
+                component="gmail_service",
+                details="Gmail draft list failed.",
+            )
             break
 
         draft_refs = response.get("drafts") or []
@@ -815,10 +1120,18 @@ def sync_drafts_from_gmail(db_path="instance/app.sqlite", max_results=50):
         if not page_token:
             break
 
+    log_event(
+        action_type="gmail_draft",
+        action="sync_complete",
+        status="ok",
+        component="gmail_service",
+        synced=synced,
+        visited=visited,
+    )
     return synced
 
 
-def set_message_read_state(external_id, read, db_path="instance/app.sqlite"):
+def set_message_read_state(external_id, read, db_path=DB_DEFAULT):
     service = _get_service()
     if not service or not external_id:
         return False
@@ -829,10 +1142,18 @@ def set_message_read_state(external_id, read, db_path="instance/app.sqlite"):
         return False
 
     sync_message_by_external_id(external_id, db_path=db_path, service=service)
+    log_event(
+        action_type="gmail_labels",
+        action="set_read_state",
+        status="ok",
+        component="gmail_service",
+        external_id=external_id,
+        read=bool(read),
+    )
     return True
 
 
-def set_message_type(external_id, new_type, db_path="instance/app.sqlite"):
+def set_message_type(external_id, new_type, db_path=DB_DEFAULT):
     service = _get_service()
     if not service or not external_id:
         return False
@@ -852,6 +1173,14 @@ def set_message_type(external_id, new_type, db_path="instance/app.sqlite"):
         return False
 
     sync_message_by_external_id(external_id, db_path=db_path, service=service)
+    log_event(
+        action_type="gmail_labels",
+        action="set_message_type",
+        status="ok",
+        component="gmail_service",
+        external_id=external_id,
+        new_type=new_type,
+    )
     return True
 
 
@@ -861,7 +1190,7 @@ def send_reply_message(
     to_value,
     cc_value="",
     attachments=None,
-    db_path="instance/app.sqlite",
+    db_path=DB_DEFAULT,
 ):
     service = _get_service()
     if not service:
@@ -869,6 +1198,16 @@ def send_reply_message(
 
     if not to_value or not reply_text:
         return None
+
+    log_event(
+        action_type="gmail_send",
+        action="reply_send_start",
+        status="start",
+        component="gmail_service",
+        to_value=to_value,
+        attachment_count=len(attachments or []),
+        source_email_id=source_email.get("id") if isinstance(source_email, dict) else "",
+    )
 
     subject = (source_email.get("title") or "(No subject)").strip()
     if not subject.lower().startswith("re:"):
@@ -893,12 +1232,26 @@ def send_reply_message(
     try:
         sent = service.users().messages().send(userId="me", body=body).execute()
     except Exception as exc:
-        print(f"Gmail send failed: {exc}")
+        log_exception(
+            action_type="gmail_send",
+            action="reply_send",
+            error=exc,
+            component="gmail_service",
+            details="Gmail reply send failed.",
+            to_value=to_value,
+        )
         return None
 
     sent_id = sent.get("id")
     if sent_id:
         sync_message_by_external_id(sent_id, db_path=db_path, service=service)
+    log_event(
+        action_type="gmail_send",
+        action="reply_send_complete",
+        status="ok",
+        component="gmail_service",
+        sent_id=sent_id or "",
+    )
     return sent_id
 
 
@@ -909,7 +1262,21 @@ def trash_message(external_id):
 
     try:
         service.users().messages().trash(userId="me", id=external_id).execute()
+        log_event(
+            action_type="gmail_message",
+            action="trash",
+            status="ok",
+            component="gmail_service",
+            external_id=external_id,
+        )
         return True
     except Exception as exc:
-        print(f"Gmail trash failed for {external_id}: {exc}")
+        log_exception(
+            action_type="gmail_message",
+            action="trash",
+            error=exc,
+            component="gmail_service",
+            external_id=external_id,
+            details="Gmail trash failed.",
+        )
         return False

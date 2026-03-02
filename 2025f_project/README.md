@@ -4,15 +4,24 @@ Flask email assistant with Gmail sync into SQLite.
 
 ## Setup
 
-1. Install dependencies:
-   - `pip install -r requirements.txt`
+Run commands from repo root (`C:\Users\ycshk\2025f_project`), not inside the nested app folder.
+
+1. Create/update the virtualenv and install dependencies:
+   - `make install`
 2. Place your Google OAuth desktop client file at:
    - `2025f_project/credentials.json`
    - or set `GMAIL_CREDENTIALS_FILE` to a custom path.
 3. Run the app:
-   - `python run.py`
+   - `make run`
 4. On first Gmail-backed request, OAuth opens a browser flow and stores a token at:
    - `instance/gmail_token.json`
+
+Manual fallback without `make` (Windows):
+
+- `python -m venv venv`
+- `venv\Scripts\python.exe -m pip install -r 2025f_project\requirements.txt`
+- `cd 2025f_project`
+- `..\venv\Scripts\python.exe run.py`
 
 ## Gmail behavior
 
@@ -25,17 +34,24 @@ Flask email assistant with Gmail sync into SQLite.
 - Drafts are synced from Gmail Drafts and shown in the `Drafts` tab.
 - Compose supports attachments and saves drafts to Gmail/local DB.
 - If Gmail is unavailable, the app falls back to local SQLite-only behavior.
+- Structured debug logging writes to `instance/debug_log.txt` with fields such as timestamp, action type, action, status, and details.
 
 ## Optional env vars
 
 - `GMAIL_CREDENTIALS_FILE`: custom path to `credentials.json`
 - `GMAIL_SYNC_INTERVAL_SECONDS`: minimum sync interval (default `20`)
 - `GMAIL_SYNC_MAX_RESULTS`: recent messages to pull per sync (default `25`)
+- `LIVE_EMAIL_POLL_INTERVAL_MS`: mailbox live-refresh interval in ms (default `2000`)
+- `LIVE_EMAIL_SYNC_MAX_RESULTS`: messages fetched by each live-refresh sync (default `15`)
+- `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `30`)
+- `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `60`)
+- `GMAIL_AI_TRIAGE_PER_SYNC`: max newly-synced emails to auto-classify per sync (default `0`)
 - `OLLAMA_MODEL`: defaults to `qwen2.5:7b`
 - `OLLAMA_API_URL`: defaults to `http://localhost:11434/api/chat`
 - `OLLAMA_TIMEOUT_SECONDS`: AI request timeout in seconds (default `12`)
 - `OLLAMA_SUMMARY_MIN_CHARS`: summary threshold (default `200`)
 - `AI_ACTION_LOG_PATH`: path to `.txt` AI action log (default `instance/ai_actions.txt`)
+- `APP_DEBUG_LOG_PATH`: path to structured debug log (default `instance/debug_log.txt`)
 
 ## Local Ollama mode (no external AI calls)
 
@@ -46,7 +62,7 @@ AI calls are local-only and go to Ollama chat API (`http://localhost:11434/api/c
 2. Confirm model is available:
    - `ollama pull qwen2.5:7b`
 3. Start Flask app:
-   - `python run.py`
+   - `make run`
 
 ## Local frontend assets
 

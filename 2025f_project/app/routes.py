@@ -14,7 +14,6 @@ from .db import (
     fetch_thread_emails,
     set_email_type as db_set_email_type,
     set_email_archived,
-    toggle_read_state,
     delete_email as db_delete_email,
     mark_read,
     update_draft,
@@ -694,6 +693,98 @@ def _filter_emails_by_query(emails, query_text):
     return filtered
 
 
+def _current_list_url():
+    return request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
+
+
+def _list_query_state():
+    sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
+    return sort_code, search_query, _current_list_url()
+
+
+def _next_url_from_request():
+    return _safe_next_url(request.form.get("next") or request.args.get("next"))
+
+
+def _render_mailbox_page(
+    template_name,
+    *,
+    email_type=None,
+    exclude_types=None,
+    archived_only=False,
+    include_fingerprint=True,
+    sync_drafts=False,
+):
+    sort_code, search_query, current_list_url = _list_query_state()
+    if sync_drafts:
+        sync_drafts_from_gmail(max_results=40)
+    emails = fetch_emails(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        archived_only=archived_only,
+    )
+    emails = _filter_emails_by_query(emails, search_query)
+    emails_sorted = sort_emails(emails, sort_code)
+
+    context = {
+        "emails": emails_sorted,
+        "sort": sort_code,
+        "current_list_url": current_list_url,
+        "search_query": search_query,
+    }
+    if include_fingerprint:
+        context["list_fingerprint"] = _emails_fingerprint(emails_sorted)
+    return render_template(template_name, **context)
+
+
+def _persist_compose_draft(fields, attachments=None):
+    draft_info = upsert_gmail_draft(
+        to_value=fields["to"],
+        cc_value=fields["cc"],
+        subject=fields["subject"],
+        body_text=fields["body"],
+        draft_id=fields["provider_draft_id"],
+        attachments=attachments,
+        thread_id=fields["thread_id"],
+    )
+    if draft_info:
+        fields["provider_draft_id"] = (
+            draft_info.get("provider_draft_id") or fields["provider_draft_id"]
+        )
+        fields["thread_id"] = draft_info.get("thread_id") or fields["thread_id"]
+
+    return save_local_draft(
+        title=fields["subject"],
+        body=fields["body"],
+        recipients=fields["to"],
+        cc=fields["cc"],
+        email_id=fields["local_draft_id"],
+        provider_draft_id=fields["provider_draft_id"],
+        thread_id=fields["thread_id"],
+    )
+
+
+def _set_email_type_with_fallback(email_id, email_data, new_type):
+    if email_data.get("type") == new_type:
+        return
+    external_id = email_data.get("external_id")
+    if external_id:
+        if not set_message_type(external_id, new_type):
+            db_set_email_type(email_id, new_type)
+        return
+    db_set_email_type(email_id, new_type)
+
+
+def _set_read_state_with_fallback(email_id, email_data, target_read_state):
+    external_id = email_data.get("external_id")
+    if external_id:
+        if not set_message_read_state(external_id, read=target_read_state):
+            mark_read(email_id, target_read_state)
+        return
+    mark_read(email_id, target_read_state)
+
+
 def _parse_bulk_email_ids(raw_ids):
     seen = set()
     parsed = []
@@ -827,143 +918,65 @@ def profile():
 
 @main.route("/allemails")
 def allemails():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES)
-    emails = _filter_emails_by_query(emails, search_query)
-    emails_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "allemails.html",
-        emails=emails_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        list_fingerprint=_emails_fingerprint(emails_sorted),
-        search_query=search_query,
+        exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
     )
 
 @main.route("/readonly")
 def readonly():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(email_type="read-only")
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "readonly.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        list_fingerprint=_emails_fingerprint(filtered_sorted),
-        search_query=search_query,
+        email_type="read-only",
     )
 
 @main.route("/responseneeded")
 def responseneeded():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(email_type="response-needed")
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "responseneeded.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        list_fingerprint=_emails_fingerprint(filtered_sorted),
-        search_query=search_query,
+        email_type="response-needed",
     )
 
 @main.route("/junkmailconfirm")
 def junkmailconfirm():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(email_type="junk-uncertain")
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "junkmailconfirm.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        list_fingerprint=_emails_fingerprint(filtered_sorted),
-        search_query=search_query,
+        email_type="junk-uncertain",
     )
 
 @main.route("/junk")
 def junk():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(email_type="junk")
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "junk.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        list_fingerprint=_emails_fingerprint(filtered_sorted),
-        search_query=search_query,
+        email_type="junk",
     )
 
 
 @main.route("/sent")
 def sent():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(email_type="sent")
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "sent.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        search_query=search_query,
+        email_type="sent",
+        include_fingerprint=False,
     )
 
 
 @main.route("/drafts")
 def drafts():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    sync_drafts_from_gmail(max_results=40)
-    emails = fetch_emails(email_type="draft")
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
+    return _render_mailbox_page(
         "drafts.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        search_query=search_query,
+        email_type="draft",
+        include_fingerprint=False,
+        sync_drafts=True,
     )
 
 
 @main.route("/archive")
 def archive():
-    sort_code = request.args.get("sort", "date_desc")
-    search_query = (request.args.get("q") or "").strip()
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(
+    return _render_mailbox_page(
+        "archive.html",
         exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
         archived_only=True,
-    )
-    emails = _filter_emails_by_query(emails, search_query)
-    filtered_sorted = sort_emails(emails, sort_code)
-    return render_template(
-        "archive.html",
-        emails=filtered_sorted,
-        sort=sort_code,
-        current_list_url=current_list_url,
-        list_fingerprint=_emails_fingerprint(filtered_sorted),
-        search_query=search_query,
     )
 
 @main.route("/email/<int:id>")
@@ -1030,18 +1043,12 @@ def set_email_type(id):
     if email_data.get("type") in NON_MAIN_TYPES:
         abort(400)
 
-    if email_data.get("type") != new_type:
-        external_id = email_data.get("external_id")
-        if external_id:
-            if not set_message_type(external_id, new_type):
-                db_set_email_type(id, new_type)
-        else:
-            db_set_email_type(id, new_type)
+    _set_email_type_with_fallback(id, email_data, new_type)
     if bool(email_data.get("is_archived")):
         set_email_archived(id, archived=False)
 
     # Return the user back to wherever they were.
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     return redirect(next_url)
 
 
@@ -1050,7 +1057,7 @@ def bulk_email_action():
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
     email_ids = _parse_bulk_email_ids(request.form.get("ids"))
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
 
     allowed_actions = {
         "archive",
@@ -1102,22 +1109,13 @@ def bulk_email_action():
             target_read_state = action == "mark-read"
             if bool(email_data.get("is_read")) == target_read_state:
                 continue
-            if external_id:
-                if not set_message_read_state(external_id, read=target_read_state):
-                    mark_read(email_id, target_read_state)
-            else:
-                mark_read(email_id, target_read_state)
+            _set_read_state_with_fallback(email_id, email_data, target_read_state)
             continue
 
         if action == "set-type":
             if email_type in NON_MAIN_TYPES:
                 continue
-            if email_type != new_type:
-                if external_id:
-                    if not set_message_type(external_id, new_type):
-                        db_set_email_type(email_id, new_type)
-                else:
-                    db_set_email_type(email_id, new_type)
+            _set_email_type_with_fallback(email_id, email_data, new_type)
             if is_archived:
                 set_email_archived(email_id, archived=False)
 
@@ -1132,7 +1130,7 @@ def archive_email(id):
     if email_data.get("type") == "draft":
         abort(400)
     set_email_archived(id, archived=True)
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     return redirect(next_url)
 
 
@@ -1142,7 +1140,7 @@ def unarchive_email(id):
     if email_data is None:
         abort(404)
     set_email_archived(id, archived=False)
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     return redirect(next_url)
 
 
@@ -1165,7 +1163,7 @@ def analyze_email_route(id):
         abort(400)
 
     _start_analysis_task(id)
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     return redirect(url_for("main.email", id=id, next=next_url))
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
@@ -1191,7 +1189,7 @@ def send_reply(id):
             create_reply_email(id, reply_text, to_value, cc_value)
         trigger_background_sync(force=True, max_results=20)
 
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     return redirect(url_for("main.email", id=id, next=next_url))
 
 
@@ -1249,34 +1247,13 @@ def compose():
 
 @main.route("/compose/save", methods=["POST"])
 def compose_save():
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
     if not _has_compose_content(fields) and not attachments:
         return redirect(url_for("main.compose", next=next_url))
 
-    draft_info = upsert_gmail_draft(
-        to_value=fields["to"],
-        cc_value=fields["cc"],
-        subject=fields["subject"],
-        body_text=fields["body"],
-        draft_id=fields["provider_draft_id"],
-        attachments=attachments,
-        thread_id=fields["thread_id"],
-    )
-    if draft_info:
-        fields["provider_draft_id"] = draft_info.get("provider_draft_id") or fields["provider_draft_id"]
-        fields["thread_id"] = draft_info.get("thread_id") or fields["thread_id"]
-
-    draft_email_id = save_local_draft(
-        title=fields["subject"],
-        body=fields["body"],
-        recipients=fields["to"],
-        cc=fields["cc"],
-        email_id=fields["local_draft_id"],
-        provider_draft_id=fields["provider_draft_id"],
-        thread_id=fields["thread_id"],
-    )
+    draft_email_id = _persist_compose_draft(fields, attachments=attachments)
     return redirect(url_for("main.compose", draft_id=draft_email_id, next=next_url))
 
 
@@ -1286,28 +1263,7 @@ def compose_autosave():
     if not _has_compose_content(fields):
         return Response(status=204)
 
-    draft_info = upsert_gmail_draft(
-        to_value=fields["to"],
-        cc_value=fields["cc"],
-        subject=fields["subject"],
-        body_text=fields["body"],
-        draft_id=fields["provider_draft_id"],
-        attachments=None,
-        thread_id=fields["thread_id"],
-    )
-    if draft_info:
-        fields["provider_draft_id"] = draft_info.get("provider_draft_id") or fields["provider_draft_id"]
-        fields["thread_id"] = draft_info.get("thread_id") or fields["thread_id"]
-
-    save_local_draft(
-        title=fields["subject"],
-        body=fields["body"],
-        recipients=fields["to"],
-        cc=fields["cc"],
-        email_id=fields["local_draft_id"],
-        provider_draft_id=fields["provider_draft_id"],
-        thread_id=fields["thread_id"],
-    )
+    _persist_compose_draft(fields)
     return Response(status=204)
 
 
@@ -1370,7 +1326,7 @@ def generate_draft(id):
     if needs_response is None:
         needs_response = email_data.get("type") == "response-needed"
     if not bool(needs_response):
-        next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+        next_url = _next_url_from_request()
         return redirect(url_for("main.email", id=id, next=next_url))
 
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
@@ -1402,7 +1358,7 @@ def generate_draft(id):
         )
 
     update_draft(id, draft)
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     return redirect(url_for("main.email", id=id, next=next_url))
 
 @main.route("/email/<int:id>/delete", methods=["POST"])
@@ -1413,7 +1369,7 @@ def delete_email(id):
             delete_draft_message(email_data["provider_draft_id"])
         elif email_data.get("external_id"):
             trash_message(email_data["external_id"])
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    next_url = _next_url_from_request()
     db_delete_email(id)
     return redirect(next_url)
 
@@ -1423,12 +1379,7 @@ def toggle_read(id):
     if email_data is None:
         abort(404)
     new_read_state = not bool(email_data.get("is_read"))
-    external_id = email_data.get("external_id")
-    if external_id:
-        if not set_message_read_state(external_id, read=new_read_state):
-            toggle_read_state(id)
-    else:
-        toggle_read_state(id)
-    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    _set_read_state_with_fallback(id, email_data, new_read_state)
+    next_url = _next_url_from_request()
     return redirect(next_url)
 

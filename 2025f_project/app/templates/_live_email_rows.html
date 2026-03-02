@@ -1,4 +1,4 @@
-{% if emails and emails|length > 0 %}
+{% if emails and emails|length > 0 %} <!-- Shared row partial used by full page render + live polling API responses. -->
   {% for email in emails %}
     <div
       class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative"
@@ -13,6 +13,7 @@
       data-can-mark-read="{{ 1 if (email.type not in ['sent', 'draft'] and not email.is_read) else 0 }}"
       data-can-mark-unread="{{ 1 if (email.type not in ['sent', 'draft'] and email.is_read) else 0 }}"
     >
+      {# data-can-* flags are consumed by email-selection-menu.js to enable/disable bulk actions. #}
       <div class="email-select-wrap">
         <input type="checkbox" class="email-select-checkbox" value="{{ email.id }}" aria-label="Select email">
       </div>
@@ -37,7 +38,7 @@
 
       <div class="row-actions">
         {% if email.is_archived %}
-          <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0">
+          <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Main form users submit on this view. -->
             <input type="hidden" name="next" value="{{ current_list_url }}">
             <button type="submit" class="row-action-btn" title="Unarchive" aria-label="Unarchive">
               <i class="bi bi-box-arrow-up"></i>

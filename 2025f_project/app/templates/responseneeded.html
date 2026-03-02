@@ -1,6 +1,6 @@
-<!doctype html>
+<!doctype html> <!-- Page-level HTML scaffold for this view. -->
 <html lang="en">
-  <head>
+  <head> <!-- Head section with metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Response needed</title>
@@ -16,16 +16,16 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <body
+  <body class="mailbox-list-page"
     {% if not search_query %}
     data-live-email-view="response-needed"
     data-sort="{{ sort }}"
     data-fingerprint="{{ list_fingerprint }}"
     data-poll-interval-ms="{{ live_poll_interval_ms }}"
     {% endif %}
-  >
-    {% include "_navbar.html" %}
-    <div class="container-fluid app-main py-3 px-4">
+  > <!-- Body section with rendered content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
+    <div class="container-fluid app-main py-3 px-4"> <!-- Primary content container for this page. -->
       <div class="list-header">
         {% if search_query %}
         <div class="d-flex align-items-center gap-2">
@@ -33,7 +33,7 @@
           <a class="btn btn-outline-light btn-sm" href="{{ url_for('main.responseneeded') }}">Clear</a>
         </div>
         {% endif %}
-        <form method="get" class="sort-form">
+        <form method="get" class="sort-form"> <!-- Main form users submit on this view. -->
           {% if search_query %}
           <input type="hidden" name="q" value="{{ search_query }}">
           {% endif %}
@@ -65,7 +65,7 @@
       <i class="bi bi-pencil" aria-hidden="true"></i>
       <span>Compose</span>
     </a>
-    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Scripts that enable interactive behavior on this page. -->
     <script src="{{ url_for('static', filename='js/email-selection-menu.js') }}"></script>
     {% if not search_query %}
     <script src="{{ url_for('static', filename='js/live-email-list.js') }}"></script>

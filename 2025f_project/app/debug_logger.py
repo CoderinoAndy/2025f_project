@@ -12,6 +12,8 @@ _CONFIG_LOCK = Lock()
 
 
 def _clean_value(value):
+    """Clean value.
+    """
     text = str(value if value is not None else "")
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
     if len(text) > MAX_FIELD_LENGTH:
@@ -20,6 +22,8 @@ def _clean_value(value):
 
 
 def _clean_key(value):
+    """Clean key.
+    """
     raw = _clean_value(value).lower()
     if not raw:
         return "meta"
@@ -29,6 +33,8 @@ def _clean_key(value):
 
 
 def _log_path():
+    """Log path.
+    """
     configured = (os.getenv("APP_DEBUG_LOG_PATH") or "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -36,14 +42,18 @@ def _log_path():
 
 
 def get_debug_log_path():
+    """Get debug log path.
+    """
     return str(_log_path())
 
 
 def configure_debug_logger():
+    """Configure debug logger.
+    """
     logger = logging.getLogger(LOGGER_NAME)
     target_path = _log_path()
 
-    with _CONFIG_LOCK:
+    with _CONFIG_LOCK:  # Serialize logger setup to avoid duplicate handlers.
         target_path.parent.mkdir(parents=True, exist_ok=True)
         resolved_target = str(target_path.resolve())
         for handler in logger.handlers:
@@ -65,6 +75,8 @@ def configure_debug_logger():
 
 
 def _logger():
+    """Logger.
+    """
     return configure_debug_logger()
 
 
@@ -78,6 +90,8 @@ def log_event(
     details="",
     **metadata,
 ):
+    """Log event.
+    """
     level_name = str(level or "INFO").upper()
     level_number = getattr(logging, level_name, logging.INFO)
     logger = _logger()
@@ -97,6 +111,7 @@ def log_event(
         if value is None:
             continue
         cleaned_key = _clean_key(key)
+        # Keep base keys stable and move colliding metadata under a prefixed field.
         if cleaned_key in payload:
             cleaned_key = f"meta_{cleaned_key}"
         payload[cleaned_key] = _clean_value(value)
@@ -115,9 +130,11 @@ def log_exception(
     status="error",
     **metadata,
 ):
+    """Log exception.
+    """
     error_name = type(error).__name__
     fallback_details = details or str(error)
-    log_event(
+    log_event(  # Log the exception as a normalized structured event.
         action_type=action_type,
         action=action,
         status=status,

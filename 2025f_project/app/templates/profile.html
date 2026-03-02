@@ -1,6 +1,6 @@
-<!doctype html>
+<!doctype html> <!-- Page-level HTML scaffold for this view. -->
 <html lang="en">
-  <head>
+  <head> <!-- Head section with metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Profile</title>
@@ -74,15 +74,15 @@
       }
     </style>
   </head>
-  <body>
-    {% include "_navbar.html" %}
-    <div class="container app-main profile-shell py-4">
+  <body> <!-- Body section with rendered content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
+    <div class="container app-main profile-shell py-4"> <!-- Primary content container for this page. -->
       <div class="profile-card">
         <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
           <span class="muted">Used to personalize AI analysis and drafts</span>
         </div>
 
-        <form method="post" enctype="multipart/form-data">
+        <form method="post" enctype="multipart/form-data"> <!-- Main form users submit on this view. -->
           <div class="row g-4 align-items-start">
             <div class="col-12 col-md-4">
               <label class="form-label profile-picture-label" for="profile-picture">Profile picture</label>
@@ -161,6 +161,7 @@
         let previewUrl = null;
         const clearPreviewUrl = () => {
           if (previewUrl) {
+            // Release previous object URL to avoid leaking blob memory while previewing images.
             URL.revokeObjectURL(previewUrl);
             previewUrl = null;
           }

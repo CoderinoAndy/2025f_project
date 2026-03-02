@@ -15,6 +15,8 @@ LOCALHOST_NAMES = {"localhost"}
 
 
 def _api_key():
+    """Api key.
+    """
     return (
         os.getenv("QWEN_API_KEY")
         or os.getenv("HF_TOKEN")
@@ -23,14 +25,20 @@ def _api_key():
 
 
 def ai_enabled():
+    """Ai enabled.
+    """
     return _endpoint_allowed()
 
 
 def _base_url():
+    """Base url.
+    """
     return (os.getenv("QWEN_API_BASE_URL") or BASE_URL_DEFAULT).strip().rstrip("/")
 
 
 def _allow_remote():
+    """Allow remote.
+    """
     return str(os.getenv("QWEN_ALLOW_REMOTE", "0")).strip().lower() in {
         "1",
         "true",
@@ -40,6 +48,8 @@ def _allow_remote():
 
 
 def _is_local_hostname(hostname):
+    """Return whether local hostname.
+    """
     if not hostname:
         return False
     lower = hostname.lower()
@@ -52,6 +62,8 @@ def _is_local_hostname(hostname):
 
 
 def _endpoint_allowed():
+    """Endpoint allowed.
+    """
     base_url = _base_url()
     parsed = urlparse(base_url)
     if not parsed.scheme or not parsed.netloc:
@@ -85,6 +97,8 @@ def _endpoint_allowed():
 
 
 def _request_headers():
+    """Request headers.
+    """
     headers = {"Content-Type": "application/json"}
     api_key = _api_key()
     if api_key:
@@ -93,6 +107,9 @@ def _request_headers():
 
 
 def _chat_completion(messages, temperature=0.1, max_tokens=600):
+    """Chat completion.
+    """
+    # Enforce local-only model access by default to avoid leaking message content externally.
     if not _endpoint_allowed():
         return None
 
@@ -156,6 +173,8 @@ def _chat_completion(messages, temperature=0.1, max_tokens=600):
 
 
 def _extract_json_block(text):
+    """Extract JSON block.
+    """
     if not text:
         return None
     stripped = text.strip()
@@ -166,6 +185,8 @@ def _extract_json_block(text):
 
 
 def _clean_summary(raw_summary):
+    """Clean summary.
+    """
     summary = " ".join(str(raw_summary or "").split())
     if not summary:
         return None
@@ -175,6 +196,8 @@ def _clean_summary(raw_summary):
 
 
 def _profile_prompt_block(user_profile):
+    """Profile prompt block.
+    """
     if not isinstance(user_profile, dict):
         return ""
 
@@ -191,6 +214,8 @@ def _profile_prompt_block(user_profile):
 
 
 def analyze_email(email_data, user_profile=None):
+    """Analyze email.
+    """
     body = (email_data.get("body") or "").strip()
     title = (email_data.get("title") or "(No subject)").strip()
     sender = (email_data.get("sender") or "").strip()
@@ -268,6 +293,8 @@ def generate_reply_draft(
     current_draft_text="",
     user_profile=None,
 ):
+    """Generate reply draft.
+    """
     body = (email_data.get("body") or "").strip()
     title = (email_data.get("title") or "(No subject)").strip()
     sender = (email_data.get("sender") or "").strip()

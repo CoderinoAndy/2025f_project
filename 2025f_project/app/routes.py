@@ -171,6 +171,8 @@ AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
 
 
 def _env_int(name, default):
+    """Environment int.
+    """
     try:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
@@ -189,6 +191,8 @@ LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS = max(
 _LAST_DEEP_LIVE_SYNC_AT = 0.0
 
 def _normalize_addresses(raw_value):
+    """Normalize addresses.
+    """
     if raw_value is None:
         return None
     text = str(raw_value).replace(";", ",")
@@ -197,6 +201,8 @@ def _normalize_addresses(raw_value):
 
 
 def _parse_optional_int(raw_value):
+    """Parse optional int.
+    """
     try:
         return int(raw_value) if raw_value else None
     except (TypeError, ValueError):
@@ -204,6 +210,8 @@ def _parse_optional_int(raw_value):
 
 
 def _collect_compose_fields():
+    """Collect compose fields.
+    """
     return {
         "to": _normalize_addresses(request.form.get("to")) or "",
         "cc": _normalize_addresses(request.form.get("cc")) or "",
@@ -216,6 +224,8 @@ def _collect_compose_fields():
 
 
 def _has_compose_content(fields):
+    """Return whether compose content.
+    """
     return bool(
         fields.get("to")
         or fields.get("cc")
@@ -225,6 +235,8 @@ def _has_compose_content(fields):
 
 
 def _collect_attachment_payloads():
+    """Collect attachment payloads.
+    """
     payloads = []
     for item in request.files.getlist("attachments"):
         if item is None:
@@ -246,6 +258,8 @@ def _collect_attachment_payloads():
 
 
 def _save_profile_photo(file_obj):
+    """Save profile photo.
+    """
     if file_obj is None:
         return None
     original_name = (file_obj.filename or "").strip()
@@ -266,6 +280,8 @@ def _save_profile_photo(file_obj):
 
 
 def _collect_reply_fields(email_data):
+    """Collect reply fields.
+    """
     to_value = _normalize_addresses(request.form.get("to"))
     if not to_value:
         sender = _normalize_addresses(email_data.get("sender"))
@@ -280,6 +296,8 @@ def _collect_reply_fields(email_data):
 
 
 def _contextual_reply_fallback(email_data):
+    """Contextual reply fallback.
+    """
     sender_raw = str(email_data.get("sender") or "").strip()
     sender_label = sender_raw.split("<", 1)[0].strip().strip('"')
     if "@" in sender_label and " " not in sender_label:
@@ -294,31 +312,110 @@ def _contextual_reply_fallback(email_data):
 
     title = str(email_data.get("title") or "").strip()
     body = str(email_data.get("body") or "")
-    body_snippet = " ".join(body.replace("\r\n", "\n").replace("\r", "\n").split())
-    if len(body_snippet) > 140:
-        body_snippet = body_snippet[:137].rstrip() + "..."
+    normalized_body = " ".join(body.replace("\r\n", "\n").replace("\r", "\n").split())
+    sentence_chunks = (
+        normalized_body.replace("?", "?. ").replace("!", "!. ").split(". ")
+        if normalized_body
+        else []
+    )
+    noise_markers = (
+        "view in browser",
+        "is this email difficult to read",
+        "unsubscribe",
+        "manage preferences",
+        "privacy policy",
+        "terms of service",
+        "all rights reserved",
+    )
+    request_markers = (
+        "please reply",
+        "please confirm",
+        "can you",
+        "could you",
+        "would you",
+        "let me know",
+        "respond by",
+        "action required",
+        "approval needed",
+        "deadline",
+        "asap",
+    )
+
+    filtered_sentences = []
+    request_sentence = ""
+    for chunk in sentence_chunks:
+        sentence = " ".join(str(chunk).split()).strip(" .")
+        if len(sentence) < 24:
+            continue
+        lowered = sentence.lower()
+        if any(marker in lowered for marker in noise_markers):
+            continue
+        filtered_sentences.append(sentence)
+        if not request_sentence and (
+            "?" in sentence or any(marker in lowered for marker in request_markers)
+        ):
+            request_sentence = sentence
+        if len(filtered_sentences) >= 4:
+            break
 
     topic = ""
     if title and title != "(No subject)":
-        topic = f"\"{title}\""
-    elif body_snippet:
-        topic = body_snippet
+        topic = title
+    elif filtered_sentences:
+        topic = filtered_sentences[0]
+    elif normalized_body:
+        topic = normalized_body[:120].rstrip() + ("..." if len(normalized_body) > 120 else "")
+
+    if len(topic) > 110:
+        topic = topic[:107].rstrip() + "..."
+    if len(request_sentence) > 150:
+        request_sentence = request_sentence[:147].rstrip() + "..."
 
     greeting = f"Hi {sender_label}," if sender_label else "Hi,"
-    if topic:
-        acknowledgment = f"I reviewed your message about {topic}."
+    if request_sentence:
+        message_line = (
+            f"Thanks for your email about {topic}. "
+            f"I reviewed your request: {request_sentence} "
+            "I will follow up shortly with next steps."
+        )
+    elif topic:
+        message_line = (
+            f"Thanks for sharing the update about {topic}. "
+            "I reviewed it and appreciate the context."
+        )
     else:
-        acknowledgment = "I reviewed your message."
+        message_line = (
+            "Thanks for your email. I reviewed your message and will follow up shortly."
+        )
 
-    return (
-        f"{greeting}\n\n"
-        f"{acknowledgment} "
-        f"I will follow up with a detailed response shortly.\n\n"
-        f"Best regards,"
+    return f"{greeting}\n\n{message_line}\n\nBest regards,"
+
+
+def _summary_looks_unusable(email_data):
+    summary = " ".join(str(email_data.get("summary") or "").split()).strip().lower()
+    if not summary:
+        return False
+
+    title = " ".join(str(email_data.get("title") or "").split()).strip().lower()
+    if title and title != "(no subject)" and summary.startswith(title):
+        remainder = summary[len(title):].strip(" .:-")
+        if len(remainder) < 40:
+            return True
+
+    unusable_markers = (
+        "is this email difficult to read",
+        "view in browser",
+        "summary unavailable",
+        "summary generation failed",
+        "unable to summarize",
+        "unable to interpret",
     )
+    return any(marker in summary for marker in unusable_markers)
 
 
 def _should_auto_analyze_email(email_data):
+    """Return whether auto analyze email.
+    """
     if not ai_enabled():
         return False
     if not email_data:
@@ -335,13 +432,16 @@ def _should_auto_analyze_email(email_data):
         or email_data.get("ai_needs_response") is None
         or email_data.get("ai_confidence") is None
     )
-    summary_needed = should_summarize_email(email_data) and not (
-        email_data.get("summary") or ""
-    ).strip()
+    summary_needed = should_summarize_email(email_data) and (
+        not (email_data.get("summary") or "").strip()
+        or _summary_looks_unusable(email_data)
+    )
     return classification_missing or summary_needed
 
 
 def _run_ai_analysis(email_data, force=False):
+    """Run ai analysis.
+    """
     profile = get_user_profile()
     updated = False
     classification_missing = (
@@ -368,7 +468,11 @@ def _run_ai_analysis(email_data, force=False):
             updated = True
 
     summary_missing = not (email_data.get("summary") or "").strip()
-    if summary_missing and should_summarize_email(email_data):
+    summary_unusable = _summary_looks_unusable(email_data)
+    should_generate_summary = should_summarize_email(email_data) and (
+        summary_missing or summary_unusable or force
+    )
+    if should_generate_summary:
         summary = summarize_email(
             email_data,
             user_profile=profile,
@@ -404,6 +508,7 @@ def _safe_next_url(raw_next):
         path = parsed.path or "/"
         query = parsed.query
         if path.startswith("/email/"):
+            # Email pages can wrap another `next` query param; unwrap until a stable list URL.
             nested = parse_qs(query).get("next", [None])[0]
             if nested:
                 candidate = nested
@@ -436,12 +541,16 @@ def _dt_sort_value(dt):
     return dt.toordinal() * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
 
 def sort_emails(emails, sort_code):
+    """Sort emails.
+    """
     sort_code = sort_code if sort_code in VALID_SORTS else "date_desc"
 
     def dt_val(e):
+        """Return a sortable numeric date value for one email row."""
         return _dt_sort_value(_parse_dt(e.get("date")))
 
     def pr_val(e):
+        """Return the numeric priority used by the sort keys below."""
         return int(e.get("priority") or 0)
 
     # Default: newest first
@@ -470,7 +579,10 @@ def sort_emails(emails, sort_code):
 
 
 def _emails_fingerprint(emails):
+    """Emails fingerprint.
+    """
     rows = []
+    # Include only fields that affect visible list rows so polling can skip no-op DOM updates.
     for email in emails:
         rows.append(
             ":".join(
@@ -488,6 +600,8 @@ def _emails_fingerprint(emails):
 
 
 def _prune_ai_tasks_locked():
+    """Prune AI tasks locked.
+    """
     if len(AI_TASKS) <= AI_TASK_MAX_ITEMS:
         return
     removable = [
@@ -505,10 +619,13 @@ def _prune_ai_tasks_locked():
 
 
 def _create_or_get_ai_task(task_type, email_id):
+    """Create or get AI task.
+    """
     key = (task_type, int(email_id))
-    with AI_TASK_LOCK:
+    with AI_TASK_LOCK:  # Protect shared in-memory AI task state with a lock.
         existing_id = AI_TASK_INDEX.get(key)
         existing = AI_TASKS.get(existing_id) if existing_id else None
+        # One active task per (task_type, email_id) keeps polling simple and avoids duplicated AI cost.
         if existing and existing["status"] in AI_TASK_ACTIVE_STATUSES:
             return dict(existing), False
 
@@ -531,6 +648,8 @@ def _create_or_get_ai_task(task_type, email_id):
 
 
 def _set_ai_task_status(task_id, status, result=None, error=None):
+    """Set AI task status.
+    """
     with AI_TASK_LOCK:
         task = AI_TASKS.get(task_id)
         if not task:
@@ -549,12 +668,16 @@ def _set_ai_task_status(task_id, status, result=None, error=None):
 
 
 def _get_ai_task(task_id):
+    """Get AI task.
+    """
     with AI_TASK_LOCK:
         task = AI_TASKS.get(task_id)
         return dict(task) if task else None
 
 
 def _serialize_ai_task(task):
+    """Serialize AI task.
+    """
     payload = {
         "task_id": task["id"],
         "task_type": task["type"],
@@ -569,6 +692,8 @@ def _serialize_ai_task(task):
 
 
 def _analysis_task_worker(task_id, email_id):
+    """Analysis task worker.
+    """
     _set_ai_task_status(task_id, "running")
     try:
         email_data = fetch_email_by_id(email_id)
@@ -599,6 +724,8 @@ def _analysis_task_worker(task_id, email_id):
 
 
 def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text):
+    """Draft task worker.
+    """
     _set_ai_task_status(task_id, "running")
     try:
         email_data = fetch_email_by_id(email_id)
@@ -649,6 +776,8 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
 
 
 def _start_analysis_task(email_id):
+    """Start analysis task.
+    """
     task, created = _create_or_get_ai_task("analyze", email_id)
     if created:
         threading.Thread(
@@ -660,6 +789,8 @@ def _start_analysis_task(email_id):
 
 
 def _start_draft_task(email_id, to_value, cc_value, current_reply_text):
+    """Start draft task.
+    """
     task, created = _create_or_get_ai_task("draft", email_id)
     if created:
         threading.Thread(
@@ -677,6 +808,8 @@ def _start_draft_task(email_id, to_value, cc_value, current_reply_text):
 
 
 def _set_message_read_state_async(external_id, read=True):
+    """Set message read state async.
+    """
     if not external_id:
         return
     threading.Thread(
@@ -687,6 +820,8 @@ def _set_message_read_state_async(external_id, read=True):
 
 
 def _fetch_live_list_emails(list_view):
+    """Fetch live list emails.
+    """
     config = LIVE_LIST_CONFIGS.get(list_view)
     if not config:
         return None, None
@@ -707,6 +842,8 @@ def _fetch_live_list_emails(list_view):
 
 
 def _filter_emails_by_query(emails, query_text):
+    """Filter emails by query.
+    """
     query = (query_text or "").strip()
     if not query:
         return emails
@@ -729,16 +866,22 @@ def _filter_emails_by_query(emails, query_text):
 
 
 def _current_list_url():
+    """Current list url.
+    """
     return request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
 
 
 def _list_query_state():
+    """List query state.
+    """
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
     return sort_code, search_query, _current_list_url()
 
 
 def _next_url_from_request():
+    """Next url from request.
+    """
     return _safe_next_url(request.form.get("next") or request.args.get("next"))
 
 
@@ -751,6 +894,8 @@ def _render_mailbox_page(
     include_fingerprint=True,
     sync_drafts=False,
 ):
+    """Render mailbox page.
+    """
     sort_code, search_query, current_list_url = _list_query_state()
     if sync_drafts:
         sync_drafts_from_gmail(max_results=40)
@@ -775,6 +920,8 @@ def _render_mailbox_page(
 
 
 def _persist_compose_draft(fields, attachments=None):
+    """Persist compose draft.
+    """
     draft_info = upsert_gmail_draft(
         to_value=fields["to"],
         cc_value=fields["cc"],
@@ -802,10 +949,13 @@ def _persist_compose_draft(fields, attachments=None):
 
 
 def _set_email_type_with_fallback(email_id, email_data, new_type):
+    """Set email type with fallback.
+    """
     if email_data.get("type") == new_type:
         return
     external_id = email_data.get("external_id")
     if external_id:
+        # Update provider labels first so Gmail and local mailbox tabs stay aligned.
         if not set_message_type(external_id, new_type):
             db_set_email_type(email_id, new_type)
         return
@@ -813,8 +963,11 @@ def _set_email_type_with_fallback(email_id, email_data, new_type):
 
 
 def _set_read_state_with_fallback(email_id, email_data, target_read_state):
+    """Set read state with fallback.
+    """
     external_id = email_data.get("external_id")
     if external_id:
+        # Fall back to local DB when provider update fails to keep the UI responsive.
         if not set_message_read_state(external_id, read=target_read_state):
             mark_read(email_id, target_read_state)
         return
@@ -822,6 +975,8 @@ def _set_read_state_with_fallback(email_id, email_data, target_read_state):
 
 
 def _parse_bulk_email_ids(raw_ids):
+    """Parse bulk email IDs.
+    """
     seen = set()
     parsed = []
     for token in str(raw_ids or "").split(","):
@@ -841,6 +996,8 @@ def _parse_bulk_email_ids(raw_ids):
 
 @main.route("/api/list-emails")
 def list_emails_api():
+    """List emails api.
+    """
     global _LAST_DEEP_LIVE_SYNC_AT
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
@@ -878,6 +1035,8 @@ def list_emails_api():
 
 @main.route("/api/email/<int:id>/ai/analyze", methods=["POST"])
 def start_ai_analyze(id):
+    """Start AI analyze.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -891,6 +1050,8 @@ def start_ai_analyze(id):
 
 @main.route("/api/email/<int:id>/ai/draft", methods=["POST"])
 def start_ai_draft(id):
+    """Start AI draft.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -909,6 +1070,8 @@ def start_ai_draft(id):
 
 @main.route("/api/ai-task/<task_id>", methods=["GET"])
 def ai_task_status(task_id):
+    """Ai task status.
+    """
     task = _get_ai_task(task_id)
     if not task:
         abort(404)
@@ -917,6 +1080,8 @@ def ai_task_status(task_id):
 
 @main.before_app_request
 def sync_from_gmail():
+    """Sync from Gmail.
+    """
     if request.endpoint == "static":
         return
     if request.method != "GET":
@@ -933,15 +1098,21 @@ def sync_from_gmail():
 
 @main.route("/")
 def index():
+    """Index.
+    """
     return redirect(url_for("main.about"))
 
 @main.route("/about")
 def about():
+    """About.
+    """
     return render_template("about.html")
 
 
 @main.route("/profile", methods=["GET", "POST"])
 def profile():
+    """Profile.
+    """
     profile_data = get_user_profile()
     if request.method == "POST":
         name_value = (request.form.get("name") or "").strip()
@@ -970,6 +1141,8 @@ def profile():
 
 @main.route("/allemails")
 def allemails():
+    """Allemails.
+    """
     return _render_mailbox_page(
         "allemails.html",
         exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -977,6 +1150,8 @@ def allemails():
 
 @main.route("/readonly")
 def readonly():
+    """Readonly.
+    """
     return _render_mailbox_page(
         "readonly.html",
         email_type="read-only",
@@ -984,6 +1159,8 @@ def readonly():
 
 @main.route("/responseneeded")
 def responseneeded():
+    """Responseneeded.
+    """
     return _render_mailbox_page(
         "responseneeded.html",
         email_type="response-needed",
@@ -991,6 +1168,8 @@ def responseneeded():
 
 @main.route("/junkmailconfirm")
 def junkmailconfirm():
+    """Junkmailconfirm.
+    """
     return _render_mailbox_page(
         "junkmailconfirm.html",
         email_type="junk-uncertain",
@@ -998,6 +1177,8 @@ def junkmailconfirm():
 
 @main.route("/junk")
 def junk():
+    """Junk.
+    """
     return _render_mailbox_page(
         "junk.html",
         email_type="junk",
@@ -1006,6 +1187,8 @@ def junk():
 
 @main.route("/sent")
 def sent():
+    """Sent.
+    """
     return _render_mailbox_page(
         "sent.html",
         email_type="sent",
@@ -1015,6 +1198,8 @@ def sent():
 
 @main.route("/drafts")
 def drafts():
+    """Drafts.
+    """
     return _render_mailbox_page(
         "drafts.html",
         email_type="draft",
@@ -1025,6 +1210,8 @@ def drafts():
 
 @main.route("/archive")
 def archive():
+    """Archive.
+    """
     return _render_mailbox_page(
         "archive.html",
         exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -1033,6 +1220,8 @@ def archive():
 
 @main.route("/email/<int:id>")
 def email(id):
+    """Email.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -1077,11 +1266,6 @@ def email(id):
 @main.route("/email/<int:id>/set-type", methods=["POST"])
 def set_email_type(id):
     """Change an email's category.
-
-    Note:
-    - Right now, emails live in the in-memory EMAILS list.
-    - Later, you can swap the implementation inside this function to update a SQLite row
-      (or your Outlook integration) without changing the UI.
     """
 
     new_type = (request.form.get("new_type") or "").strip()
@@ -1106,6 +1290,8 @@ def set_email_type(id):
 
 @main.route("/emails/bulk-action", methods=["POST"])
 def bulk_email_action():
+    """Bulk email action.
+    """
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
     email_ids = _parse_bulk_email_ids(request.form.get("ids"))
@@ -1176,6 +1362,8 @@ def bulk_email_action():
 
 @main.route("/email/<int:id>/archive", methods=["POST"])
 def archive_email(id):
+    """Archive email.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1188,6 +1376,8 @@ def archive_email(id):
 
 @main.route("/email/<int:id>/unarchive", methods=["POST"])
 def unarchive_email(id):
+    """Unarchive email.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1198,6 +1388,8 @@ def unarchive_email(id):
 
 @main.route("/search")
 def search():
+    """Search.
+    """
     q = (request.args.get("q") or "").strip()
     if not q:
         return redirect(url_for("main.allemails"))
@@ -1206,6 +1398,8 @@ def search():
 
 @main.route("/email/<int:id>/analyze", methods=["POST"])
 def analyze_email_route(id):
+    """Analyze email route.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -1220,6 +1414,8 @@ def analyze_email_route(id):
 
 @main.route("/send_reply/<int:id>", methods=["POST"])
 def send_reply(id):
+    """Send reply.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -1247,6 +1443,8 @@ def send_reply(id):
 
 @main.route("/compose")
 def compose():
+    """Compose.
+    """
     next_candidate = request.args.get("next")
     if not next_candidate:
         referrer = request.referrer or ""
@@ -1299,6 +1497,8 @@ def compose():
 
 @main.route("/compose/save", methods=["POST"])
 def compose_save():
+    """Compose save.
+    """
     next_url = _next_url_from_request()
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
@@ -1311,6 +1511,8 @@ def compose_save():
 
 @main.route("/compose/autosave", methods=["POST"])
 def compose_autosave():
+    """Compose autosave.
+    """
     fields = _collect_compose_fields()
     if not _has_compose_content(fields):
         return Response(status=204)
@@ -1321,8 +1523,11 @@ def compose_autosave():
 
 @main.route("/compose/send", methods=["POST"])
 def compose_send():
+    """Compose send.
+    """
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
+    # Reattach files that already exist in the provider draft/local sent message before sending.
     if fields["provider_draft_id"]:
         attachments = fetch_draft_attachments(fields["provider_draft_id"]) + attachments
     elif fields["local_draft_id"]:
@@ -1363,6 +1568,8 @@ def compose_send():
 
 @main.route("/generate_draft/<int:id>", methods=["POST"])
 def generate_draft(id):
+    """Generate draft.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -1399,6 +1606,8 @@ def generate_draft(id):
 
 @main.route("/email/<int:id>/delete", methods=["POST"])
 def delete_email(id):
+    """Delete email.
+    """
     email_data = fetch_email_by_id(id)
     if email_data:
         if email_data.get("type") == "draft" and email_data.get("provider_draft_id"):
@@ -1411,6 +1620,8 @@ def delete_email(id):
 
 @main.route("/email/<int:id>/toggle-read", methods=["POST"])
 def toggle_read(id):
+    """Toggle read.
+    """
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)

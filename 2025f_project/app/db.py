@@ -70,11 +70,14 @@ FROM email_messages m
 
 @contextmanager
 def db_session(db_path):
+    """Database session.
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA foreign_keys = ON;")
         yield conn
+        # Commit once per session so callers can perform multi-statement updates atomically.
         conn.commit()
     except sqlite3.Error as e:
         conn.rollback()
@@ -92,6 +95,8 @@ def db_session(db_path):
 
 
 def init_db(db_path=DB_DEFAULT):
+    """Initialize database.
+    """
     schema_path = Path(__file__).resolve().parent / "sql" / "schema.sql"
     if not schema_path.exists():
         raise FileNotFoundError("schema.sql not found in app/sql/")
@@ -112,6 +117,8 @@ def init_db(db_path=DB_DEFAULT):
 
 
 def _apply_schema_migrations(conn):
+    """Apply schema migrations.
+    """
     columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(email_messages)").fetchall()
@@ -127,6 +134,7 @@ def _apply_schema_migrations(conn):
         or "'draft'" not in definition_sql
     )
 
+    # Rebuild when old schemas are missing columns/check constraints that ALTER TABLE cannot fix safely.
     if needs_rebuild:
         _rebuild_email_tables(conn, columns)
 
@@ -193,6 +201,9 @@ def _apply_schema_migrations(conn):
 
 
 def _rebuild_email_tables(conn, existing_columns):
+    """Rebuild email tables.
+    """
+    # Preserve as much legacy data as possible by selecting old columns when they exist.
     body_html_expr = "body_html" if "body_html" in existing_columns else "NULL"
     provider_draft_expr = (
         "provider_draft_id" if "provider_draft_id" in existing_columns else "NULL"
@@ -206,6 +217,7 @@ def _rebuild_email_tables(conn, existing_columns):
     )
     is_archived_expr = "is_archived" if "is_archived" in existing_columns else "0"
 
+    # Temporarily disable FK checks while tables are renamed/recreated in place.
     conn.execute("PRAGMA foreign_keys = OFF;")
     conn.execute("ALTER TABLE email_messages RENAME TO email_messages_old;")
 
@@ -302,7 +314,10 @@ def _rebuild_email_tables(conn, existing_columns):
 
 
 def _row_to_dict(row):
+    """Row recipient dict.
+    """
     data = dict(row)
+    # Normalize SQLite scalar types (0/1/REAL) into Python values used by templates/API code.
     if "is_read" in data:
         data["is_read"] = bool(data["is_read"])
     if "is_archived" in data:
@@ -321,6 +336,8 @@ def _row_to_dict(row):
 
 
 def _split_addresses(raw_value):
+    """Split addresses.
+    """
     if raw_value is None:
         return []
     text = str(raw_value).replace(";", ",")
@@ -339,6 +356,8 @@ def _split_addresses(raw_value):
 
 
 def _insert_recipients(conn, email_id, recipient_type, raw_value):
+    """Insert recipients.
+    """
     for address in _split_addresses(raw_value):
         conn.execute(
             """
@@ -350,11 +369,15 @@ def _insert_recipients(conn, email_id, recipient_type, raw_value):
 
 
 def _normalize_ai_category(value):
+    """Normalize AI category.
+    """
     category = str(value or "").strip().lower()
     return category if category in AI_CATEGORIES else None
 
 
 def _normalize_ai_needs_response(value):
+    """Normalize AI needs response.
+    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -368,6 +391,8 @@ def _normalize_ai_needs_response(value):
 
 
 def _normalize_ai_confidence(value):
+    """Normalize AI confidence.
+    """
     if value is None or value == "":
         return None
     try:
@@ -378,6 +403,8 @@ def _normalize_ai_confidence(value):
 
 
 def _normalize_archived_flag(value):
+    """Normalize archived flag.
+    """
     if isinstance(value, bool):
         return 1 if value else 0
     if value is None:
@@ -397,6 +424,9 @@ def fetch_emails(
     archived_only=False,
     db_path=DB_DEFAULT,
 ):
+    """Fetch emails.
+    """
+    # Build a composable WHERE clause so one function can serve every mailbox tab.
     where_clauses = []
     params = []
     if archived_only:
@@ -425,6 +455,8 @@ def fetch_emails(
 
 
 def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
+    """Fetch email by ID.
+    """
     with db_session(db_path) as conn:
         cur = conn.execute(
             f"""
@@ -437,6 +469,8 @@ def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
         return _row_to_dict(row) if row else None
 
 def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
+    """Fetch email by provider draft ID.
+    """
     if not provider_draft_id:
         return None
     with db_session(db_path) as conn:
@@ -452,6 +486,8 @@ def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
 
 
 def fetch_thread_emails(thread_id, db_path=DB_DEFAULT):
+    """Fetch thread emails.
+    """
     if not thread_id:
         return []
     with db_session(db_path) as conn:
@@ -467,6 +503,8 @@ def fetch_thread_emails(thread_id, db_path=DB_DEFAULT):
 
 
 def mark_read(email_id, read=True, db_path=DB_DEFAULT):
+    """Mark read.
+    """
     with db_session(db_path) as conn:
         conn.execute(
             "UPDATE email_messages SET is_read = ? WHERE id = ?",
@@ -475,6 +513,8 @@ def mark_read(email_id, read=True, db_path=DB_DEFAULT):
 
 
 def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
+    """Upsert email from provider.
+    """
     external_id = (email_data.get("external_id") or "").strip()
     provider_draft_id = (email_data.get("provider_draft_id") or "").strip()
     if not external_id and not provider_draft_id:
@@ -558,6 +598,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             existing = cur.fetchone()
 
         if existing:
+            # Keep locally generated summary/draft/classification unless provider has newer explicit values.
             summary_value = existing["summary"] if existing["summary"] else normalized["summary"]
             draft_value = existing["draft"] if existing["draft"] else normalized["draft"]
             body_html_value = normalized["body_html"]
@@ -684,6 +725,8 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
 
 
 def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
+    """Set email type.
+    """
     if new_type not in ALLOWED_TYPES:
         raise ValueError("Invalid email type.")
     with db_session(db_path) as conn:
@@ -691,6 +734,8 @@ def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
 
 
 def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
+    """Set email archived.
+    """
     with db_session(db_path) as conn:
         conn.execute(
             "UPDATE email_messages SET is_archived = ? WHERE id = ?",
@@ -699,6 +744,8 @@ def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
 
 
 def toggle_read_state(email_id, db_path=DB_DEFAULT):
+    """Toggle read state.
+    """
     with db_session(db_path) as conn:
         conn.execute(
             """
@@ -711,11 +758,15 @@ def toggle_read_state(email_id, db_path=DB_DEFAULT):
 
 
 def update_draft(email_id, draft_text, db_path=DB_DEFAULT):
+    """Update draft.
+    """
     with db_session(db_path) as conn:
         conn.execute("UPDATE email_messages SET draft = ? WHERE id = ?", (draft_text, email_id))
 
 
 def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_DEFAULT):
+    """Create reply email.
+    """
     with db_session(db_path) as conn:
         cur = conn.execute(
             """
@@ -763,6 +814,8 @@ def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_D
 
 
 def delete_email(email_id, db_path=DB_DEFAULT):
+    """Delete email.
+    """
     with db_session(db_path) as conn:
         conn.execute("DELETE FROM email_messages WHERE id = ?", (email_id,))
 
@@ -778,6 +831,8 @@ def save_local_draft(
     sender=LOCAL_USER_EMAIL,
     db_path=DB_DEFAULT,
 ):
+    """Save local draft.
+    """
     clean_title = (title or "(No subject)").strip()
     clean_body = body or ""
     with db_session(db_path) as conn:
@@ -802,6 +857,7 @@ def save_local_draft(
             draft_id = row["id"] if row else None
 
         if draft_id:
+            # Update in place when we already know the local row or provider draft mapping.
             conn.execute(
                 """
                 UPDATE email_messages
@@ -869,6 +925,8 @@ def update_email_ai_fields(
     lock_existing_classification=True,
     db_path=DB_DEFAULT,
 ):
+    """Update email AI fields.
+    """
     with db_session(db_path) as conn:
         existing = conn.execute(
             """
@@ -945,6 +1003,8 @@ def create_local_sent_email(
     thread_id=None,
     db_path=DB_DEFAULT,
 ):
+    """Create local sent email.
+    """
     clean_title = (title or "(No subject)").strip()
     with db_session(db_path) as conn:
         cur = conn.execute(
@@ -972,6 +1032,8 @@ def create_local_sent_email(
 
 
 def get_user_profile(db_path=DB_DEFAULT):
+    """Get user profile.
+    """
     with db_session(db_path) as conn:
         row = conn.execute(
             """
@@ -988,6 +1050,8 @@ def get_user_profile(db_path=DB_DEFAULT):
 
 
 def save_user_profile(name, occupation, photo_path=None, db_path=DB_DEFAULT):
+    """Save user profile.
+    """
     name_value = (name or "").strip()
     occupation_value = (occupation or "").strip()
     photo_value = (photo_path or "").strip()

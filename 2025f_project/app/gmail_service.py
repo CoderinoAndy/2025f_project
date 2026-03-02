@@ -63,6 +63,8 @@ _SYNC_LOCK = threading.Lock()
 
 
 def _candidate_credentials_paths():
+    """Candidate credentials paths.
+    """
     configured_path = os.getenv("GMAIL_CREDENTIALS_FILE")
     candidates = []
     if configured_path:
@@ -73,6 +75,8 @@ def _candidate_credentials_paths():
 
 
 def _resolve_credentials_path():
+    """Resolve credentials path.
+    """
     for path in _candidate_credentials_paths():
         if path.exists():
             return path
@@ -80,6 +84,8 @@ def _resolve_credentials_path():
 
 
 def gmail_available():
+    """Gmail available.
+    """
     return bool(
         _resolve_credentials_path()
         and Request
@@ -90,11 +96,15 @@ def gmail_available():
 
 
 def _save_token(credentials):
+    """Save token.
+    """
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_PATH.write_text(credentials.to_json(), encoding="utf-8")
 
 
 def _load_credentials():
+    """Load credentials.
+    """
     if not gmail_available():
         return None
 
@@ -105,6 +115,7 @@ def _load_credentials():
         except Exception:
             credentials = None
 
+    # Reuse cached token when valid, otherwise refresh or launch OAuth consent.
     if credentials and credentials.valid and credentials.has_scopes(SCOPES):
         return credentials
 
@@ -139,6 +150,8 @@ def _load_credentials():
 
 
 def _get_service():
+    """Get service.
+    """
     credentials = _load_credentials()
     if not credentials:
         return None
@@ -156,6 +169,8 @@ def _get_service():
 
 
 def _extract_header(payload, header_name):
+    """Extract header.
+    """
     for header in payload.get("headers", []) or []:
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
@@ -163,6 +178,8 @@ def _extract_header(payload, header_name):
 
 
 def _decode_body_bytes(raw_data):
+    """Decode body bytes.
+    """
     if not raw_data:
         return b""
     padded = f"{raw_data}{'=' * (-len(raw_data) % 4)}"
@@ -173,6 +190,8 @@ def _decode_body_bytes(raw_data):
 
 
 def _extract_part_header(part, header_name):
+    """Extract part header.
+    """
     for header in part.get("headers", []) or []:
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
@@ -180,12 +199,16 @@ def _extract_part_header(part, header_name):
 
 
 def _normalize_cid(raw_value):
+    """Normalize cid.
+    """
     if not raw_value:
         return ""
     return raw_value.strip().strip("<>").lower()
 
 
 def _attachment_bytes(service, message_id, attachment_id):
+    """Attachment bytes.
+    """
     if not service or not message_id or not attachment_id:
         return b""
     try:
@@ -202,6 +225,8 @@ def _attachment_bytes(service, message_id, attachment_id):
 
 
 def _iter_parts(payload):
+    """Iter parts.
+    """
     if not payload:
         return
     stack = [payload]
@@ -214,6 +239,8 @@ def _iter_parts(payload):
 
 
 def _guess_filename(content_type, index):
+    """Guess filename.
+    """
     mime = (content_type or "").split(";", 1)[0].strip().lower()
     extension = mimetypes.guess_extension(mime) if mime else None
     suffix = extension or ".bin"
@@ -221,6 +248,8 @@ def _guess_filename(content_type, index):
 
 
 def _extract_attachment_payloads(payload, service=None, message_id=None):
+    """Extract attachment payloads.
+    """
     attachments = []
     for part in _iter_parts(payload):
         body_info = part.get("body") or {}
@@ -251,6 +280,8 @@ def _extract_attachment_payloads(payload, service=None, message_id=None):
 
 
 def _extract_attachment_metadata(payload):
+    """Extract attachment metadata.
+    """
     metadata = []
     for part in _iter_parts(payload):
         body_info = part.get("body") or {}
@@ -280,8 +311,11 @@ def _extract_attachment_metadata(payload):
 
 
 def _merge_attachment_payloads(existing_attachments, incoming_attachments):
+    """Merge attachment payloads.
+    """
     merged = []
     seen = set()
+    # Deduplicate by stable content signature so updating drafts does not duplicate files.
     for attachment in (existing_attachments or []) + (incoming_attachments or []):
         filename = (attachment.get("filename") or "attachment.bin").strip() or "attachment.bin"
         content = attachment.get("content") or b""
@@ -304,6 +338,8 @@ def _merge_attachment_payloads(existing_attachments, incoming_attachments):
 
 
 def _get_draft_data(service, provider_draft_id):
+    """Get draft data.
+    """
     if not service or not provider_draft_id:
         return None
     try:
@@ -326,6 +362,8 @@ def _get_draft_data(service, provider_draft_id):
 
 
 def _get_message_data(service, external_id):
+    """Get message data.
+    """
     if not service or not external_id:
         return None
     try:
@@ -348,6 +386,8 @@ def _get_message_data(service, external_id):
 
 
 def fetch_draft_attachments(provider_draft_id):
+    """Fetch draft attachments.
+    """
     service = _get_service()
     if not service or not provider_draft_id:
         return []
@@ -363,6 +403,8 @@ def fetch_draft_attachments(provider_draft_id):
 
 
 def fetch_draft_attachment_metadata(provider_draft_id):
+    """Fetch draft attachment metadata.
+    """
     service = _get_service()
     if not service or not provider_draft_id:
         return []
@@ -374,6 +416,8 @@ def fetch_draft_attachment_metadata(provider_draft_id):
 
 
 def fetch_message_attachments(external_id):
+    """Fetch message attachments.
+    """
     service = _get_service()
     if not service or not external_id:
         return []
@@ -388,6 +432,8 @@ def fetch_message_attachments(external_id):
 
 
 def fetch_message_attachment_metadata(external_id):
+    """Fetch message attachment metadata.
+    """
     service = _get_service()
     if not service or not external_id:
         return []
@@ -398,6 +444,8 @@ def fetch_message_attachment_metadata(external_id):
 
 
 def _html_to_text(raw_html):
+    """Html recipient text.
+    """
     if not raw_html:
         return ""
     no_scripts = re.sub(
@@ -411,10 +459,13 @@ def _html_to_text(raw_html):
 
 
 def _replace_inline_cid_sources(raw_html, cid_sources):
+    """Replace inline cid sources.
+    """
     if not raw_html or not cid_sources:
         return raw_html
 
     def replacer(match):
+        """Swap `cid:` image references with resolved inline data URLs when available."""
         quote = match.group(1)
         cid_key = _normalize_cid(match.group(2))
         resolved = cid_sources.get(cid_key)
@@ -431,6 +482,8 @@ def _replace_inline_cid_sources(raw_html, cid_sources):
 
 
 def _extract_message_content(payload, service=None, message_id=None):
+    """Extract message content.
+    """
     if not payload:
         return "", None
 
@@ -439,6 +492,7 @@ def _extract_message_content(payload, service=None, message_id=None):
     inline_cid_sources = {}
     stack = [payload]
 
+    # Traverse all MIME parts once and collect plain/html bodies + inline image data.
     while stack:
         current = stack.pop()
         children = current.get("parts") or []
@@ -487,6 +541,8 @@ def _extract_message_content(payload, service=None, message_id=None):
 
 
 def _parse_addresses(raw_value):
+    """Parse addresses.
+    """
     if not raw_value:
         return ""
     parsed_addresses = [addr for _, addr in getaddresses([raw_value]) if addr]
@@ -494,10 +550,14 @@ def _parse_addresses(raw_value):
 
 
 def _header_value(payload, name):
+    """Header value.
+    """
     return (_extract_header(payload, name) or "").strip()
 
 
 def _sender_looks_bulk(payload):
+    """Sender looks bulk.
+    """
     sender_value = _header_value(payload, "From").lower()
     if any(marker in sender_value for marker in BULK_SENDER_MARKERS):
         return True
@@ -519,6 +579,8 @@ def _sender_looks_bulk(payload):
 
 
 def _labels_to_type(label_ids, payload=None):
+    """Labels recipient type.
+    """
     labels = set(label_ids or [])
     if "DRAFT" in labels:
         return "draft"
@@ -534,6 +596,8 @@ def _labels_to_type(label_ids, payload=None):
 
 
 def _labels_to_priority(label_ids):
+    """Labels recipient priority.
+    """
     labels = set(label_ids or [])
     if "STARRED" in labels:
         return 3
@@ -543,6 +607,8 @@ def _labels_to_priority(label_ids):
 
 
 def _received_at(internal_date):
+    """Received at.
+    """
     try:
         timestamp = int(internal_date) / 1000
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -552,7 +618,10 @@ def _received_at(internal_date):
 
 
 def _to_db_record(message, service=None, provider_draft_id=None):
+    """Recipient database record.
+    """
     label_ids = set(message.get("labelIds") or [])
+    # Skip TRASH rows because they are mirrored as deletes in the local mailbox.
     if "TRASH" in label_ids:
         return None
 
@@ -586,6 +655,8 @@ def sync_message_by_external_id(
     service=None,
     provider_draft_id=None,
 ):
+    """Sync message by external ID.
+    """
     if not external_id:
         return None
     service = service or _get_service()
@@ -623,6 +694,8 @@ def sync_message_by_external_id(
 
 
 def _should_ai_triage_email(email_data):
+    """Return whether AI triage email.
+    """
     if not email_data:
         return False
     if email_data.get("type") in {"sent", "draft"}:
@@ -642,12 +715,14 @@ def _should_ai_triage_email(email_data):
 
 
 def _triage_email_with_ai(email_data, user_profile, db_path):
+    """Triage email with ai.
+    """
     classification = classify_email(
         email_data=email_data,
         user_profile=user_profile,
         email_id=email_data.get("id"),
     )
-    if not classification:
+    if not classification:  # Skip updates when classification output is missing/invalid.
         return False
 
     current_type = str(email_data.get("type") or "").strip()
@@ -668,6 +743,8 @@ def _triage_email_with_ai(email_data, user_profile, db_path):
 
 
 def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
+    """Sync recent emails.
+    """
     service = _get_service()
     if not service:
         log_event(
@@ -696,6 +773,7 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
     synced = 0
     visited = 0
 
+    # Paginate through Gmail list API until we reach caller budget or messages run out.
     while visited < target:
         page_size = min(100, target - visited)
         try:
@@ -773,8 +851,11 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
 
 
 def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
+    """Trigger background sync.
+    """
     global _LAST_SYNC_AT
     now = time.time()
+    # Skip background work when a recent sync already ran unless caller explicitly forces it.
     if not force and now - _LAST_SYNC_AT < SYNC_INTERVAL_SECONDS:
         log_event(
             action_type="gmail_sync",
@@ -795,6 +876,7 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
         return False
 
     def _worker():
+        """Run one background sync cycle and always release the sync lock afterward."""
         global _LAST_SYNC_AT
         try:
             sync_recent_emails(db_path=db_path, max_results=max_results)
@@ -829,6 +911,8 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
 
 
 def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
+    """Modify labels.
+    """
     body = {}
     if add_labels:
         body["addLabelIds"] = sorted(set(add_labels))
@@ -853,6 +937,8 @@ def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
 
 
 def _build_email_message(to_value, cc_value, subject, body_text, attachments=None):
+    """Build email message.
+    """
     message = EmailMessage()
     if to_value:
         message["To"] = to_value
@@ -885,6 +971,8 @@ def send_compose_message(
     thread_id=None,
     db_path=DB_DEFAULT,
 ):
+    """Send compose message.
+    """
     service = _get_service()
     if not service:
         return None
@@ -942,6 +1030,8 @@ def upsert_gmail_draft(
     thread_id=None,
     db_path=DB_DEFAULT,
 ):
+    """Upsert Gmail draft.
+    """
     service = _get_service()
     if not service:
         return None
@@ -1025,6 +1115,8 @@ def upsert_gmail_draft(
 
 
 def delete_draft_message(provider_draft_id):
+    """Delete draft message.
+    """
     service = _get_service()
     if not service or not provider_draft_id:
         return False
@@ -1052,6 +1144,8 @@ def delete_draft_message(provider_draft_id):
 
 
 def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
+    """Sync drafts from Gmail.
+    """
     service = _get_service()
     if not service:
         return 0
@@ -1132,6 +1226,8 @@ def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
 
 
 def set_message_read_state(external_id, read, db_path=DB_DEFAULT):
+    """Set message read state.
+    """
     service = _get_service()
     if not service or not external_id:
         return False
@@ -1154,6 +1250,8 @@ def set_message_read_state(external_id, read, db_path=DB_DEFAULT):
 
 
 def set_message_type(external_id, new_type, db_path=DB_DEFAULT):
+    """Set message type.
+    """
     service = _get_service()
     if not service or not external_id:
         return False
@@ -1192,6 +1290,8 @@ def send_reply_message(
     attachments=None,
     db_path=DB_DEFAULT,
 ):
+    """Send reply message.
+    """
     service = _get_service()
     if not service:
         return None
@@ -1256,6 +1356,8 @@ def send_reply_message(
 
 
 def trash_message(external_id):
+    """Trash message.
+    """
     service = _get_service()
     if not service or not external_id:
         return False

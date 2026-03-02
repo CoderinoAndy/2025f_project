@@ -1,6 +1,6 @@
-<!doctype html>
+<!doctype html> <!-- Page-level HTML scaffold for this view. -->
 <html lang="en">
-  <head>
+  <head> <!-- Head section with metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Email</title>
@@ -271,10 +271,10 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <body>
-    {% include "_navbar.html" %}
+  <body> <!-- Body section with rendered content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
 
-    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);">
+    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);"> <!-- Primary content container for this page. -->
       <a class="backlink d-inline-flex mb-2" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
@@ -358,7 +358,7 @@
                 ] %}
                   {% if t != current_type %}
                     <li>
-                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0">
+                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0"> <!-- Main form users submit on this view. -->
                         <input type="hidden" name="new_type" value="{{ t }}" />
                         <input type="hidden" name="next" value="{{ next_url }}" />
                         <button class="dropdown-item" type="submit">{{ label }}</button>
@@ -579,6 +579,7 @@
           rawHtml = "";
         }
 
+        // Render email HTML inside an isolated iframe so message CSS cannot break app layout.
         const wrappedHtml = `
 <!doctype html>
 <html lang="en">
@@ -608,6 +609,7 @@
             const nextHeight = Math.max(320, Math.min(5000, Math.max(bodyHeight, rootHeight) + 8));
             frame.style.height = `${nextHeight}px`;
           } catch {
+            // Cross-origin/sandbox edge case fallback.
             frame.style.height = "700px";
           }
         };
@@ -647,6 +649,7 @@
           if (typeof DataTransfer === "undefined") {
             return;
           }
+          // Rebuild the FileList whenever user removes an item; FileList itself is read-only.
           const transfer = new DataTransfer();
           selectedAttachments.forEach((file) => {
             transfer.items.add(file);
@@ -836,6 +839,7 @@
 
         const pollTask = async (taskId, maxWaitMs = 90000) => {
           const startedAt = Date.now();
+          // Poll server-side task state until completion/error to drive async UI updates.
           while (Date.now() - startedAt < maxWaitMs) {
             const task = await requestJson(`${taskStatusBase}${taskId}`);
             if (task.status === "completed") {

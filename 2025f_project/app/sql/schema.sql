@@ -1,7 +1,7 @@
-﻿PRAGMA foreign_keys = ON;
+﻿PRAGMA foreign_keys = ON; -- Ensure foreign key constraints are enforced.
 
 -- Normalized email message table (one row per message)
-CREATE TABLE IF NOT EXISTS email_messages (
+CREATE TABLE IF NOT EXISTS email_messages ( -- Primary message table (one row per email or draft).
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   external_id TEXT UNIQUE,                        -- provider-specific message ID (optional)
   provider_draft_id TEXT UNIQUE,                  -- provider draft ID (optional)
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS email_messages (
 );
 
 -- Recipient rows (one row per address per email), instead of comma-separated columns
-CREATE TABLE IF NOT EXISTS email_recipients (
+CREATE TABLE IF NOT EXISTS email_recipients ( -- Recipient table with one row per address per message.
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email_id INTEGER NOT NULL,
   recipient_type TEXT NOT NULL
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS email_recipients (
   UNIQUE (email_id, recipient_type, address)
 );
 
-CREATE TABLE IF NOT EXISTS user_profile (
+CREATE TABLE IF NOT EXISTS user_profile ( -- Single-row user profile used for personalization.
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL DEFAULT '',
   occupation TEXT NOT NULL DEFAULT '',
@@ -47,11 +47,11 @@ CREATE TABLE IF NOT EXISTS user_profile (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path)
+INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path) -- Insert default profile row for new databases.
 VALUES (1, '', '', '');
 
 -- Seed messages
-INSERT INTO email_messages (
+INSERT INTO email_messages ( -- Insert starter mailbox data for first-time setup.
   external_id, thread_id, title, sender, type, priority, is_read,
   received_at, body, summary, draft
 )

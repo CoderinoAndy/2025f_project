@@ -1,4 +1,4 @@
-:root{
+:root{ /* Theme tokens reused across the app. */
   --bg: #15121a;
   --bar: #0f0d13;
   --sidebar-width: 232px;
@@ -22,7 +22,32 @@ body{
   overflow-x: hidden;
 }
 
-.global-search-shell{
+body.mailbox-list-page{
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+body.mailbox-list-page .app-main{
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+body.mailbox-list-page .list-header{
+  flex: 0 0 auto;
+}
+
+body.mailbox-list-page .list-shell{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.global-search-shell{ /* Global search bar layout and interaction styles. */
   position: relative;
   z-index: 1100;
   padding: 10px 16px 2px;
@@ -87,7 +112,7 @@ body{
   background: rgba(167, 139, 250, 0.24);
 }
 
-.topbar{
+.topbar{ /* Topbar and sidebar navigation styles. */
   background: var(--bar) !important;
   padding: 14px 18px;
   border-bottom: 1px solid #2b2b2b;
@@ -179,7 +204,7 @@ body{
   color: var(--text);
 }
 
-.app-main{
+.app-main{ /* Main mailbox page layout containers. */
   margin-left: var(--sidebar-width);
 }
 
@@ -304,7 +329,7 @@ body{
 
 
 /* Gmail-like rows: flat bars, separators, hover highlight */
-.email-row{
+.email-row{ /* Mailbox row visuals, hover behavior, and action controls. */
   position: relative;
   display: flex;
   align-items: center;
@@ -509,7 +534,7 @@ body{
   background: rgba(167, 139, 250, 0.16);
 }
 
-.compose-fab{
+.compose-fab{ /* Floating compose button placement and appearance. */
   position: fixed;
   right: 18px;
   bottom: 18px;
@@ -640,7 +665,7 @@ body{
   margin: 0 0 6px;
 }
 
-@media (max-width: 576px){
+@media (max-width: 576px){ /* Responsive overrides for narrow viewports. */
   .global-search-shell{
     padding: 8px 12px 2px;
   }

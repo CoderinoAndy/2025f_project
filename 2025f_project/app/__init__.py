@@ -12,7 +12,10 @@ from .debug_logger import (
 from .gmail_service import gmail_available
 
 def create_app():
+    """Create app.
+    """
     app = Flask(__name__, instance_relative_config=True)
+    # Initialize structured logging before startup work so boot failures are recorded.
     configure_debug_logger()
     try:
         init_db()
@@ -48,6 +51,7 @@ def create_app():
 
     @app.before_request
     def _log_request_start():
+        """Capture request start timing and write a start event to the debug log."""
         g.request_started_at = perf_counter()
         log_event(
             action_type="http_request",
@@ -62,7 +66,9 @@ def create_app():
 
     @app.after_request
     def _log_request_complete(response):
+        """Log request completion details (status + duration) before sending the response."""
         started = getattr(g, "request_started_at", None)
+        # Use monotonic timer values from before/after hooks to avoid wall-clock drift.
         duration_ms = int((perf_counter() - started) * 1000) if started is not None else -1
         status_code = int(response.status_code)
         if status_code >= 500:
@@ -91,6 +97,7 @@ def create_app():
 
     @app.teardown_request
     def _log_request_exception(error):
+        """Log unexpected request exceptions that were not handled by Flask HTTP errors."""
         if error is None or isinstance(error, HTTPException):
             return
         log_exception(
@@ -119,6 +126,7 @@ def create_app():
 
         s = str(value).strip()
         dt = None
+        # Accept both date-only and date-time values because legacy rows are mixed.
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
             try:
                 dt = datetime.strptime(s, fmt)
@@ -133,6 +141,7 @@ def create_app():
 
     @app.context_processor
     def inject_user_profile():
+        """Provide profile data to every template render call."""
         return {"user_profile": get_user_profile()}
         
     from .routes import main

@@ -1,4 +1,4 @@
-<div class="topbar d-flex align-items-center justify-content-between">
+<div class="topbar d-flex align-items-center justify-content-between"> <!-- Top navigation, sidebar links, and global search controls. -->
   <div class="d-flex align-items-center gap-2">
     <a class="brand-link" href="{{ url_for('main.allemails') }}" aria-label="Home">
       <img class="brand-logo" src="{{ url_for('static', filename='img/atom-logo-violet.svg') }}" alt="App logo">
@@ -94,6 +94,7 @@
   "main.sent": "main.sent",
   "main.drafts": "main.drafts"
 } %}
+{# Search submits back to the current mailbox tab so filters/sort context stay local to that view. #}
 {% set search_target = list_search_targets.get(request.endpoint, "main.allemails") %}
 <div class="global-search-shell">
   <form class="global-search-form" method="get" action="{{ url_for(search_target) }}" role="search">

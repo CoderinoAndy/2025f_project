@@ -1,6 +1,6 @@
-<!doctype html>
+<!doctype html> <!-- Page-level HTML scaffold for this view. -->
 <html lang="en">
-  <head>
+  <head> <!-- Head section with metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Compose</title>
@@ -107,10 +107,10 @@
       }
     </style>
   </head>
-  <body>
-    {% include "_navbar.html" %}
+  <body> <!-- Body section with rendered content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
 
-    <div class="container app-main compose-shell py-4">
+    <div class="container app-main compose-shell py-4"> <!-- Primary content container for this page. -->
       <a id="compose-backlink" class="backlink d-inline-flex mb-3" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
@@ -120,7 +120,7 @@
         </div>
         <p class="hint mb-3">Leaving this page with unsent changes autosaves a draft.</p>
 
-        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data">
+        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data"> <!-- Main form users submit on this view. -->
           <input type="hidden" name="local_draft_id" value="{{ draft_email.id or '' }}">
           <input type="hidden" name="provider_draft_id" value="{{ draft_email.provider_draft_id or '' }}">
           <input type="hidden" name="thread_id" value="{{ draft_email.thread_id or '' }}">
@@ -221,6 +221,7 @@
           if (!attachmentInput || typeof DataTransfer === "undefined") {
             return;
           }
+          // FileList is immutable; rebuild it from our in-memory attachment state.
           const transfer = new DataTransfer();
           selectedAttachments.forEach((file) => {
             transfer.items.add(file);
@@ -350,6 +351,7 @@
             return;
           }
 
+          // sendBeacon lets autosave finish during navigation without blocking the browser.
           const payload = new URLSearchParams();
           payload.set("to", toValue);
           payload.set("cc", ccValue);

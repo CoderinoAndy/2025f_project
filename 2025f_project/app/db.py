@@ -5,6 +5,11 @@ from pathlib import Path
 
 DB_DEFAULT = "instance/app.sqlite"
 LOCAL_USER_EMAIL = "you@example.com"
+DEFAULT_PROFILE = {
+    "name": "",
+    "occupation": "",
+    "photo_path": "",
+}
 ALLOWED_TYPES = {
     "response-needed",
     "read-only",
@@ -12,6 +17,11 @@ ALLOWED_TYPES = {
     "junk-uncertain",
     "sent",
     "draft",
+}
+AI_CATEGORIES = {
+    "urgent",
+    "informational",
+    "junk",
 }
 
 EMAIL_SELECT_SQL = """
@@ -47,7 +57,11 @@ SELECT
     m.is_read,
     m.received_at,
     m.summary,
-    m.draft
+    m.draft,
+    m.is_archived,
+    m.ai_category,
+    m.ai_needs_response,
+    m.ai_confidence
 FROM email_messages m
 """
 
@@ -100,11 +114,64 @@ def _apply_schema_migrations(conn):
     if needs_rebuild:
         _rebuild_email_tables(conn, columns)
 
+    columns_after = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(email_messages)").fetchall()
+    }
+    if "ai_category" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN ai_category TEXT
+              CHECK (ai_category IN ('urgent','informational','junk'))
+            """
+        )
+    if "ai_needs_response" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN ai_needs_response INTEGER
+              CHECK (ai_needs_response IN (0,1))
+            """
+        )
+    if "ai_confidence" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN ai_confidence REAL
+            """
+        )
+    if "is_archived" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0
+              CHECK (is_archived IN (0,1))
+            """
+        )
+
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_provider_draft_id
         ON email_messages(provider_draft_id)
         WHERE provider_draft_id IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_profile (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          name TEXT NOT NULL DEFAULT '',
+          occupation TEXT NOT NULL DEFAULT '',
+          photo_path TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path)
+        VALUES (1, '', '', '')
         """
     )
 
@@ -114,6 +181,14 @@ def _rebuild_email_tables(conn, existing_columns):
     provider_draft_expr = (
         "provider_draft_id" if "provider_draft_id" in existing_columns else "NULL"
     )
+    ai_category_expr = "ai_category" if "ai_category" in existing_columns else "NULL"
+    ai_needs_response_expr = (
+        "ai_needs_response" if "ai_needs_response" in existing_columns else "NULL"
+    )
+    ai_confidence_expr = (
+        "ai_confidence" if "ai_confidence" in existing_columns else "NULL"
+    )
+    is_archived_expr = "is_archived" if "is_archived" in existing_columns else "0"
 
     conn.execute("PRAGMA foreign_keys = OFF;")
     conn.execute("ALTER TABLE email_messages RENAME TO email_messages_old;")
@@ -137,7 +212,14 @@ def _rebuild_email_tables(conn, existing_columns):
             CHECK (is_read IN (0,1)),
           received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           summary TEXT,
-          draft TEXT
+          draft TEXT,
+          is_archived INTEGER NOT NULL DEFAULT 0
+            CHECK (is_archived IN (0,1)),
+          ai_category TEXT
+            CHECK (ai_category IN ('urgent','informational','junk')),
+          ai_needs_response INTEGER
+            CHECK (ai_needs_response IN (0,1)),
+          ai_confidence REAL
         );
         """
     )
@@ -146,7 +228,8 @@ def _rebuild_email_tables(conn, existing_columns):
         f"""
         INSERT INTO email_messages (
             id, external_id, provider_draft_id, thread_id, title, sender, body, body_html,
-            type, priority, is_read, received_at, summary, draft
+            type, priority, is_read, received_at, summary, draft, is_archived,
+            ai_category, ai_needs_response, ai_confidence
         )
         SELECT
             id,
@@ -166,7 +249,11 @@ def _rebuild_email_tables(conn, existing_columns):
             is_read,
             received_at,
             summary,
-            draft
+            draft,
+            {is_archived_expr},
+            {ai_category_expr},
+            {ai_needs_response_expr},
+            {ai_confidence_expr}
         FROM email_messages_old
         """
     )
@@ -202,8 +289,14 @@ def _row_to_dict(row):
     data = dict(row)
     if "is_read" in data:
         data["is_read"] = bool(data["is_read"])
+    if "is_archived" in data:
+        data["is_archived"] = bool(data["is_archived"])
+    if "ai_needs_response" in data and data["ai_needs_response"] is not None:
+        data["ai_needs_response"] = bool(data["ai_needs_response"])
     if "priority" in data and data["priority"] is not None:
         data["priority"] = int(data["priority"])
+    if "ai_confidence" in data and data["ai_confidence"] is not None:
+        data["ai_confidence"] = float(data["ai_confidence"])
     if "title" not in data and "subject" in data:
         data["title"] = data["subject"]
     if "received_at" in data and "date" not in data:
@@ -239,9 +332,61 @@ def _insert_recipients(conn, email_id, recipient_type, raw_value):
             (email_id, recipient_type, address),
         )
 
-def fetch_emails(email_type=None, exclude_types=None, db_path=DB_DEFAULT):
+
+def _normalize_ai_category(value):
+    category = str(value or "").strip().lower()
+    return category if category in AI_CATEGORIES else None
+
+
+def _normalize_ai_needs_response(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y"}:
+        return 1
+    if lowered in {"0", "false", "no", "n"}:
+        return 0
+    return None
+
+
+def _normalize_ai_confidence(value):
+    if value is None or value == "":
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, confidence))
+
+
+def _normalize_archived_flag(value):
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if value is None:
+        return None
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "yes", "y"}:
+        return 1
+    if lowered in {"0", "false", "no", "n"}:
+        return 0
+    return None
+
+
+def fetch_emails(
+    email_type=None,
+    exclude_types=None,
+    include_archived=False,
+    archived_only=False,
+    db_path=DB_DEFAULT,
+):
     where_clauses = []
     params = []
+    if archived_only:
+        where_clauses.append("m.is_archived = 1")
+    elif not include_archived:
+        where_clauses.append("m.is_archived = 0")
     if email_type:
         where_clauses.append("m.type = ?")
         params.append(email_type)
@@ -345,12 +490,29 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
         "draft": email_data.get("draft"),
         "recipients": email_data.get("recipients"),
         "cc": email_data.get("cc"),
+        "ai_category": _normalize_ai_category(email_data.get("ai_category")),
+        "ai_needs_response": _normalize_ai_needs_response(
+            email_data.get("ai_needs_response")
+        ),
+        "ai_confidence": _normalize_ai_confidence(email_data.get("ai_confidence")),
+        "is_archived": _normalize_archived_flag(email_data.get("is_archived")),
     }
 
     with db_session(db_path) as conn:
         cur = conn.execute(
             """
-            SELECT id, summary, draft, body_html, provider_draft_id, type, priority
+            SELECT
+                id,
+                summary,
+                draft,
+                body_html,
+                provider_draft_id,
+                type,
+                priority,
+                is_archived,
+                ai_category,
+                ai_needs_response,
+                ai_confidence
             FROM email_messages
             WHERE external_id = ?
             """,
@@ -360,7 +522,18 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
         if existing is None and provider_draft_id:
             cur = conn.execute(
                 """
-                SELECT id, summary, draft, body_html, provider_draft_id, type, priority
+                SELECT
+                    id,
+                    summary,
+                    draft,
+                    body_html,
+                    provider_draft_id,
+                    type,
+                    priority,
+                    is_archived,
+                    ai_category,
+                    ai_needs_response,
+                    ai_confidence
                 FROM email_messages
                 WHERE provider_draft_id = ?
                 """,
@@ -374,6 +547,18 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             body_html_value = normalized["body_html"]
             if body_html_value is None:
                 body_html_value = existing["body_html"]
+            ai_category_value = normalized["ai_category"]
+            if ai_category_value is None:
+                ai_category_value = existing["ai_category"]
+            ai_needs_response_value = normalized["ai_needs_response"]
+            if ai_needs_response_value is None:
+                ai_needs_response_value = existing["ai_needs_response"]
+            ai_confidence_value = normalized["ai_confidence"]
+            if ai_confidence_value is None:
+                ai_confidence_value = existing["ai_confidence"]
+            is_archived_value = normalized["is_archived"]
+            if is_archived_value is None:
+                is_archived_value = existing["is_archived"]
             existing_priority = existing["priority"]
             priority_value = (
                 int(existing_priority)
@@ -402,7 +587,11 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_read = ?,
                     received_at = ?,
                     summary = ?,
-                    draft = ?
+                    draft = ?,
+                    is_archived = ?,
+                    ai_category = ?,
+                    ai_needs_response = ?,
+                    ai_confidence = ?
                 WHERE id = ?
                 """,
                 (
@@ -418,6 +607,10 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     normalized["received_at"],
                     summary_value,
                     draft_value,
+                    is_archived_value,
+                    ai_category_value,
+                    ai_needs_response_value,
+                    ai_confidence_value,
                     existing["id"],
                 ),
             )
@@ -438,9 +631,13 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_read,
                     received_at,
                     summary,
-                    draft
+                    draft,
+                    is_archived,
+                    ai_category,
+                    ai_needs_response,
+                    ai_confidence
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     external_id,
@@ -456,6 +653,10 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     normalized["received_at"],
                     normalized["summary"],
                     normalized["draft"],
+                    normalized["is_archived"] or 0,
+                    normalized["ai_category"],
+                    normalized["ai_needs_response"],
+                    normalized["ai_confidence"],
                 ),
             )
             email_id = cur.lastrowid
@@ -472,6 +673,14 @@ def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
         raise ValueError("Invalid email type.")
     with db_session(db_path) as conn:
         conn.execute("UPDATE email_messages SET type = ? WHERE id = ?", (new_type, email_id))
+
+
+def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
+    with db_session(db_path) as conn:
+        conn.execute(
+            "UPDATE email_messages SET is_archived = ? WHERE id = ?",
+            (1 if archived else 0, email_id),
+        )
 
 
 def toggle_read_state(email_id, db_path=DB_DEFAULT):
@@ -587,6 +796,7 @@ def save_local_draft(
                     sender = ?,
                     body = ?,
                     type = 'draft',
+                    is_archived = 0,
                     is_read = 1,
                     received_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -638,6 +848,9 @@ def update_email_ai_fields(
     summary=None,
     email_type=None,
     priority=None,
+    ai_category=None,
+    ai_needs_response=None,
+    ai_confidence=None,
     db_path=DB_DEFAULT,
 ):
     assignments = []
@@ -657,6 +870,27 @@ def update_email_ai_fields(
         safe_priority = max(1, min(3, int(priority)))
         assignments.append("priority = ?")
         params.append(safe_priority)
+
+    if ai_category is not None:
+        normalized_category = _normalize_ai_category(ai_category)
+        if normalized_category is None:
+            raise ValueError("Invalid AI category.")
+        assignments.append("ai_category = ?")
+        params.append(normalized_category)
+
+    if ai_needs_response is not None:
+        normalized_needs_response = _normalize_ai_needs_response(ai_needs_response)
+        if normalized_needs_response is None:
+            raise ValueError("Invalid AI needs_response value.")
+        assignments.append("ai_needs_response = ?")
+        params.append(normalized_needs_response)
+
+    if ai_confidence is not None:
+        normalized_confidence = _normalize_ai_confidence(ai_confidence)
+        if normalized_confidence is None:
+            raise ValueError("Invalid AI confidence value.")
+        assignments.append("ai_confidence = ?")
+        params.append(normalized_confidence)
 
     if not assignments:
         return
@@ -700,4 +934,39 @@ def create_local_sent_email(
         _insert_recipients(conn, email_id, "to", recipients)
         _insert_recipients(conn, email_id, "cc", cc)
         return email_id
+
+
+def get_user_profile(db_path=DB_DEFAULT):
+    with db_session(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT name, occupation, photo_path
+            FROM user_profile
+            WHERE id = 1
+            """
+        ).fetchone()
+        if not row:
+            return dict(DEFAULT_PROFILE)
+        profile = dict(DEFAULT_PROFILE)
+        profile.update({k: (row[k] or "") for k in profile})
+        return profile
+
+
+def save_user_profile(name, occupation, photo_path=None, db_path=DB_DEFAULT):
+    name_value = (name or "").strip()
+    occupation_value = (occupation or "").strip()
+    photo_value = (photo_path or "").strip()
+    with db_session(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_profile (id, name, occupation, photo_path, updated_at)
+            VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                occupation = excluded.occupation,
+                photo_path = excluded.photo_path,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (name_value, occupation_value, photo_value),
+        )
 

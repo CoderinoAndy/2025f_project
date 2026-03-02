@@ -6,12 +6,12 @@
     <title>Email</title>
 
     <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}"
       rel="stylesheet"
     />
     <link
       rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+      href="{{ url_for('static', filename='vendor/bootstrap-icons/font/bootstrap-icons.min.css') }}"
     />
 
     <style>
@@ -83,6 +83,16 @@
       font-style: italic;
       text-align: left;
       margin: 0;
+      }
+      .summary-loading{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .hidden{
+        display: none !important;
       }
 
       /* 3-dot menu button */
@@ -197,6 +207,10 @@
         font-size: 28px;
         opacity: 0.9;
       }
+      .action-icon[disabled]{
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
       .action-icon:hover{ opacity: 1; }
       .file-picker-input{
         position: absolute;
@@ -248,6 +262,11 @@
         color: var(--text);
         background: rgba(255,255,255,0.08);
       }
+      .draft-loading-note{
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin-top: 8px;
+      }
     </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
@@ -255,7 +274,7 @@
   <body>
     {% include "_navbar.html" %}
 
-    <div class="container-fluid py-3 px-3" style="max-width: min(1600px, 98vw);">
+    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);">
       <a class="backlink d-inline-flex mb-2" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
@@ -277,7 +296,12 @@
 
             <div class="col-12 col-md-6">
               <div class="meta-title">Type</div>
-              <div class="meta-sub">{{ email.type }}</div>
+              <div class="meta-sub">
+                {{ email.type }}
+                {% if email.is_archived %}
+                  | archived
+                {% endif %}
+              </div>
             </div>
 
             <div class="col-12 col-md-6">
@@ -342,6 +366,24 @@
                     </li>
                   {% endif %}
                 {% endfor %}
+                {% if email.type != 'draft' %}
+                  <li><hr class="dropdown-divider"></li>
+                  {% if email.is_archived %}
+                    <li>
+                      <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0">
+                        <input type="hidden" name="next" value="{{ next_url }}" />
+                        <button class="dropdown-item" type="submit">Unarchive</button>
+                      </form>
+                    </li>
+                  {% else %}
+                    <li>
+                      <form method="post" action="{{ url_for('main.archive_email', id=email.id) }}" class="m-0">
+                        <input type="hidden" name="next" value="{{ next_url }}" />
+                        <button class="dropdown-item" type="submit">Move to archive</button>
+                      </form>
+                    </li>
+                  {% endif %}
+                {% endif %}
               </ul>
             </div>
           {% else %}
@@ -369,7 +411,7 @@
               Generate a draft, edit if needed, then send!
             </div>
 
-            <form method="post" action="{{ url_for('main.send_reply', id=email.id) }}" enctype="multipart/form-data">
+            <form id="reply-form" method="post" action="{{ url_for('main.send_reply', id=email.id) }}" enctype="multipart/form-data">
               <input type="hidden" name="next" value="{{ next_url }}" />
               <div class="mb-2">
                 <label class="reply-field-label" for="to-field">To</label>
@@ -396,11 +438,13 @@
               </div>
 
               <textarea
+                id="reply-text"
                 class="form-control"
                 name="reply_text"
                 rows="6"
                 placeholder="Write your reply here..."
               >{% if email.draft %}{{ email.draft }}{% endif %}</textarea>
+              <div id="draft-loading-note" class="draft-loading-note hidden">Draft loading...</div>
 
               <div class="mt-3">
                 <label class="reply-field-label" for="reply-attachments">Attachments</label>
@@ -418,17 +462,17 @@
               </div>
 
               <div class="actions">
+                {% if not email.is_archived %}
                 <button
-                  type="submit"
-                  name="action"
-                  value="revise"
+                  type="button"
+                  id="generate-draft-btn"
                   class="action-icon"
                   title="Generate draft"
                   aria-label="Generate draft"
-                  formaction="{{ url_for('main.generate_draft', id=email.id) }}"
                 >
                   <i class="bi bi-lightbulb"></i>
                 </button>
+                {% endif %}
 
                 <button
                   type="submit"
@@ -450,20 +494,29 @@
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">Summary</div>
-              {% if ai_enabled and email.type not in ['sent', 'draft'] %}
-                <form method="post" action="{{ url_for('main.analyze_email_route', id=email.id) }}" class="m-0">
-                  <input type="hidden" name="next" value="{{ next_url }}">
-                  <button type="submit" class="action-icon" title="Analyze email" aria-label="Analyze email" style="font-size:20px;">
-                    <i class="bi bi-stars"></i>
-                  </button>
-                </form>
+              {% if ai_enabled and email.type not in ['sent', 'draft'] and not email.is_archived %}
+                <button
+                  type="button"
+                  id="analyze-email-btn"
+                  class="action-icon"
+                  title="Analyze email"
+                  aria-label="Analyze email"
+                  style="font-size:20px;"
+                >
+                  <i class="bi bi-stars"></i>
+                </button>
               {% endif %}
             </div>
 
-            <div class="summary-text">
+            <div id="summary-loading" class="summary-loading {% if not ai_enabled or not ai_analysis_needed or not ai_summary_expected %}hidden{% endif %}">
+              <div class="spinner-border spinner-border-sm text-secondary" role="status" aria-hidden="true"></div>
+              <span>Analyzing email...</span>
+            </div>
+
+            <div id="summary-text" class="summary-text">
               {%- if email.summary -%}
                 {{ email.summary|trim }}
-              {%- elif email.body and (email.body|length >= 200) -%}
+              {%- elif ai_summary_expected -%}
                 Not generated yet.
               {%- else -%}
                 Email is short; summary not needed.
@@ -496,7 +549,8 @@
         </div>
       </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
     <script>
       (() => {
         const frame = document.getElementById("message-html-frame");
@@ -631,6 +685,257 @@
           syncAttachmentInput();
           renderAttachmentList();
         });
+      })();
+
+      (() => {
+        const aiEnabled = {{ "true" if ai_enabled else "false" }};
+        if (!aiEnabled) {
+          return;
+        }
+
+        const emailId = {{ email.id }};
+        const analyzeUrl = "{{ url_for('main.start_ai_analyze', id=email.id) }}";
+        const draftUrl = "{{ url_for('main.start_ai_draft', id=email.id) }}";
+        const taskStatusBase = "/api/ai-task/";
+        const autoAnalyzeNeeded = {{ "true" if ai_analysis_needed else "false" }};
+        const summaryExpected = {{ "true" if ai_summary_expected else "false" }};
+        const initialAnalyzeTaskId = "{{ ai_analysis_task_id or '' }}";
+        const initialSummaryText = {{ (email.summary|trim if email.summary else "")|tojson }};
+
+        const analyzeButton = document.getElementById("analyze-email-btn");
+        const draftButton = document.getElementById("generate-draft-btn");
+        const sendButton = document.querySelector('button[name="action"][value="send"]');
+        const toField = document.getElementById("to-field");
+        const ccField = document.getElementById("cc-field");
+        const replyText = document.getElementById("reply-text");
+        const draftLoadingNote = document.getElementById("draft-loading-note");
+        const summaryText = document.getElementById("summary-text");
+        const summaryLoading = document.getElementById("summary-loading");
+
+        let analyzing = false;
+        let drafting = false;
+        let draftLoadingBaseValue = null;
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        const setSummaryLoading = (isLoading, label = "Analyzing email...") => {
+          if (!summaryLoading) {
+            return;
+          }
+          const textNode = summaryLoading.querySelector("span");
+          if (textNode) {
+            textNode.textContent = label;
+          }
+          summaryLoading.classList.toggle("hidden", !isLoading);
+        };
+
+        const setDraftLoading = (isLoading, label = "Draft loading...") => {
+          if (!replyText) {
+            return;
+          }
+          if (isLoading) {
+            if (draftLoadingBaseValue === null) {
+              draftLoadingBaseValue = replyText.value || "";
+            }
+            const baseValue = String(draftLoadingBaseValue || "");
+            const prefix = baseValue.trim() ? `${baseValue}\n\n` : "";
+            replyText.value = `${prefix}${label}`;
+            replyText.readOnly = true;
+            replyText.dispatchEvent(new Event("input", { bubbles: true }));
+            if (draftLoadingNote) {
+              draftLoadingNote.textContent = label;
+              draftLoadingNote.classList.remove("hidden");
+            }
+            return;
+          }
+
+          if (draftLoadingBaseValue !== null) {
+            replyText.value = draftLoadingBaseValue;
+            replyText.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+          draftLoadingBaseValue = null;
+          replyText.readOnly = false;
+          if (draftLoadingNote) {
+            draftLoadingNote.classList.add("hidden");
+          }
+        };
+
+        const setActionButtonsBusy = (isBusy) => {
+          if (draftButton) {
+            draftButton.disabled = isBusy;
+          }
+          if (sendButton) {
+            sendButton.disabled = isBusy;
+          }
+        };
+
+        const typeIntoTarget = async (target, text, isTextarea = false) => {
+          if (!target) {
+            return;
+          }
+          const fullText = String(text || "");
+          if (isTextarea) {
+            target.value = "";
+          } else {
+            target.textContent = "";
+          }
+          if (!fullText) {
+            return;
+          }
+          const step = fullText.length > 600 ? 4 : 2;
+          for (let index = 0; index < fullText.length; index += step) {
+            const next = fullText.slice(0, Math.min(fullText.length, index + step));
+            if (isTextarea) {
+              target.value = next;
+              target.dispatchEvent(new Event("input", { bubbles: true }));
+            } else {
+              target.textContent = next;
+            }
+            await sleep(12);
+          }
+        };
+
+        const requestJson = async (url, options = {}) => {
+          const response = await fetch(url, {
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              ...(options.headers || {}),
+            },
+            ...options,
+          });
+          if (!response.ok) {
+            throw new Error(`Request failed (${response.status})`);
+          }
+          return response.json();
+        };
+
+        const pollTask = async (taskId, maxWaitMs = 90000) => {
+          const startedAt = Date.now();
+          while (Date.now() - startedAt < maxWaitMs) {
+            const task = await requestJson(`${taskStatusBase}${taskId}`);
+            if (task.status === "completed") {
+              return task;
+            }
+            if (task.status === "error") {
+              throw new Error(task.error || "AI task failed.");
+            }
+            await sleep(500);
+          }
+          throw new Error("AI task timed out.");
+        };
+
+        const startAnalyze = async (taskIdHint = "") => {
+          if (analyzing) {
+            return;
+          }
+          analyzing = true;
+          if (summaryExpected) {
+            setSummaryLoading(true, "Analyzing email...");
+          }
+          if (analyzeButton) {
+            analyzeButton.disabled = true;
+          }
+          try {
+            let taskId = taskIdHint;
+            if (!taskId) {
+              const started = await requestJson(analyzeUrl, { method: "POST" });
+              taskId = started.task_id;
+            }
+            const completed = await pollTask(taskId);
+            const result = completed.result || {};
+            if (summaryExpected) {
+              const summary = String(result.summary || "").trim();
+              if (summary) {
+                const renderedSummary = summaryText
+                  ? String(summaryText.textContent || "").trim()
+                  : "";
+                if (renderedSummary !== summary) {
+                  await typeIntoTarget(summaryText, summary, false);
+                } else if (summaryText) {
+                  summaryText.textContent = summary;
+                }
+              } else if (summaryText) {
+                summaryText.textContent = "Summary unavailable.";
+              }
+            }
+          } catch (error) {
+            if (summaryExpected && summaryText) {
+              summaryText.textContent = "Summary generation failed.";
+            }
+            console.error(error);
+          } finally {
+            setSummaryLoading(false);
+            if (analyzeButton) {
+              analyzeButton.disabled = false;
+            }
+            analyzing = false;
+          }
+        };
+
+        const startDraft = async () => {
+          if (drafting || !replyText) {
+            return;
+          }
+          drafting = true;
+          setActionButtonsBusy(true);
+          const currentReplyValue = replyText.value || "";
+          setDraftLoading(true, "Draft loading...");
+          try {
+            const started = await requestJson(draftUrl, {
+              method: "POST",
+              body: JSON.stringify({
+                to: toField ? toField.value : "",
+                cc: ccField ? ccField.value : "",
+                reply_text: currentReplyValue,
+              }),
+            });
+            const completed = await pollTask(started.task_id);
+            const result = completed.result || {};
+            if (result.needs_response === false) {
+              setDraftLoading(true, "No response needed for this email.");
+              await sleep(900);
+              setDraftLoading(false);
+              return;
+            }
+            setDraftLoading(false);
+            await typeIntoTarget(replyText, result.draft || "", true);
+          } catch (error) {
+            console.error(error);
+            setDraftLoading(true, "Draft generation failed.");
+            await sleep(1100);
+            setDraftLoading(false);
+          } finally {
+            setActionButtonsBusy(false);
+            drafting = false;
+          }
+        };
+
+        if (analyzeButton) {
+          analyzeButton.addEventListener("click", () => {
+            startAnalyze("");
+          });
+        }
+        if (draftButton) {
+          draftButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            startDraft();
+          });
+        }
+
+        const animateInitialSummary = async () => {
+          if (!summaryText || !initialSummaryText) {
+            return;
+          }
+          await typeIntoTarget(summaryText, initialSummaryText, false);
+        };
+
+        (async () => {
+          await animateInitialSummary();
+          if (autoAnalyzeNeeded) {
+            startAnalyze(initialAnalyzeTaskId);
+          }
+        })();
       })();
     </script>
   </body>

@@ -18,7 +18,14 @@ CREATE TABLE IF NOT EXISTS email_messages (
     CHECK (is_read IN (0,1)),
   received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   summary TEXT,
-  draft TEXT
+  draft TEXT,
+  is_archived INTEGER NOT NULL DEFAULT 0
+    CHECK (is_archived IN (0,1)),
+  ai_category TEXT
+    CHECK (ai_category IN ('urgent','informational','junk')),
+  ai_needs_response INTEGER
+    CHECK (ai_needs_response IN (0,1)),
+  ai_confidence REAL
 );
 
 -- Recipient rows (one row per address per email), instead of comma-separated columns
@@ -31,6 +38,17 @@ CREATE TABLE IF NOT EXISTS email_recipients (
   FOREIGN KEY (email_id) REFERENCES email_messages(id) ON DELETE CASCADE,
   UNIQUE (email_id, recipient_type, address)
 );
+
+CREATE TABLE IF NOT EXISTS user_profile (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  name TEXT NOT NULL DEFAULT '',
+  occupation TEXT NOT NULL DEFAULT '',
+  photo_path TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path)
+VALUES (1, '', '', '');
 
 -- Seed messages
 INSERT INTO email_messages (

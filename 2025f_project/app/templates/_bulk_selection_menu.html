@@ -1,0 +1,45 @@
+<div class="bulk-side-menu" data-bulk-side-menu aria-hidden="true">
+  <div class="bulk-side-menu-header">
+    <span><strong data-selected-count>0</strong> selected</span>
+    <button type="button" class="bulk-clear-btn" data-clear-selection>Clear</button>
+  </div>
+
+  <form method="post" action="{{ url_for('main.bulk_email_action') }}" data-bulk-form>
+    <input type="hidden" name="next" value="{{ current_list_url }}">
+    <input type="hidden" name="ids" value="" data-selected-ids-input>
+    <input type="hidden" name="action" value="" data-selected-action-input>
+    <input type="hidden" name="new_type" value="" data-selected-type-input>
+
+    <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="archive" data-capability="archive">
+      Archive
+    </button>
+    <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="unarchive" data-capability="unarchive">
+      Unarchive
+    </button>
+    <button type="button" class="bulk-action-btn danger" data-bulk-action-btn data-action="delete" data-capability="delete">
+      Delete
+    </button>
+    <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="mark-read" data-capability="mark-read">
+      Mark as read
+    </button>
+    <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="mark-unread" data-capability="mark-unread">
+      Mark as unread
+    </button>
+
+    <div class="bulk-move-group" data-capability="move">
+      <div class="bulk-move-label">Move to</div>
+      <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="set-type" data-new-type="response-needed">
+        Response needed
+      </button>
+      <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="set-type" data-new-type="read-only">
+        Read only
+      </button>
+      <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="set-type" data-new-type="junk-uncertain">
+        Junk mail confirm
+      </button>
+      <button type="button" class="bulk-action-btn" data-bulk-action-btn data-action="set-type" data-new-type="junk">
+        Junk
+      </button>
+    </div>
+  </form>
+</div>

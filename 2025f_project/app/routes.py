@@ -1,18 +1,26 @@
 from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 from datetime import datetime
+import threading
+import time
+from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
+from uuid import uuid4
+from werkzeug.utils import secure_filename
 from .db import (
+    get_user_profile,
     fetch_emails,
     fetch_email_by_id,
     fetch_email_by_provider_draft_id,
     fetch_thread_emails,
     set_email_type as db_set_email_type,
+    set_email_archived,
     toggle_read_state,
     delete_email as db_delete_email,
     mark_read,
     update_draft,
     create_reply_email,
     save_local_draft,
+    save_user_profile,
     create_local_sent_email,
     update_email_ai_fields,
 )
@@ -31,10 +39,89 @@ from .gmail_service import (
     trigger_background_sync,
     upsert_gmail_draft,
 )
-from .qwen_client import ai_enabled, analyze_email as analyze_email_with_qwen, generate_reply_draft
+from .ollama_client import (
+    ai_enabled,
+    classify_email,
+    summarize_email,
+    draft_reply,
+    revise_reply,
+    should_summarize_email,
+    classification_to_email_type,
+    log_ai_event,
+)
 
 main = Blueprint("main", __name__)
 LOCAL_USER_EMAIL = "you@example.com"
+PROFILE_UPLOAD_DIR = Path(__file__).resolve().parent / "static" / "uploads" / "profiles"
+ALLOWED_PROFILE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+OCCUPATION_OPTIONS = [
+    "Student",
+    "Unemployed",
+    "Software Engineer",
+    "Data Scientist",
+    "Machine Learning Engineer",
+    "DevOps Engineer",
+    "Product Manager",
+    "Project Manager",
+    "UX Designer",
+    "UI Designer",
+    "Graphic Designer",
+    "Marketing Specialist",
+    "Sales Representative",
+    "Accountant",
+    "Financial Analyst",
+    "Teacher",
+    "Professor",
+    "Researcher",
+    "Doctor",
+    "Nurse",
+    "Pharmacist",
+    "Dentist",
+    "Therapist",
+    "Social Worker",
+    "Lawyer",
+    "Paralegal",
+    "HR Specialist",
+    "Recruiter",
+    "Operations Manager",
+    "Business Analyst",
+    "Consultant",
+    "Architect",
+    "Civil Engineer",
+    "Mechanical Engineer",
+    "Electrical Engineer",
+    "Construction Manager",
+    "Real Estate Agent",
+    "Customer Support Specialist",
+    "Administrative Assistant",
+    "Executive Assistant",
+    "Writer",
+    "Editor",
+    "Journalist",
+    "Photographer",
+    "Video Editor",
+    "Chef",
+    "Restaurant Manager",
+    "Barista",
+    "Retail Associate",
+    "Warehouse Associate",
+    "Truck Driver",
+    "Pilot",
+    "Flight Attendant",
+    "Police Officer",
+    "Firefighter",
+    "Military Service Member",
+    "Electrician",
+    "Plumber",
+    "Carpenter",
+    "Mechanic",
+    "Scientist",
+    "Entrepreneur",
+    "Freelancer",
+    "Homemaker",
+    "Retired",
+    "Other",
+]
 
 VALID_SORTS = {
     "date_desc",
@@ -46,9 +133,11 @@ VALID_SORTS = {
 }
 
 NON_MAIN_TYPES = {"sent", "draft"}
+HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
+ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
 LIVE_LIST_CONFIGS = {
     "all": {
-        "exclude_types": NON_MAIN_TYPES,
+        "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
         "empty_message": "Your All Emails tab is empty.",
     },
     "read-only": {
@@ -67,7 +156,18 @@ LIVE_LIST_CONFIGS = {
         "email_type": "junk-uncertain",
         "empty_message": "You have no Junk Mail to confirm.",
     },
+    "archived": {
+        "archived_only": True,
+        "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
+        "empty_message": "Your Archive is empty.",
+    },
 }
+
+AI_TASKS = {}
+AI_TASK_INDEX = {}
+AI_TASK_LOCK = threading.Lock()
+AI_TASK_MAX_ITEMS = 200
+AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
 
 def _normalize_addresses(raw_value):
     if raw_value is None:
@@ -125,6 +225,27 @@ def _collect_attachment_payloads():
         )
     return payloads
 
+
+def _save_profile_photo(file_obj):
+    if file_obj is None:
+        return None
+    original_name = (file_obj.filename or "").strip()
+    if not original_name:
+        return None
+    safe_name = secure_filename(original_name)
+    extension = Path(safe_name).suffix.lower()
+    if extension not in ALLOWED_PROFILE_IMAGE_EXTENSIONS:
+        abort(400)
+    if file_obj.mimetype and not file_obj.mimetype.startswith("image/"):
+        abort(400)
+
+    PROFILE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    unique_name = f"{uuid4().hex}{extension}"
+    target_path = PROFILE_UPLOAD_DIR / unique_name
+    file_obj.save(target_path)
+    return f"uploads/profiles/{unique_name}"
+
+
 def _collect_reply_fields(email_data):
     to_value = _normalize_addresses(request.form.get("to"))
     if not to_value:
@@ -144,25 +265,65 @@ def _should_auto_analyze_email(email_data):
         return False
     if not email_data:
         return False
+    if bool(email_data.get("is_archived")):
+        return False
     if email_data.get("type") in NON_MAIN_TYPES:
         return False
-    if (email_data.get("summary") or "").strip():
+    body = (email_data.get("body") or "").strip()
+    if not body:
         return False
-    return bool((email_data.get("body") or "").strip())
-
-
-def _run_ai_analysis(email_data):
-    result = analyze_email_with_qwen(email_data)
-    if not result:
-        return False
-
-    update_email_ai_fields(
-        email_id=email_data["id"],
-        summary=result.get("summary"),
-        email_type=result.get("type"),
-        priority=result.get("priority"),
+    classification_missing = (
+        not str(email_data.get("ai_category") or "").strip()
+        or email_data.get("ai_needs_response") is None
+        or email_data.get("ai_confidence") is None
     )
-    return True
+    summary_needed = should_summarize_email(email_data) and not (
+        email_data.get("summary") or ""
+    ).strip()
+    return classification_missing or summary_needed
+
+
+def _run_ai_analysis(email_data, force=False):
+    profile = get_user_profile()
+    updated = False
+    classification_missing = (
+        not str(email_data.get("ai_category") or "").strip()
+        or email_data.get("ai_needs_response") is None
+        or email_data.get("ai_confidence") is None
+    )
+
+    if force or classification_missing:
+        classification = classify_email(
+            email_data,
+            user_profile=profile,
+            email_id=email_data.get("id"),
+        )
+        if classification:
+            update_email_ai_fields(
+                email_id=email_data["id"],
+                email_type=classification_to_email_type(classification),
+                priority=classification.get("priority"),
+                ai_category=classification.get("category"),
+                ai_needs_response=classification.get("needs_response"),
+                ai_confidence=classification.get("confidence"),
+            )
+            updated = True
+
+    summary_missing = not (email_data.get("summary") or "").strip()
+    if summary_missing and should_summarize_email(email_data):
+        summary = summarize_email(
+            email_data,
+            user_profile=profile,
+            email_id=email_data.get("id"),
+        )
+        if summary:
+            update_email_ai_fields(
+                email_id=email_data["id"],
+                summary=summary,
+            )
+            updated = True
+
+    return updated
 
 
 def _safe_next_url(raw_next):
@@ -268,17 +429,287 @@ def _emails_fingerprint(emails):
     return "|".join(rows)
 
 
+def _prune_ai_tasks_locked():
+    if len(AI_TASKS) <= AI_TASK_MAX_ITEMS:
+        return
+    removable = [
+        task for task in AI_TASKS.values() if task["status"] not in AI_TASK_ACTIVE_STATUSES
+    ]
+    removable.sort(key=lambda task: float(task.get("created_at") or 0))
+    while len(AI_TASKS) > AI_TASK_MAX_ITEMS and removable:
+        task = removable.pop(0)
+        task_id = task["id"]
+        key = (task["type"], task["email_id"])
+        mapped_id = AI_TASK_INDEX.get(key)
+        if mapped_id == task_id:
+            AI_TASK_INDEX.pop(key, None)
+        AI_TASKS.pop(task_id, None)
+
+
+def _create_or_get_ai_task(task_type, email_id):
+    key = (task_type, int(email_id))
+    with AI_TASK_LOCK:
+        existing_id = AI_TASK_INDEX.get(key)
+        existing = AI_TASKS.get(existing_id) if existing_id else None
+        if existing and existing["status"] in AI_TASK_ACTIVE_STATUSES:
+            return dict(existing), False
+
+        task_id = uuid4().hex
+        now = time.time()
+        task = {
+            "id": task_id,
+            "type": task_type,
+            "email_id": int(email_id),
+            "status": "queued",
+            "result": None,
+            "error": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        AI_TASKS[task_id] = task
+        AI_TASK_INDEX[key] = task_id
+        _prune_ai_tasks_locked()
+        return dict(task), True
+
+
+def _set_ai_task_status(task_id, status, result=None, error=None):
+    with AI_TASK_LOCK:
+        task = AI_TASKS.get(task_id)
+        if not task:
+            return
+        task["status"] = status
+        task["updated_at"] = time.time()
+        if result is not None:
+            task["result"] = result
+        if error is not None:
+            task["error"] = error
+        if status not in AI_TASK_ACTIVE_STATUSES:
+            key = (task["type"], task["email_id"])
+            mapped_id = AI_TASK_INDEX.get(key)
+            if mapped_id == task_id:
+                AI_TASK_INDEX.pop(key, None)
+
+
+def _get_ai_task(task_id):
+    with AI_TASK_LOCK:
+        task = AI_TASKS.get(task_id)
+        return dict(task) if task else None
+
+
+def _serialize_ai_task(task):
+    payload = {
+        "task_id": task["id"],
+        "task_type": task["type"],
+        "email_id": task["email_id"],
+        "status": task["status"],
+    }
+    if task.get("result") is not None:
+        payload["result"] = task["result"]
+    if task.get("error"):
+        payload["error"] = task["error"]
+    return payload
+
+
+def _analysis_task_worker(task_id, email_id):
+    _set_ai_task_status(task_id, "running")
+    try:
+        email_data = fetch_email_by_id(email_id)
+        if not email_data:
+            raise ValueError("Email not found.")
+        _run_ai_analysis(email_data, force=True)
+        refreshed = fetch_email_by_id(email_id) or email_data
+        _set_ai_task_status(
+            task_id,
+            "completed",
+            result={
+                "summary": refreshed.get("summary"),
+                "ai_category": refreshed.get("ai_category"),
+                "ai_needs_response": refreshed.get("ai_needs_response"),
+                "ai_confidence": refreshed.get("ai_confidence"),
+                "priority": refreshed.get("priority"),
+                "type": refreshed.get("type"),
+            },
+        )
+    except Exception as exc:
+        log_ai_event(
+            task="analyze",
+            status="error",
+            email_id=email_id,
+            detail=f"task_exception: {exc}",
+        )
+        _set_ai_task_status(task_id, "error", error=str(exc))
+
+
+def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text):
+    _set_ai_task_status(task_id, "running")
+    try:
+        email_data = fetch_email_by_id(email_id)
+        if not email_data:
+            raise ValueError("Email not found.")
+
+        if ai_enabled() and (
+            not str(email_data.get("ai_category") or "").strip()
+            or email_data.get("ai_needs_response") is None
+        ):
+            _run_ai_analysis(email_data, force=True)
+            email_data = fetch_email_by_id(email_id) or email_data
+
+        needs_response = email_data.get("ai_needs_response")
+        if needs_response is None:
+            needs_response = email_data.get("type") == "response-needed"
+        if not bool(needs_response):
+            _set_ai_task_status(
+                task_id,
+                "completed",
+                result={
+                    "needs_response": False,
+                    "draft": current_reply_text or "",
+                },
+            )
+            return
+
+        profile = get_user_profile()
+        if current_reply_text:
+            draft_text = revise_reply(
+                email_data=email_data,
+                current_draft_text=current_reply_text,
+                to_value=to_value or "",
+                cc_value=cc_value or "",
+                user_profile=profile,
+                email_id=email_id,
+            )
+        else:
+            draft_text = draft_reply(
+                email_data=email_data,
+                to_value=to_value or "",
+                cc_value=cc_value or "",
+                user_profile=profile,
+                email_id=email_id,
+            )
+        if not draft_text:
+            title = email_data.get("title") or ""
+            draft_text = (
+                f"Hi,\n\n"
+                f"Thanks for your message about \"{title}\". "
+                f"I've received it and will get back to you shortly.\n\n"
+                f"Best regards,"
+            )
+
+        update_draft(email_id, draft_text)
+        _set_ai_task_status(
+            task_id,
+            "completed",
+            result={
+                "needs_response": True,
+                "draft": draft_text,
+            },
+        )
+    except Exception as exc:
+        log_ai_event(
+            task="draft",
+            status="error",
+            email_id=email_id,
+            detail=f"task_exception: {exc}",
+        )
+        _set_ai_task_status(task_id, "error", error=str(exc))
+
+
+def _start_analysis_task(email_id):
+    task, created = _create_or_get_ai_task("analyze", email_id)
+    if created:
+        threading.Thread(
+            target=_analysis_task_worker,
+            args=(task["id"], int(email_id)),
+            daemon=True,
+        ).start()
+    return task
+
+
+def _start_draft_task(email_id, to_value, cc_value, current_reply_text):
+    task, created = _create_or_get_ai_task("draft", email_id)
+    if created:
+        threading.Thread(
+            target=_draft_task_worker,
+            args=(
+                task["id"],
+                int(email_id),
+                to_value or "",
+                cc_value or "",
+                current_reply_text or "",
+            ),
+            daemon=True,
+        ).start()
+    return task
+
+
+def _set_message_read_state_async(external_id, read=True):
+    if not external_id:
+        return
+    threading.Thread(
+        target=set_message_read_state,
+        args=(external_id, read),
+        daemon=True,
+    ).start()
+
+
 def _fetch_live_list_emails(list_view):
     config = LIVE_LIST_CONFIGS.get(list_view)
     if not config:
         return None, None
     email_type = config.get("email_type")
     exclude_types = config.get("exclude_types")
+    archived_only = bool(config.get("archived_only"))
     if email_type:
-        emails = fetch_emails(email_type=email_type)
+        emails = fetch_emails(
+            email_type=email_type,
+            archived_only=archived_only,
+        )
     else:
-        emails = fetch_emails(exclude_types=exclude_types)
+        emails = fetch_emails(
+            exclude_types=exclude_types,
+            archived_only=archived_only,
+        )
     return emails, config["empty_message"]
+
+
+def _filter_emails_by_query(emails, query_text):
+    query = (query_text or "").strip()
+    if not query:
+        return emails
+
+    query_lc = query.lower()
+    filtered = []
+    for email in emails:
+        haystack = " ".join(
+            [
+                email.get("title") or "",
+                email.get("sender") or "",
+                email.get("recipients") or "",
+                email.get("cc") or "",
+                email.get("body") or "",
+            ]
+        ).lower()
+        if query_lc in haystack:
+            filtered.append(email)
+    return filtered
+
+
+def _parse_bulk_email_ids(raw_ids):
+    seen = set()
+    parsed = []
+    for token in str(raw_ids or "").split(","):
+        value = token.strip()
+        if not value:
+            continue
+        try:
+            email_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if email_id <= 0 or email_id in seen:
+            continue
+        seen.add(email_id)
+        parsed.append(email_id)
+    return parsed
 
 
 @main.route("/api/list-emails")
@@ -307,13 +738,52 @@ def list_emails_api():
     )
 
 
+@main.route("/api/email/<int:id>/ai/analyze", methods=["POST"])
+def start_ai_analyze(id):
+    email_data = fetch_email_by_id(id)
+    if email_data is None:
+        abort(404)
+    if bool(email_data.get("is_archived")):
+        abort(400)
+    if email_data.get("type") in NON_MAIN_TYPES:
+        abort(400)
+    task = _start_analysis_task(id)
+    return jsonify(_serialize_ai_task(task))
+
+
+@main.route("/api/email/<int:id>/ai/draft", methods=["POST"])
+def start_ai_draft(id):
+    email_data = fetch_email_by_id(id)
+    if email_data is None:
+        abort(404)
+    if bool(email_data.get("is_archived")):
+        abort(400)
+    if email_data.get("type") in NON_MAIN_TYPES:
+        abort(400)
+
+    payload = request.get_json(silent=True) or {}
+    to_value = _normalize_addresses(payload.get("to")) or ""
+    cc_value = _normalize_addresses(payload.get("cc")) or ""
+    current_reply_text = str(payload.get("reply_text") or "").strip()
+    task = _start_draft_task(id, to_value, cc_value, current_reply_text)
+    return jsonify(_serialize_ai_task(task))
+
+
+@main.route("/api/ai-task/<task_id>", methods=["GET"])
+def ai_task_status(task_id):
+    task = _get_ai_task(task_id)
+    if not task:
+        abort(404)
+    return jsonify(_serialize_ai_task(task))
+
+
 @main.before_app_request
 def sync_from_gmail():
     if request.endpoint == "static":
         return
     if request.method != "GET":
         return
-    if request.endpoint in {"main.about", "main.compose"}:
+    if request.endpoint in {"main.about", "main.compose", "main.profile"}:
         return
     trigger_background_sync(max_results=15)
 
@@ -326,11 +796,42 @@ def index():
 def about():
     return render_template("about.html")
 
+
+@main.route("/profile", methods=["GET", "POST"])
+def profile():
+    profile_data = get_user_profile()
+    if request.method == "POST":
+        name_value = (request.form.get("name") or "").strip()
+        occupation_value = (request.form.get("occupation") or "").strip()
+        if occupation_value and occupation_value not in OCCUPATION_OPTIONS:
+            abort(400)
+
+        photo_path = profile_data.get("photo_path") or ""
+        uploaded = request.files.get("picture")
+        if uploaded and (uploaded.filename or "").strip():
+            photo_path = _save_profile_photo(uploaded)
+
+        save_user_profile(
+            name=name_value,
+            occupation=occupation_value,
+            photo_path=photo_path,
+        )
+        return redirect(url_for("main.profile"))
+
+    return render_template(
+        "profile.html",
+        profile=profile_data,
+        occupation_options=OCCUPATION_OPTIONS,
+    )
+
+
 @main.route("/allemails")
 def allemails():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    emails = fetch_emails(exclude_types=NON_MAIN_TYPES)
+    emails = fetch_emails(exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES)
+    emails = _filter_emails_by_query(emails, search_query)
     emails_sorted = sort_emails(emails, sort_code)
     return render_template(
         "allemails.html",
@@ -338,85 +839,131 @@ def allemails():
         sort=sort_code,
         current_list_url=current_list_url,
         list_fingerprint=_emails_fingerprint(emails_sorted),
+        search_query=search_query,
     )
 
 @main.route("/readonly")
 def readonly():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered_sorted = sort_emails(fetch_emails(email_type="read-only"), sort_code)
+    emails = fetch_emails(email_type="read-only")
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
     return render_template(
         "readonly.html",
         emails=filtered_sorted,
         sort=sort_code,
         current_list_url=current_list_url,
         list_fingerprint=_emails_fingerprint(filtered_sorted),
+        search_query=search_query,
     )
 
 @main.route("/responseneeded")
 def responseneeded():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered_sorted = sort_emails(fetch_emails(email_type="response-needed"), sort_code)
+    emails = fetch_emails(email_type="response-needed")
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
     return render_template(
         "responseneeded.html",
         emails=filtered_sorted,
         sort=sort_code,
         current_list_url=current_list_url,
         list_fingerprint=_emails_fingerprint(filtered_sorted),
+        search_query=search_query,
     )
 
 @main.route("/junkmailconfirm")
 def junkmailconfirm():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered_sorted = sort_emails(fetch_emails(email_type="junk-uncertain"), sort_code)
+    emails = fetch_emails(email_type="junk-uncertain")
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
     return render_template(
         "junkmailconfirm.html",
         emails=filtered_sorted,
         sort=sort_code,
         current_list_url=current_list_url,
         list_fingerprint=_emails_fingerprint(filtered_sorted),
+        search_query=search_query,
     )
 
 @main.route("/junk")
 def junk():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered_sorted = sort_emails(fetch_emails(email_type="junk"), sort_code)
+    emails = fetch_emails(email_type="junk")
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
     return render_template(
         "junk.html",
         emails=filtered_sorted,
         sort=sort_code,
         current_list_url=current_list_url,
         list_fingerprint=_emails_fingerprint(filtered_sorted),
+        search_query=search_query,
     )
 
 
 @main.route("/sent")
 def sent():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    filtered_sorted = sort_emails(fetch_emails(email_type="sent"), sort_code)
+    emails = fetch_emails(email_type="sent")
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
     return render_template(
         "sent.html",
         emails=filtered_sorted,
         sort=sort_code,
         current_list_url=current_list_url,
+        search_query=search_query,
     )
 
 
 @main.route("/drafts")
 def drafts():
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
     sync_drafts_from_gmail(max_results=40)
-    filtered_sorted = sort_emails(fetch_emails(email_type="draft"), sort_code)
+    emails = fetch_emails(email_type="draft")
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
     return render_template(
         "drafts.html",
         emails=filtered_sorted,
         sort=sort_code,
         current_list_url=current_list_url,
+        search_query=search_query,
+    )
+
+
+@main.route("/archive")
+def archive():
+    sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
+    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
+    emails = fetch_emails(
+        exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
+        archived_only=True,
+    )
+    emails = _filter_emails_by_query(emails, search_query)
+    filtered_sorted = sort_emails(emails, sort_code)
+    return render_template(
+        "archive.html",
+        emails=filtered_sorted,
+        sort=sort_code,
+        current_list_url=current_list_url,
+        list_fingerprint=_emails_fingerprint(filtered_sorted),
+        search_query=search_query,
     )
 
 @main.route("/email/<int:id>")
@@ -424,22 +971,28 @@ def email(id):
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
-    if email_data.get("type") not in NON_MAIN_TYPES:
+    if email_data.get("type") not in NON_MAIN_TYPES and not bool(email_data.get("is_archived")):
         external_id = email_data.get("external_id")
         if external_id:
-            set_message_read_state(external_id, read=True)
+            _set_message_read_state_async(external_id, read=True)
         mark_read(id, True)
         email_data = fetch_email_by_id(id) or email_data
         email_data["is_read"] = True
 
+    ai_analysis_needed = False
+    ai_analysis_task_id = None
+    ai_summary_expected = should_summarize_email(email_data)
     if _should_auto_analyze_email(email_data):
-        if _run_ai_analysis(email_data):
-            email_data = fetch_email_by_id(id) or email_data
+        ai_analysis_needed = True
+        task = _start_analysis_task(id)
+        ai_analysis_task_id = task["id"]
 
     thread_emails = fetch_thread_emails(email_data.get("thread_id"))
-    if email_data.get("type") not in NON_MAIN_TYPES:
+    if email_data.get("type") not in NON_MAIN_TYPES and not bool(email_data.get("is_archived")):
         thread_emails = [
-            item for item in thread_emails if item.get("type") not in NON_MAIN_TYPES
+            item
+            for item in thread_emails
+            if item.get("type") not in NON_MAIN_TYPES and not bool(item.get("is_archived"))
         ]
     next_url = _safe_next_url(request.args.get("next"))
 
@@ -451,6 +1004,9 @@ def email(id):
         thread_count=len(thread_emails),
         current_user_email=LOCAL_USER_EMAIL,
         ai_enabled=ai_enabled(),
+        ai_analysis_needed=ai_analysis_needed,
+        ai_analysis_task_id=ai_analysis_task_id,
+        ai_summary_expected=ai_summary_expected,
     )
 
 @main.route("/email/<int:id>/set-type", methods=["POST"])
@@ -465,9 +1021,7 @@ def set_email_type(id):
 
     new_type = (request.form.get("new_type") or "").strip()
 
-    # Allow all user-facing triage buckets.
-    allowed = {"response-needed", "read-only", "junk", "junk-uncertain"}
-    if new_type not in allowed:
+    if new_type not in ALLOWED_EMAIL_TYPES:
         abort(400)
 
     email_data = fetch_email_by_id(id)
@@ -483,39 +1037,121 @@ def set_email_type(id):
                 db_set_email_type(id, new_type)
         else:
             db_set_email_type(id, new_type)
+    if bool(email_data.get("is_archived")):
+        set_email_archived(id, archived=False)
 
     # Return the user back to wherever they were.
     next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
     return redirect(next_url)
 
 
+@main.route("/emails/bulk-action", methods=["POST"])
+def bulk_email_action():
+    action = (request.form.get("action") or "").strip()
+    new_type = (request.form.get("new_type") or "").strip()
+    email_ids = _parse_bulk_email_ids(request.form.get("ids"))
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+
+    allowed_actions = {
+        "archive",
+        "unarchive",
+        "delete",
+        "mark-read",
+        "mark-unread",
+        "set-type",
+    }
+    if action not in allowed_actions:
+        abort(400)
+    if action == "set-type" and new_type not in ALLOWED_EMAIL_TYPES:
+        abort(400)
+    if not email_ids:
+        return redirect(next_url)
+
+    for email_id in email_ids:
+        email_data = fetch_email_by_id(email_id)
+        if email_data is None:
+            continue
+
+        email_type = email_data.get("type")
+        is_archived = bool(email_data.get("is_archived"))
+        external_id = email_data.get("external_id")
+
+        if action == "archive":
+            if email_type == "draft" or is_archived:
+                continue
+            set_email_archived(email_id, archived=True)
+            continue
+
+        if action == "unarchive":
+            if not is_archived:
+                continue
+            set_email_archived(email_id, archived=False)
+            continue
+
+        if action == "delete":
+            if email_type == "draft" and email_data.get("provider_draft_id"):
+                delete_draft_message(email_data["provider_draft_id"])
+            elif external_id:
+                trash_message(external_id)
+            db_delete_email(email_id)
+            continue
+
+        if action in {"mark-read", "mark-unread"}:
+            if email_type in NON_MAIN_TYPES:
+                continue
+            target_read_state = action == "mark-read"
+            if bool(email_data.get("is_read")) == target_read_state:
+                continue
+            if external_id:
+                if not set_message_read_state(external_id, read=target_read_state):
+                    mark_read(email_id, target_read_state)
+            else:
+                mark_read(email_id, target_read_state)
+            continue
+
+        if action == "set-type":
+            if email_type in NON_MAIN_TYPES:
+                continue
+            if email_type != new_type:
+                if external_id:
+                    if not set_message_type(external_id, new_type):
+                        db_set_email_type(email_id, new_type)
+                else:
+                    db_set_email_type(email_id, new_type)
+            if is_archived:
+                set_email_archived(email_id, archived=False)
+
+    return redirect(next_url)
+
+
+@main.route("/email/<int:id>/archive", methods=["POST"])
+def archive_email(id):
+    email_data = fetch_email_by_id(id)
+    if email_data is None:
+        abort(404)
+    if email_data.get("type") == "draft":
+        abort(400)
+    set_email_archived(id, archived=True)
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    return redirect(next_url)
+
+
+@main.route("/email/<int:id>/unarchive", methods=["POST"])
+def unarchive_email(id):
+    email_data = fetch_email_by_id(id)
+    if email_data is None:
+        abort(404)
+    set_email_archived(id, archived=False)
+    next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+    return redirect(next_url)
+
+
 @main.route("/search")
 def search():
-    current_list_url = request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
-    q = (request.args.get("q") or "").strip().lower()
+    q = (request.args.get("q") or "").strip()
     if not q:
-        return render_template("search.html", query="", emails=None, current_list_url=current_list_url)
-
-    results = []
-    for e in fetch_emails(exclude_types=NON_MAIN_TYPES):
-        haystack = " ".join(
-            [
-                e.get("title") or "",
-                e.get("sender") or "",
-                e.get("recipients") or "",
-                e.get("cc") or "",
-                e.get("body") or "",
-            ]
-        ).lower()
-        if q in haystack:
-            results.append(e)
-
-    return render_template(
-        "search.html",
-        query=q,
-        emails=results,
-        current_list_url=current_list_url,
-    )
+        return redirect(url_for("main.allemails"))
+    return redirect(url_for("main.allemails", q=q))
 
 
 @main.route("/email/<int:id>/analyze", methods=["POST"])
@@ -523,10 +1159,12 @@ def analyze_email_route(id):
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
+    if bool(email_data.get("is_archived")):
+        abort(400)
     if email_data.get("type") in NON_MAIN_TYPES:
         abort(400)
 
-    _run_ai_analysis(email_data)
+    _start_analysis_task(id)
     next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
     return redirect(url_for("main.email", id=id, next=next_url))
 
@@ -721,13 +1359,39 @@ def generate_draft(id):
     if email_data is None:
         return "Email not found", 404
 
+    if ai_enabled() and (
+        not str(email_data.get("ai_category") or "").strip()
+        or email_data.get("ai_needs_response") is None
+    ):
+        _run_ai_analysis(email_data, force=True)
+        email_data = fetch_email_by_id(id) or email_data
+
+    needs_response = email_data.get("ai_needs_response")
+    if needs_response is None:
+        needs_response = email_data.get("type") == "response-needed"
+    if not bool(needs_response):
+        next_url = _safe_next_url(request.form.get("next") or request.args.get("next"))
+        return redirect(url_for("main.email", id=id, next=next_url))
+
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
-    draft = generate_reply_draft(
-        email_data=email_data,
-        to_value=to_value or "",
-        cc_value=cc_value or "",
-        current_draft_text=current_reply_text,
-    )
+    profile = get_user_profile()
+    if current_reply_text:
+        draft = revise_reply(
+            email_data=email_data,
+            current_draft_text=current_reply_text,
+            to_value=to_value or "",
+            cc_value=cc_value or "",
+            user_profile=profile,
+            email_id=id,
+        )
+    else:
+        draft = draft_reply(
+            email_data=email_data,
+            to_value=to_value or "",
+            cc_value=cc_value or "",
+            user_profile=profile,
+            email_id=id,
+        )
     if not draft:
         title = email_data.get("title") or ""
         draft = (

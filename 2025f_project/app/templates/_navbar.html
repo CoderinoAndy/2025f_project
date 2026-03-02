@@ -1,18 +1,118 @@
 <div class="topbar d-flex align-items-center justify-content-between">
-  <div class="d-flex align-items-center gap-3">
-    <a class="brand-link" href="{{ url_for('main.about') }}" aria-label="About">
+  <div class="d-flex align-items-center gap-2">
+    <a class="brand-link" href="{{ url_for('main.allemails') }}" aria-label="Home">
       <img class="brand-logo" src="{{ url_for('static', filename='img/atom-logo-violet.svg') }}" alt="App logo">
     </a>
-    <a class="navlink" href="{{ url_for('main.allemails') }}">All Emails</a>
-    <a class="navlink" href="{{ url_for('main.responseneeded') }}">Response needed</a>
-    <a class="navlink" href="{{ url_for('main.readonly') }}">Read only</a>
-    <a class="navlink" href="{{ url_for('main.junk') }}">Junk</a>
-    <a class="navlink" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a>
-    <a class="navlink" href="{{ url_for('main.sent') }}">Sent</a>
-    <a class="navlink" href="{{ url_for('main.drafts') }}">Drafts</a>
+    {% if request.endpoint != "main.about" %}
+    <div class="dropdown">
+      <button
+        class="topbar-menu-btn topbar-mobile-nav"
+        type="button"
+        data-bs-toggle="dropdown"
+        aria-expanded="false"
+        aria-label="Open mailbox menu"
+      >
+        <i class="bi bi-list" aria-hidden="true"></i>
+      </button>
+      <ul class="dropdown-menu">
+        <li><a class="dropdown-item" href="{{ url_for('main.allemails') }}">All Emails</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.responseneeded') }}">Response needed</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.readonly') }}">Read only</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.junk') }}">Junk</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.junkmailconfirm') }}">Junk Confirmation</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.archive') }}">Archive</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.sent') }}">Sent</a></li>
+        <li><a class="dropdown-item" href="{{ url_for('main.drafts') }}">Drafts</a></li>
+      </ul>
+    </div>
+    {% endif %}
   </div>
-  <div class="d-flex align-items-center gap-2">
-    <a class="search-link" href="{{ url_for('main.search') }}">Search</a>
-    <i class="bi bi-search" aria-hidden="true"></i>
+  <div class="d-flex align-items-center gap-2 topbar-profile-wrap">
+    <a class="topbar-about-link" href="{{ url_for('main.about') }}" aria-label="About">
+      <i class="bi bi-info-circle-fill" aria-hidden="true"></i>
+    </a>
+    <a class="profile-link" href="{{ url_for('main.profile') }}" aria-label="Open profile">
+      {% if user_profile.photo_path %}
+      <img
+        class="profile-avatar"
+        src="{{ url_for('static', filename=user_profile.photo_path) }}"
+        alt="Profile picture"
+      >
+      {% else %}
+      <span class="profile-avatar profile-avatar-placeholder">
+        <i class="bi bi-person-fill" aria-hidden="true"></i>
+      </span>
+      {% endif %}
+      <span class="profile-name">{{ user_profile.name or "Profile" }}</span>
+    </a>
   </div>
 </div>
+
+{% if request.endpoint != "main.about" %}
+<aside class="app-sidebar" aria-label="Mailbox navigation">
+  <a class="sidebar-link{% if request.endpoint == 'main.allemails' %} active{% endif %}" href="{{ url_for('main.allemails') }}">
+    <i class="bi bi-inboxes-fill" aria-hidden="true"></i>
+    <span>All Emails</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.responseneeded' %} active{% endif %}" href="{{ url_for('main.responseneeded') }}">
+    <i class="bi bi-reply-fill" aria-hidden="true"></i>
+    <span>Response needed</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.readonly' %} active{% endif %}" href="{{ url_for('main.readonly') }}">
+    <i class="bi bi-envelope-open-fill" aria-hidden="true"></i>
+    <span>Read only</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.junk' %} active{% endif %}" href="{{ url_for('main.junk') }}">
+    <i class="bi bi-exclamation-octagon-fill" aria-hidden="true"></i>
+    <span>Junk</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.junkmailconfirm' %} active{% endif %}" href="{{ url_for('main.junkmailconfirm') }}">
+    <i class="bi bi-patch-question-fill" aria-hidden="true"></i>
+    <span>Junk Confirmation</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.archive' %} active{% endif %}" href="{{ url_for('main.archive') }}">
+    <i class="bi bi-archive-fill" aria-hidden="true"></i>
+    <span>Archive</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.sent' %} active{% endif %}" href="{{ url_for('main.sent') }}">
+    <i class="bi bi-send-fill" aria-hidden="true"></i>
+    <span>Sent</span>
+  </a>
+  <a class="sidebar-link{% if request.endpoint == 'main.drafts' %} active{% endif %}" href="{{ url_for('main.drafts') }}">
+    <i class="bi bi-file-earmark-text-fill" aria-hidden="true"></i>
+    <span>Drafts</span>
+  </a>
+</aside>
+
+{% set list_search_targets = {
+  "main.allemails": "main.allemails",
+  "main.readonly": "main.readonly",
+  "main.responseneeded": "main.responseneeded",
+  "main.junk": "main.junk",
+  "main.junkmailconfirm": "main.junkmailconfirm",
+  "main.archive": "main.archive",
+  "main.sent": "main.sent",
+  "main.drafts": "main.drafts"
+} %}
+{% set search_target = list_search_targets.get(request.endpoint, "main.allemails") %}
+<div class="global-search-shell">
+  <form class="global-search-form" method="get" action="{{ url_for(search_target) }}" role="search">
+    {% if request.args.get("sort") %}
+    <input type="hidden" name="sort" value="{{ request.args.get('sort') }}">
+    {% endif %}
+    <label class="visually-hidden" for="global-search-input">Search emails</label>
+    <i class="bi bi-search global-search-icon" aria-hidden="true"></i>
+    <input
+      id="global-search-input"
+      class="global-search-input"
+      type="text"
+      name="q"
+      value="{{ request.args.get('q', '') }}"
+      placeholder="Search mail"
+      aria-label="Search mail"
+      autocomplete="off"
+    >
+    <button class="global-search-submit" type="submit">Search</button>
+  </form>
+</div>
+{% endif %}

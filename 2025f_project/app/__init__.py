@@ -1,6 +1,6 @@
 from flask import Flask
 from datetime import datetime
-from .db import init_db
+from .db import get_user_profile, init_db
 
 def create_app():
     app = Flask(__name__, instance_relative_config=True)
@@ -33,6 +33,10 @@ def create_app():
             return s  # fallback: show original text if parsing fails
 
         return dt.strftime("%d/%m/%Y %H:%M")
+
+    @app.context_processor
+    def inject_user_profile():
+        return {"user_profile": get_user_profile()}
         
     from .routes import main
     app.register_blueprint(main)

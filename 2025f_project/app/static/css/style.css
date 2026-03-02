@@ -1,6 +1,7 @@
 :root{
   --bg: #15121a;
   --bar: #0f0d13;
+  --sidebar-width: 232px;
 
   --panel: #221e2b;
   --panel-2: #2b2636;
@@ -18,12 +19,81 @@
 body{
   background: var(--bg) !important;
   color: var(--text) !important;
+  overflow-x: hidden;
+}
+
+.global-search-shell{
+  position: relative;
+  z-index: 1100;
+  padding: 10px 16px 2px;
+}
+
+.app-sidebar + .global-search-shell{
+  margin-left: var(--sidebar-width);
+}
+
+.global-search-form{
+  width: min(760px, 100%);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(167, 139, 250, 0.38);
+  background: rgba(34, 30, 43, 0.84);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
+}
+
+.global-search-form:focus-within{
+  border-color: rgba(167, 139, 250, 0.75);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.24), 0 10px 24px rgba(0, 0, 0, 0.3);
+}
+
+.global-search-icon{
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.global-search-input{
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.global-search-input:focus{
+  outline: none;
+}
+
+.global-search-input::placeholder{
+  color: var(--muted);
+}
+
+.global-search-submit{
+  border: 1px solid rgba(167, 139, 250, 0.5);
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: rgba(167, 139, 250, 0.16);
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
+.global-search-submit:hover{
+  background: rgba(167, 139, 250, 0.24);
 }
 
 .topbar{
   background: var(--bar) !important;
   padding: 14px 18px;
   border-bottom: 1px solid #2b2b2b;
+  gap: 12px;
+  position: relative;
+  z-index: 1200;
 }
 
 .brand-link{
@@ -44,6 +114,80 @@ body{
   display: block;
 }
 
+.topbar-menu-btn{
+  border: 1px solid rgba(236, 233, 245, 0.24);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.topbar-menu-btn:hover{
+  background: rgba(167, 139, 250, 0.16);
+}
+
+.topbar-mobile-nav{
+  display: none;
+}
+
+.app-sidebar{
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-width);
+  padding: 82px 10px 12px;
+  background: rgba(15, 13, 19, 0.96);
+  border-right: 1px solid rgba(236, 233, 245, 0.18);
+  overflow-y: auto;
+  z-index: 1150;
+}
+
+.sidebar-link{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: var(--text);
+  text-decoration: none;
+  opacity: 0.92;
+  margin-bottom: 4px;
+}
+
+.sidebar-link i{
+  color: var(--muted);
+  width: 16px;
+  text-align: center;
+}
+
+.sidebar-link:hover{
+  background: rgba(124, 58, 237, 0.14);
+  opacity: 1;
+}
+
+.sidebar-link.active{
+  background: rgba(124, 58, 237, 0.2);
+  border: 1px solid rgba(167, 139, 250, 0.45);
+  opacity: 1;
+}
+
+.sidebar-link.active i{
+  color: var(--text);
+}
+
+.app-main{
+  margin-left: var(--sidebar-width);
+}
+
+.container-fluid.app-main,
+.container.app-main{
+  width: calc(100% - var(--sidebar-width));
+}
+
 .navlink{
   color: var(--text) !important;
   opacity: 0.85;
@@ -58,6 +202,10 @@ body{
   opacity: 0.9;
   text-decoration: none;
 }
+.navlink-search{
+  border: 1px solid rgba(167, 139, 250, 0.4);
+  background: rgba(167, 139, 250, 0.12);
+}
 .search-link:hover{
   opacity: 1;
   text-decoration: underline;
@@ -66,6 +214,57 @@ body{
 .navlink:hover{
   opacity: 1;
   background: rgba(124, 58, 237, 0.14);
+}
+.topbar-profile-wrap{
+  margin-left: auto;
+}
+.topbar-about-link{
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text) !important;
+  text-decoration: none;
+  border: 1px solid rgba(236, 233, 245, 0.24);
+  background: rgba(255, 255, 255, 0.04);
+}
+.topbar-about-link:hover{
+  background: rgba(167, 139, 250, 0.16);
+}
+.profile-link{
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text) !important;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(236, 233, 245, 0.24);
+  background: rgba(255, 255, 255, 0.04);
+}
+.profile-link:hover{
+  background: rgba(167, 139, 250, 0.16);
+}
+.profile-avatar{
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.profile-avatar-placeholder{
+  background: rgba(167, 139, 250, 0.26);
+}
+.profile-name{
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.92rem;
 }
 
 .panel-card, .meta-wrap, .email-row{
@@ -96,7 +295,7 @@ body{
 
 /* Full-width Gmail-like list frame */
 .list-shell{
-  background: transparent;
+  background: var(--panel);
   border: 1px solid var(--list-border);
   border-radius: 12px;
   overflow: visible;
@@ -117,7 +316,7 @@ body{
   border-bottom: 1px solid var(--list-border) !important;
   border-radius: 0 !important;
 
-  background: transparent !important;
+  background: var(--panel) !important;
   color: var(--text) !important;
 
   font-size: 0.92rem;
@@ -133,6 +332,77 @@ body{
 }
 .email-row.alt:hover{
   background: rgba(255,255,255,0.04) !important;
+}
+
+.email-row.selected,
+.email-row.alt.selected{
+  background: rgba(167, 139, 250, 0.2) !important;
+}
+
+.email-row.selected:hover,
+.email-row.alt.selected:hover{
+  background: rgba(167, 139, 250, 0.25) !important;
+}
+
+.email-select-wrap{
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  margin-right: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transform: translateX(-8px);
+  transition: width 140ms ease, margin-right 140ms ease, opacity 140ms ease, transform 140ms ease;
+}
+
+.list-shell.selection-mode .email-select-wrap{
+  width: 22px;
+  margin-right: 2px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.email-select-checkbox{
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(236, 233, 245, 0.45);
+  background: transparent;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.email-select-checkbox::after{
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.95);
+  transform: scale(0);
+  transition: transform 120ms ease;
+}
+
+.email-select-checkbox:checked{
+  border-color: rgba(167, 139, 250, 0.95);
+  background: rgba(167, 139, 250, 0.14);
+}
+
+.email-select-checkbox:checked::after{
+  transform: scale(1);
+}
+
+.email-select-checkbox:focus-visible{
+  outline: 2px solid rgba(167, 139, 250, 0.55);
+  outline-offset: 2px;
 }
 
 /* Unread = bold (Gmail behavior) */
@@ -152,6 +422,13 @@ body{
 .email-row:hover .row-actions,
 .email-row:focus-within .row-actions{
   opacity: 1;
+}
+.list-shell.selection-mode .row-actions{
+  opacity: 0 !important;
+  pointer-events: none;
+}
+.list-shell.selection-mode .email-row .stretched-link::after{
+  display: none;
 }
 
 /* Action buttons */
@@ -212,6 +489,26 @@ body{
   color: var(--muted);
 }
 
+.list-select-toggle-btn{
+  border: 1px solid rgba(236, 233, 245, 0.24);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1;
+  padding: 7px 14px;
+  margin-left: 4px;
+}
+
+.list-select-toggle-btn:hover{
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.list-select-toggle-btn.active{
+  border-color: rgba(167, 139, 250, 0.6);
+  background: rgba(167, 139, 250, 0.16);
+}
+
 .compose-fab{
   position: fixed;
   right: 18px;
@@ -254,7 +551,106 @@ body{
   outline-offset: 2px;
 }
 
+.bulk-side-menu{
+  position: fixed;
+  top: 120px;
+  right: 16px;
+  width: 214px;
+  z-index: 1300;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(34, 30, 43, 0.96);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
+  padding: 10px;
+  transform: translateX(calc(100% + 16px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 150ms ease, opacity 150ms ease;
+}
+
+.bulk-side-menu.visible{
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.bulk-side-menu-header{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.bulk-clear-btn{
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+.bulk-clear-btn:hover{
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.bulk-action-btn{
+  width: 100%;
+  border: 1px solid rgba(236, 233, 245, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text);
+  text-align: left;
+  font-size: 0.84rem;
+  padding: 6px 9px;
+  margin-bottom: 6px;
+}
+
+.bulk-action-btn:hover{
+  background: rgba(167, 139, 250, 0.16);
+  border-color: rgba(167, 139, 250, 0.5);
+}
+
+.bulk-action-btn.danger:hover{
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.bulk-action-btn.is-hidden{
+  display: none;
+}
+
+.bulk-move-group{
+  border-top: 1px solid var(--list-border);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+.bulk-move-group.is-hidden{
+  display: none;
+}
+
+.bulk-move-label{
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
 @media (max-width: 576px){
+  .global-search-shell{
+    padding: 8px 12px 2px;
+  }
+  .global-search-form{
+    padding: 9px 12px;
+    gap: 8px;
+  }
+  .global-search-submit{
+    padding: 4px 10px;
+  }
   .compose-fab{
     right: 12px;
     bottom: 12px;
@@ -262,5 +658,33 @@ body{
     border-radius: 22px;
     font-size: 0.98rem;
     gap: 10px;
+  }
+  .profile-name{
+    display: none;
+  }
+  .bulk-side-menu{
+    width: calc(100vw - 24px);
+    right: 12px;
+    top: auto;
+    bottom: 84px;
+  }
+}
+
+@media (max-width: 991.98px){
+  .app-sidebar{
+    display: none;
+  }
+  .topbar-mobile-nav{
+    display: inline-flex;
+  }
+  .app-main{
+    margin-left: 0;
+  }
+  .container-fluid.app-main,
+  .container.app-main{
+    width: 100%;
+  }
+  .app-sidebar + .global-search-shell{
+    margin-left: 0;
   }
 }

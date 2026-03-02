@@ -1,13 +1,16 @@
 import json
+import ipaddress
 import os
 import re
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
-MODEL_DEFAULT = "Qwen/Qwen2.5-14B-Instruct"
-BASE_URL_DEFAULT = "https://router.huggingface.co/v1"
+MODEL_DEFAULT = "qwen2.5-7b-instruct"
+BASE_URL_DEFAULT = "http://127.0.0.1:8080/v1"
 TIMEOUT_SECONDS_DEFAULT = 25
 VALID_TYPES = {"read-only", "junk-uncertain", "junk", "response-needed"}
+LOCALHOST_NAMES = {"localhost"}
 
 
 def _api_key():
@@ -19,15 +22,64 @@ def _api_key():
 
 
 def ai_enabled():
-    return bool(_api_key())
+    return _endpoint_allowed()
+
+
+def _base_url():
+    return (os.getenv("QWEN_API_BASE_URL") or BASE_URL_DEFAULT).strip().rstrip("/")
+
+
+def _allow_remote():
+    return str(os.getenv("QWEN_ALLOW_REMOTE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_local_hostname(hostname):
+    if not hostname:
+        return False
+    lower = hostname.lower()
+    if lower in LOCALHOST_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(lower).is_loopback
+    except ValueError:
+        return False
+
+
+def _endpoint_allowed():
+    base_url = _base_url()
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        print(f"Qwen disabled: invalid QWEN_API_BASE_URL '{base_url}'")
+        return False
+    if _allow_remote():
+        return True
+    if _is_local_hostname(parsed.hostname):
+        return True
+    print(
+        "Qwen blocked: external AI endpoint is not allowed while "
+        "QWEN_ALLOW_REMOTE is off."
+    )
+    return False
+
+
+def _request_headers():
+    headers = {"Content-Type": "application/json"}
+    api_key = _api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def _chat_completion(messages, temperature=0.1, max_tokens=600):
-    api_key = _api_key()
-    if not api_key:
+    if not _endpoint_allowed():
         return None
 
-    base_url = os.getenv("QWEN_API_BASE_URL", BASE_URL_DEFAULT).strip().rstrip("/")
+    base_url = _base_url()
     endpoint = f"{base_url}/chat/completions"
     model_name = os.getenv("QWEN_MODEL", MODEL_DEFAULT).strip() or MODEL_DEFAULT
     timeout_seconds = float(
@@ -45,10 +97,7 @@ def _chat_completion(messages, temperature=0.1, max_tokens=600):
     request_obj = urllib.request.Request(
         endpoint,
         data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=_request_headers(),
         method="POST",
     )
 
@@ -101,7 +150,23 @@ def _clean_summary(raw_summary):
     return summary
 
 
-def analyze_email(email_data):
+def _profile_prompt_block(user_profile):
+    if not isinstance(user_profile, dict):
+        return ""
+
+    name_value = " ".join(str(user_profile.get("name") or "").split())
+    occupation_value = " ".join(str(user_profile.get("occupation") or "").split())
+    profile_bits = []
+    if name_value:
+        profile_bits.append(f"User name: {name_value}")
+    if occupation_value:
+        profile_bits.append(f"User occupation: {occupation_value}")
+    if not profile_bits:
+        return ""
+    return "User profile context:\n" + "\n".join(profile_bits) + "\n\n"
+
+
+def analyze_email(email_data, user_profile=None):
     body = (email_data.get("body") or "").strip()
     title = (email_data.get("title") or "(No subject)").strip()
     sender = (email_data.get("sender") or "").strip()
@@ -123,6 +188,7 @@ def analyze_email(email_data):
     )
     user_prompt = (
         "Classify this email.\n\n"
+        f"{_profile_prompt_block(user_profile)}"
         f"Subject: {title}\n"
         f"From: {sender}\n"
         f"To: {recipients}\n"
@@ -171,7 +237,13 @@ def analyze_email(email_data):
     }
 
 
-def generate_reply_draft(email_data, to_value="", cc_value="", current_draft_text=""):
+def generate_reply_draft(
+    email_data,
+    to_value="",
+    cc_value="",
+    current_draft_text="",
+    user_profile=None,
+):
     body = (email_data.get("body") or "").strip()
     title = (email_data.get("title") or "(No subject)").strip()
     sender = (email_data.get("sender") or "").strip()
@@ -187,6 +259,7 @@ def generate_reply_draft(email_data, to_value="", cc_value="", current_draft_tex
     )
     user_prompt = (
         "Write a reply draft for this email thread.\n\n"
+        f"{_profile_prompt_block(user_profile)}"
         f"Original subject: {title}\n"
         f"Sender: {sender}\n"
         f"Planned To: {to_value}\n"

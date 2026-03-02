@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>All Emails</title>
+    <title>Archive</title>
 
     <link
       href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}"
@@ -13,12 +13,12 @@
       rel="stylesheet"
       href="{{ url_for('static', filename='vendor/bootstrap-icons/font/bootstrap-icons.min.css') }}"
     />
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
   <body
     {% if not search_query %}
-    data-live-email-view="all"
+    data-live-email-view="archived"
     data-sort="{{ sort }}"
     data-fingerprint="{{ list_fingerprint }}"
     data-poll-interval-ms="5000"
@@ -30,15 +30,15 @@
         {% if search_query %}
         <div class="d-flex align-items-center gap-2">
           <span class="muted">Results for "{{ search_query }}"</span>
-          <a class="btn btn-outline-light btn-sm" href="{{ url_for('main.allemails') }}">Clear</a>
+          <a class="btn btn-outline-light btn-sm" href="{{ url_for('main.archive') }}">Clear</a>
         </div>
         {% endif %}
         <form method="get" class="sort-form">
           {% if search_query %}
           <input type="hidden" name="q" value="{{ search_query }}">
           {% endif %}
-          <label for="sort-all" class="muted me-2 mb-0">Order</label>
-          <select id="sort-all" name="sort" class="form-select form-select-sm sort-select"
+          <label for="sort-archive" class="muted me-2 mb-0">Order</label>
+          <select id="sort-archive" name="sort" class="form-select form-select-sm sort-select"
                   aria-label="Sort emails" onchange="this.form.submit()">
             <option value="date_desc" {% if sort == "date_desc" %}selected{% endif %}>Date sent (newest first)</option>
             <option value="date_asc" {% if sort == "date_asc" %}selected{% endif %}>Date sent (oldest first)</option>
@@ -53,9 +53,9 @@
       </div>
       <div class="list-shell">
         {% if search_query %}
-        {% set empty_message = "No emails matched your search." %}
+        {% set empty_message = "No emails matched your search in Archive." %}
         {% else %}
-        {% set empty_message = "Your All Emails tab is empty." %}
+        {% set empty_message = "Your Archive is empty." %}
         {% endif %}
         {% include "_live_email_rows.html" %}
       </div>

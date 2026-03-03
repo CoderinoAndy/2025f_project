@@ -51,7 +51,7 @@ from .ollama_client import (
 )
 
 main = Blueprint("main", __name__)
-LOCAL_USER_EMAIL = "you@example.com"
+LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 PROFILE_UPLOAD_DIR = Path(__file__).resolve().parent / "static" / "uploads" / "profiles"
 ALLOWED_PROFILE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 OCCUPATION_OPTIONS = [
@@ -424,6 +424,14 @@ def _summary_looks_unusable(email_data):
     return any(marker in summary for marker in unusable_markers)
 
 
+def _ai_user_profile():
+    """Return profile data used by AI calls, including canonical user email."""
+    # Keep profile context consistent across AI entry points.
+    profile = dict(get_user_profile() or {})
+    profile["email"] = LOCAL_USER_EMAIL
+    return profile
+
+
 def _should_auto_analyze_email(email_data):
     """Return whether auto analyze email.
     """
@@ -455,7 +463,7 @@ def _run_ai_analysis(email_data, force=False):
     """Run ai analysis.
     """
     # Execute the full workflow and report whether persisted state changed.
-    profile = get_user_profile()
+    profile = _ai_user_profile()
     updated = False
     classification_missing = (
         not str(email_data.get("ai_category") or "").strip()
@@ -765,7 +773,7 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
             _run_ai_analysis(email_data, force=True)
             email_data = fetch_email_by_id(email_id) or email_data
 
-        profile = get_user_profile()
+        profile = _ai_user_profile()
         if current_reply_text:
             draft_text = revise_reply(
                 email_data=email_data,
@@ -1644,7 +1652,7 @@ def generate_draft(id):
         email_data = fetch_email_by_id(id) or email_data
 
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
-    profile = get_user_profile()
+    profile = _ai_user_profile()
     if current_reply_text:
         draft = revise_reply(
             email_data=email_data,

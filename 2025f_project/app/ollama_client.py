@@ -101,6 +101,8 @@ REQUEST_SENTENCE_MARKERS = (
     "deadline",
     "asap",
 )
+LOCAL_USER_EMAIL_DEFAULT = "you@example.com"
+EMAIL_ADDRESS_PATTERN = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})")
 
 
 def _utc_now():
@@ -275,6 +277,14 @@ def _compact_text(value):
     """
     # Internal helper for compact text used by higher-level request and sync workflows.
     return " ".join(str(value or "").split()).strip()
+
+
+def _local_user_email():
+    """Local user email.
+    """
+    # Resolve local user email using configuration defaults and safe fallback behavior.
+    value = _compact_text(os.getenv("LOCAL_USER_EMAIL") or os.getenv("USER_EMAIL"))
+    return value or LOCAL_USER_EMAIL_DEFAULT
 
 
 def _text_tokens(value):
@@ -491,17 +501,24 @@ def _profile_prompt_block(user_profile):
     """Profile prompt block.
     """
     # Build profile prompt block text that is passed into model prompts.
-    if not isinstance(user_profile, dict):
-        return ""
-    name_value = _compact_text(user_profile.get("name"))
-    occupation_value = _compact_text(user_profile.get("occupation"))
+    profile = user_profile if isinstance(user_profile, dict) else {}
+    name_value = _compact_text(profile.get("name"))
+    occupation_value = _compact_text(profile.get("occupation"))
+    account_email = _compact_text(profile.get("email")) or _local_user_email()
     lines = []
     if name_value:
-        lines.append(f"User name: {name_value}")
+        lines.append(f"User display name: {name_value}")
     if occupation_value:
         lines.append(f"User occupation: {occupation_value}")
-    if not lines:
-        return ""
+    lines.extend(
+        [
+            f"User account email: {account_email}",
+            "Identity rules:",
+            "- The profile name is a display name, not an email address.",
+            "- Never treat a plain name as an email address.",
+            "- Use explicit email addresses in From/To/Cc as canonical.",
+        ]
+    )
     return "User profile context:\n" + "\n".join(lines) + "\n\n"
 
 
@@ -548,15 +565,16 @@ def _sender_parts(sender_text):
         }
 
     email = ""
-    email_match = re.search(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})", raw)
+    email_match = EMAIL_ADDRESS_PATTERN.search(raw)
     if email_match:
         email = email_match.group(1)
     else:
         bracket_match = re.search(r"<([^>]+)>", raw)
         if bracket_match:
-            email = _compact_text(bracket_match.group(1)).lower()
-    if not email:
-        email = raw
+            bracket_value = _compact_text(bracket_match.group(1)).lower()
+            bracket_email_match = EMAIL_ADDRESS_PATTERN.search(bracket_value)
+            if bracket_email_match:
+                email = bracket_email_match.group(1)
 
     local = ""
     domain = ""
@@ -1046,7 +1064,8 @@ def classify_email(email_data, user_profile=None, email_id=None):
         "Do not rely on a predefined hardcoded brand list. "
         "Use strict policy: newsletters/digests/promotions/notifications are usually informational "
         "with needs_response=false unless the email explicitly asks the recipient to respond. "
-        "Mark junk only for spam/scam/promotional noise; use lower confidence for borderline cases."
+        "Mark junk only for spam/scam/promotional noise; use lower confidence for borderline cases. "
+        "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Classify this email.\n\n"
@@ -1097,7 +1116,8 @@ def summarize_email(email_data, user_profile=None, email_id=None):
 
     system_prompt = (
         "Summarize emails. Return plain text only. "
-        "Maximum 2 sentences and under 280 characters."
+        "Maximum 2 sentences and under 280 characters. "
+        "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Summarize this email.\n\n"
@@ -1251,7 +1271,8 @@ def draft_reply(email_data, to_value="", cc_value="", user_profile=None, email_i
         "You write concise, professional email replies grounded in the incoming email context. "
         "Do not copy long spans from the original email. "
         "If the message is informational/newsletter with no explicit ask, write a short acknowledgment. "
-        "Return only the email body text, no markdown and no subject."
+        "Return only the email body text, no markdown and no subject. "
+        "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Draft a response email.\n\n"
@@ -1312,7 +1333,8 @@ def revise_reply(
     system_prompt = (
         "You improve email drafts using the incoming email context. "
         "Do not copy long spans from the original email. "
-        "Return only the revised email body text, no markdown and no subject."
+        "Return only the revised email body text, no markdown and no subject. "
+        "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Revise this draft response based on the original email.\n\n"

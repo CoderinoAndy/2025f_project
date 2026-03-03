@@ -12,6 +12,7 @@ BASE_URL_DEFAULT = "http://127.0.0.1:8080/v1"
 TIMEOUT_SECONDS_DEFAULT = 25
 VALID_TYPES = {"read-only", "junk-uncertain", "junk", "response-needed"}
 LOCALHOST_NAMES = {"localhost"}
+LOCAL_USER_EMAIL_DEFAULT = "you@example.com"
 
 
 def _api_key():
@@ -192,6 +193,21 @@ def _extract_json_block(text):
     return match.group(0).strip() if match else None
 
 
+def _compact_text(value):
+    """Compact text.
+    """
+    # Internal helper for compact text used by higher-level request and sync workflows.
+    return " ".join(str(value or "").split()).strip()
+
+
+def _local_user_email():
+    """Local user email.
+    """
+    # Resolve local user email using configuration defaults and safe fallback behavior.
+    value = _compact_text(os.getenv("LOCAL_USER_EMAIL") or os.getenv("USER_EMAIL"))
+    return value or LOCAL_USER_EMAIL_DEFAULT
+
+
 def _clean_summary(raw_summary):
     """Clean summary.
     """
@@ -208,18 +224,24 @@ def _profile_prompt_block(user_profile):
     """Profile prompt block.
     """
     # Build profile prompt block text that is passed into model prompts.
-    if not isinstance(user_profile, dict):
-        return ""
-
-    name_value = " ".join(str(user_profile.get("name") or "").split())
-    occupation_value = " ".join(str(user_profile.get("occupation") or "").split())
+    profile = user_profile if isinstance(user_profile, dict) else {}
+    name_value = _compact_text(profile.get("name"))
+    occupation_value = _compact_text(profile.get("occupation"))
+    account_email = _compact_text(profile.get("email")) or _local_user_email()
     profile_bits = []
     if name_value:
-        profile_bits.append(f"User name: {name_value}")
+        profile_bits.append(f"User display name: {name_value}")
     if occupation_value:
         profile_bits.append(f"User occupation: {occupation_value}")
-    if not profile_bits:
-        return ""
+    profile_bits.extend(
+        [
+            f"User account email: {account_email}",
+            "Identity rules:",
+            "- The profile name is a display name, not an email address.",
+            "- Never treat a plain name as an email address.",
+            "- Use explicit email addresses in From/To/Cc as canonical.",
+        ]
+    )
     return "User profile context:\n" + "\n".join(profile_bits) + "\n\n"
 
 
@@ -244,7 +266,8 @@ def analyze_email(email_data, user_profile=None):
         "priority must be an integer 1 to 3. "
         "Use priority 3 for urgent/time-sensitive messages requiring action, "
         "2 for important but not urgent, 1 for low urgency. "
-        "summary must be one concise sentence under 35 words."
+        "summary must be one concise sentence under 35 words. "
+        "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Classify this email.\n\n"
@@ -318,7 +341,8 @@ def generate_reply_draft(
     trimmed_body = body[:8000]
     system_prompt = (
         "You write concise, natural email replies. "
-        "Return only the reply body text, no markdown, no subject line."
+        "Return only the reply body text, no markdown, no subject line. "
+        "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Write a reply draft for this email thread.\n\n"

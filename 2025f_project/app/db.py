@@ -184,6 +184,30 @@ def _apply_schema_migrations(conn):
     )
     conn.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_email_messages_archived_received
+        ON email_messages(is_archived, received_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_messages_type_archived_received
+        ON email_messages(type, is_archived, received_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_messages_thread_received
+        ON email_messages(thread_id, received_at ASC, id ASC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_recipients_email_type_order
+        ON email_recipients(email_id, recipient_type, id)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS user_profile (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           name TEXT NOT NULL DEFAULT '',

@@ -1,5 +1,6 @@
 ﻿from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 from datetime import datetime
+from functools import lru_cache
 import os
 import re
 import threading
@@ -132,7 +133,7 @@ VALID_SORTS = {
     "unread_first",
     "read_first",
 }
-BUBBLE_SORT_MAX_ITEMS = 300
+MERGE_SORT_MAX_ITEMS = 120
 
 NON_MAIN_TYPES = {"sent", "draft"}
 HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
@@ -210,6 +211,11 @@ LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS = max(
     _env_int("LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS", 60),
 )
 _LAST_DEEP_LIVE_SYNC_AT = 0.0
+DRAFT_SYNC_INTERVAL_SECONDS = max(
+    10, _env_int("DRAFT_SYNC_INTERVAL_SECONDS", 45)
+)
+_LAST_DRAFT_SYNC_AT = 0.0
+_DRAFT_SYNC_LOCK = threading.Lock()
 
 def _normalize_addresses(raw_value):
     """Normalize addresses.
@@ -559,18 +565,26 @@ def _safe_next_url(raw_next):
 
     return fallback
 
-def _parse_dt(value):
+@lru_cache(maxsize=4096)
+def _parse_dt_cached(text_value):
     """Parse your existing date strings safely."""
     # Parse raw dt input into validated values for downstream logic.
-    if value is None:
+    s = str(text_value or "").strip()
+    if not s:
         return None
-    s = str(value).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
             pass
     return None
+
+
+def _parse_dt(value):
+    """Parse your existing date strings safely."""
+    if value is None:
+        return None
+    return _parse_dt_cached(str(value).strip())
 
 def _dt_sort_value(dt):
     """
@@ -581,6 +595,39 @@ def _dt_sort_value(dt):
     if dt is None:
         return -1
     return dt.toordinal() * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+
+
+def _merge_sorted_rows(left_rows, right_rows):
+    """Merge two sorted row lists while preserving stability."""
+    merged = []
+    left_index = 0
+    right_index = 0
+
+    while left_index < len(left_rows) and right_index < len(right_rows):
+        if left_rows[left_index][1] <= right_rows[right_index][1]:
+            merged.append(left_rows[left_index])
+            left_index += 1
+        else:
+            merged.append(right_rows[right_index])
+            right_index += 1
+
+    if left_index < len(left_rows):
+        merged.extend(left_rows[left_index:])
+    if right_index < len(right_rows):
+        merged.extend(right_rows[right_index:])
+    return merged
+
+
+def _merge_sort_rows(rows):
+    """Sort rows with merge sort using the precomputed tuple key."""
+    if len(rows) <= 1:
+        return rows
+
+    midpoint = len(rows) // 2
+    left_rows = _merge_sort_rows(rows[:midpoint])
+    right_rows = _merge_sort_rows(rows[midpoint:])
+    return _merge_sorted_rows(left_rows, right_rows)
+
 
 def sort_emails(emails, sort_code):
     """Sort emails.
@@ -611,18 +658,9 @@ def sort_emails(emails, sort_code):
     if len(rows) <= 1:
         return [row[0] for row in rows]
 
-    # Use bubble sort for educational/algorithm requirements on normal mailbox list sizes.
-    if len(rows) <= BUBBLE_SORT_MAX_ITEMS:
-        rows = list(rows)
-        for end in range(len(rows) - 1, 0, -1):
-            swapped = False
-            for index in range(end):
-                if rows[index][1] > rows[index + 1][1]:
-                    rows[index], rows[index + 1] = rows[index + 1], rows[index]
-                    swapped = True
-            if not swapped:
-                break
-        return [row[0] for row in rows]
+    # Use merge sort so normal mailbox ordering stays O(n log n).
+    if len(rows) <= MERGE_SORT_MAX_ITEMS:
+        return [row[0] for row in _merge_sort_rows(list(rows))]
 
     # Keep performance predictable for very large mailboxes.
     return [row[0] for row in sorted(rows, key=lambda row: row[1])]
@@ -878,6 +916,33 @@ def _set_message_read_state_async(external_id, read=True):
     ).start()
 
 
+def _trigger_draft_sync_async(max_results=40, force=False):
+    """Trigger draft sync async.
+    """
+    # Keep draft fetches responsive by running provider sync in the background.
+    global _LAST_DRAFT_SYNC_AT
+    now = time.time()
+    if not force and now - _LAST_DRAFT_SYNC_AT < DRAFT_SYNC_INTERVAL_SECONDS:
+        return False
+    if not _DRAFT_SYNC_LOCK.acquire(blocking=False):
+        return False
+
+    target = max(1, int(max_results or 40))
+
+    def _worker():
+        """Run one draft sync cycle and always release the draft sync lock afterward."""
+        # Manage worker lifecycle so asynchronous draft sync requests stay bounded.
+        global _LAST_DRAFT_SYNC_AT
+        try:
+            sync_drafts_from_gmail(max_results=target)
+            _LAST_DRAFT_SYNC_AT = time.time()
+        finally:
+            _DRAFT_SYNC_LOCK.release()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
+
+
 def _fetch_live_list_emails(list_view, search_query=""):
     """Fetch live list emails.
     """
@@ -886,7 +951,7 @@ def _fetch_live_list_emails(list_view, search_query=""):
     if not config:
         return None, None
     if config.get("sync_drafts"):
-        sync_drafts_from_gmail(max_results=40)
+        _trigger_draft_sync_async(max_results=40)
     email_type = config.get("email_type")
     exclude_types = config.get("exclude_types")
     archived_only = bool(config.get("archived_only"))
@@ -1022,7 +1087,7 @@ def _render_mailbox_page(
     # Render the target template using already-prepared view-model data.
     sort_code, search_query, current_list_url = _list_query_state()
     if sync_drafts:
-        sync_drafts_from_gmail(max_results=40)
+        _trigger_draft_sync_async(max_results=40)
     emails = fetch_emails(
         email_type=email_type,
         exclude_types=exclude_types,
@@ -1128,17 +1193,17 @@ def list_emails_api():
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
+    sync_requested = (request.args.get("sync") or "1").strip() != "0"
     current_list_url = _safe_next_url(request.args.get("next"))
 
-    # Keep mailbox views fresh while users stay on the page.
-    # `force=True` bypasses interval gating, while the Gmail sync lock
-    # still prevents overlapping sync workers.
-    now = time.time()
-    sync_max_results = LIVE_EMAIL_SYNC_MAX_RESULTS
-    if now - _LAST_DEEP_LIVE_SYNC_AT >= LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS:
-        sync_max_results = max(sync_max_results, LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS)
-        _LAST_DEEP_LIVE_SYNC_AT = now
-    trigger_background_sync(force=True, max_results=sync_max_results)
+    # Keep mailbox views fresh while throttling provider sync work.
+    if sync_requested:
+        now = time.time()
+        sync_max_results = LIVE_EMAIL_SYNC_MAX_RESULTS
+        if now - _LAST_DEEP_LIVE_SYNC_AT >= LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS:
+            sync_max_results = max(sync_max_results, LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS)
+            _LAST_DEEP_LIVE_SYNC_AT = now
+        trigger_background_sync(max_results=sync_max_results)
 
     emails, empty_message = _fetch_live_list_emails(list_view, search_query=search_query)
     if emails is None:

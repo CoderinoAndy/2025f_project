@@ -47,6 +47,22 @@ CREATE TABLE IF NOT EXISTS user_profile ( -- Single-row user profile used for pe
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_provider_draft_id -- Fast provider draft lookups and uniqueness.
+ON email_messages(provider_draft_id)
+WHERE provider_draft_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_email_messages_archived_received -- Speeds mailbox list filtering by archive/read ordering.
+ON email_messages(is_archived, received_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_email_messages_type_archived_received -- Speeds per-tab mailbox queries (type + archived + date).
+ON email_messages(type, is_archived, received_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_email_messages_thread_received -- Speeds thread view lookups.
+ON email_messages(thread_id, received_at ASC, id ASC);
+
+CREATE INDEX IF NOT EXISTS idx_email_recipients_email_type_order -- Speeds recipient aggregation subqueries.
+ON email_recipients(email_id, recipient_type, id);
+
 INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path) -- Insert default profile row for new databases.
 VALUES (1, '', '', '');
 

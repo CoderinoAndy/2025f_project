@@ -26,6 +26,7 @@
     const params = new URLSearchParams();
     params.set("view", listView); // Mailbox tab currently open.
     params.set("sort", currentSort); // Sort code selected by user.
+    params.set("sync", pollingEnabled ? "1" : "0"); // Skip provider sync on views that disabled polling.
     if (searchQuery) {
       params.set("q", searchQuery); // Preserve current search filter when refreshing rows.
     }

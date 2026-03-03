@@ -7,8 +7,8 @@
       data-is-read="{{ 1 if email.is_read else 0 }}"
       data-is-archived="{{ 1 if email.is_archived else 0 }}"
       data-can-delete="1"
-      data-can-archive="{{ 1 if (email.type != 'draft' and not email.is_archived) else 0 }}"
-      data-can-unarchive="{{ 1 if email.is_archived else 0 }}"
+      data-can-archive="{{ 1 if (email.type not in ['sent', 'draft'] and not email.is_archived) else 0 }}"
+      data-can-unarchive="{{ 1 if (email.type not in ['sent', 'draft'] and email.is_archived) else 0 }}"
       data-can-move="{{ 1 if email.type not in ['sent', 'draft'] else 0 }}"
       data-can-mark-read="{{ 1 if (email.type not in ['sent', 'draft'] and not email.is_read) else 0 }}"
       data-can-mark-unread="{{ 1 if (email.type not in ['sent', 'draft'] and email.is_read) else 0 }}"
@@ -17,7 +17,11 @@
       <div class="email-select-wrap">
         <input type="checkbox" class="email-select-checkbox" value="{{ email.id }}" aria-label="Select email">
       </div>
-      <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=current_list_url) }}"></a>
+      {% if email.type == 'draft' %}
+        <a class="stretched-link" href="{{ url_for('main.compose', draft_id=email.id, next=current_list_url) }}"></a>
+      {% else %}
+        <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=current_list_url) }}"></a>
+      {% endif %}
 
       <div class="row g-0 align-items-center flex-grow-1">
         <div class="col-6 wrap-ellipsis pe-2">
@@ -37,20 +41,22 @@
       </div>
 
       <div class="row-actions">
-        {% if email.is_archived %}
-          <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Main form users submit on this view. -->
-            <input type="hidden" name="next" value="{{ current_list_url }}">
-            <button type="submit" class="row-action-btn" title="Unarchive" aria-label="Unarchive">
-              <i class="bi bi-box-arrow-up"></i>
-            </button>
-          </form>
-        {% elif email.type != 'draft' %}
-          <form method="post" action="{{ url_for('main.archive_email', id=email.id) }}" class="m-0">
-            <input type="hidden" name="next" value="{{ current_list_url }}">
-            <button type="submit" class="row-action-btn" title="Archive" aria-label="Archive">
-              <i class="bi bi-archive"></i>
-            </button>
-          </form>
+        {% if email.type not in ['sent', 'draft'] %}
+          {% if email.is_archived %}
+            <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Main form users submit on this view. -->
+              <input type="hidden" name="next" value="{{ current_list_url }}">
+              <button type="submit" class="row-action-btn" title="Unarchive" aria-label="Unarchive">
+                <i class="bi bi-box-arrow-up"></i>
+              </button>
+            </form>
+          {% else %}
+            <form method="post" action="{{ url_for('main.archive_email', id=email.id) }}" class="m-0">
+              <input type="hidden" name="next" value="{{ current_list_url }}">
+              <button type="submit" class="row-action-btn" title="Archive" aria-label="Archive">
+                <i class="bi bi-archive"></i>
+              </button>
+            </form>
+          {% endif %}
         {% endif %}
 
         <form method="post" action="{{ url_for('main.delete_email', id=email.id) }}" class="m-0">
@@ -85,7 +91,7 @@
                   </li>
                 {% endif %}
               {% endfor %}
-              {% if email.type != 'draft' %}
+              {% if email.type not in ['sent', 'draft'] %}
                 <li><hr class="dropdown-divider"></li>
                 {% if email.is_archived %}
                   <li>
@@ -107,18 +113,20 @@
           </div>
         {% endif %}
 
-        <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
-          <input type="hidden" name="next" value="{{ current_list_url }}">
-          <button type="submit" class="row-action-btn"
-                  title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
-                  aria-label="Toggle read">
-            {% if email.is_read %}
-              <i class="bi bi-envelope"></i>
-            {% else %}
-              <i class="bi bi-envelope-open"></i>
-            {% endif %}
-          </button>
-        </form>
+        {% if email.type not in ['sent', 'draft'] %}
+          <form method="post" action="{{ url_for('main.toggle_read', id=email.id) }}" class="m-0">
+            <input type="hidden" name="next" value="{{ current_list_url }}">
+            <button type="submit" class="row-action-btn"
+                    title="{% if email.is_read %}Mark as unread{% else %}Mark as read{% endif %}"
+                    aria-label="Toggle read">
+              {% if email.is_read %}
+                <i class="bi bi-envelope"></i>
+              {% else %}
+                <i class="bi bi-envelope-open"></i>
+              {% endif %}
+            </button>
+          </form>
+        {% endif %}
       </div>
     </div>
   {% endfor %}

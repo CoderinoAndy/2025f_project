@@ -14,6 +14,8 @@
   const pollIntervalMs = Number.isFinite(parsedPollIntervalMs) // Clamp invalid values to safe defaults.
     ? Math.max(1000, parsedPollIntervalMs) // Never poll faster than once per second.
     : 2000;
+  const pollingEnabled = pageRoot.dataset.livePollingEnabled !== "0"; // Poll only on views that explicitly opt in.
+  const searchQuery = pageRoot.dataset.searchQuery || ""; // Keep filtered list refreshes scoped to active query.
   const sortSelect = document.querySelector(".sort-select"); // Sort dropdown affects polling query params.
   let currentSort = pageRoot.dataset.sort || "date_desc"; // Current sort mode sent to API.
   let lastFingerprint = pageRoot.dataset.fingerprint || ""; // Last known content hash from server.
@@ -24,6 +26,9 @@
     const params = new URLSearchParams();
     params.set("view", listView); // Mailbox tab currently open.
     params.set("sort", currentSort); // Sort code selected by user.
+    if (searchQuery) {
+      params.set("q", searchQuery); // Preserve current search filter when refreshing rows.
+    }
     params.set("next", `${window.location.pathname}${window.location.search}`); // Preserve return URL context.
     params.set("t", Date.now().toString()); // Cache-busting timestamp for proxies/browsers.
     return `/api/list-emails?${params.toString()}`;
@@ -81,16 +86,22 @@
     });
   }
 
-  document.addEventListener("visibilitychange", () => { // Pause background polling to reduce unnecessary requests.
-    if (document.hidden) {
-      stopPolling();
-      return;
-    }
-    refreshList(); // Fetch immediately when tab becomes visible again.
-    startPolling(); // Resume recurring updates.
-  });
+  if (pollingEnabled) {
+    document.addEventListener("visibilitychange", () => { // Pause background polling to reduce unnecessary requests.
+      if (document.hidden) {
+        stopPolling();
+        return;
+      }
+      refreshList(); // Fetch immediately when tab becomes visible again.
+      startPolling(); // Resume recurring updates.
+    });
+  }
 
   window.addEventListener("beforeunload", stopPolling); // Cleanup interval during navigation away.
-  refreshList(); // Perform an immediate refresh on initial page load.
-  startPolling(); // Then continue periodic refreshes.
+  window.addEventListener("mailbox:refresh-requested", refreshList); // Allow other scripts to request an in-place refresh.
+  window.mailboxRefreshList = refreshList; // Expose one refresh helper for async action scripts.
+  if (pollingEnabled) {
+    refreshList(); // Perform an immediate refresh on initial page load.
+    startPolling(); // Then continue periodic updates.
+  }
 })();

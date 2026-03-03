@@ -99,6 +99,111 @@
           inset 0 -1px 0 rgba(255, 255, 255, 0.08);
       }
 
+      .about-intro{
+        position: fixed;
+        inset: 0;
+        z-index: 2400;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(180deg, #131119 0%, #1a1624 60%, #120f18 100%);
+        opacity: 1;
+        visibility: visible;
+        transition: opacity 260ms ease-out, visibility 0s linear 260ms;
+      }
+
+      .about-intro.is-exiting{
+        opacity: 0;
+        visibility: hidden;
+      }
+
+      .about-intro[hidden]{
+        display: none !important;
+      }
+
+      .about-intro-stage{
+        width: clamp(150px, 19vw, 210px);
+        aspect-ratio: 1;
+        display: grid;
+        place-items: center;
+      }
+
+      .about-intro-atom{
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1;
+        display: grid;
+        place-items: center;
+        animation: intro-bob 1500ms ease-in-out infinite alternate;
+        will-change: transform;
+      }
+
+      .about-intro-nucleus{
+        position: relative;
+        z-index: 2;
+        width: 26%;
+        height: 26%;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 35%, #b491ff 0%, #8b5cf6 55%, #5b21b6 100%);
+        border: 2px solid rgba(227, 216, 255, 0.55);
+        box-shadow: 0 0 12px rgba(139, 92, 246, 0.34);
+      }
+
+      .about-intro-ring{
+        --duration: 1300ms;
+        position: absolute;
+        inset: 16%;
+        border-radius: 50%;
+        border: 2px solid rgba(209, 189, 255, 0.56);
+        animation: intro-orbit var(--duration) linear infinite;
+        will-change: transform;
+      }
+
+      .about-intro-ring::after{
+        content: "";
+        position: absolute;
+        top: -5px;
+        left: calc(50% - 5px);
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #f4eeff;
+        border: 1px solid rgba(103, 73, 173, 0.7);
+      }
+
+      .about-intro-ring.one{
+        inset: 14%;
+        --duration: 1200ms;
+      }
+
+      .about-intro-ring.two{
+        inset: 22%;
+        --duration: 1600ms;
+      }
+
+      .about-intro-ring.three{
+        inset: 30%;
+        --duration: 2100ms;
+      }
+
+      @keyframes intro-orbit{
+        from{
+          transform: rotate(0deg);
+        }
+        to{
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes intro-bob{
+        0%,
+        100%{
+          transform: translateY(0);
+        }
+        50%{
+          transform: translateY(-4px);
+        }
+      }
+
       .about-card::before{
         content: "";
         position: absolute;
@@ -163,10 +268,30 @@
           border-radius: 16px;
         }
       }
+
+      @media (prefers-reduced-motion: reduce){
+        .about-intro,
+        .about-intro-atom,
+        .about-intro-ring{
+          animation: none !important;
+          transition: none !important;
+        }
+      }
     </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
   <body class="about-page"> <!-- Body section with rendered content and controls. -->
+    <div id="about-intro" class="about-intro" aria-hidden="true" hidden>
+      <div class="about-intro-stage">
+        <div class="about-intro-atom">
+          <span class="about-intro-ring one"></span>
+          <span class="about-intro-ring two"></span>
+          <span class="about-intro-ring three"></span>
+          <span class="about-intro-nucleus"></span>
+        </div>
+      </div>
+    </div>
+
     {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
 
     <div class="container about-shell"> <!-- Primary content container for this page. -->
@@ -206,5 +331,45 @@
     </a>
 
     <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Scripts that enable interactive behavior on this page. -->
+    <script>
+      (function(){
+        var intro = document.getElementById("about-intro");
+        if (!intro) {
+          return;
+        }
+
+        var introSeenKey = "about-intro-seen";
+        var reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reducedMotion || sessionStorage.getItem(introSeenKey) === "1") {
+          return;
+        }
+
+        intro.hidden = false;
+        var finished = false;
+        var finishIntro = function () {
+          if (finished) {
+            return;
+          }
+          finished = true;
+          sessionStorage.setItem(introSeenKey, "1");
+          intro.classList.add("is-exiting");
+          window.setTimeout(function () {
+            intro.hidden = true;
+          }, 280);
+        };
+
+        var startIntroTimer = function () {
+          window.setTimeout(finishIntro, 1150);
+        };
+
+        if (document.readyState !== "loading") {
+          startIntroTimer();
+        } else {
+          document.addEventListener("DOMContentLoaded", startIntroTimer, { once: true });
+        }
+
+        intro.addEventListener("click", finishIntro, { once: true });
+      })();
+    </script>
   </body>
 </html>

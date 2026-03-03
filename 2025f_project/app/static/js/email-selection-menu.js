@@ -8,6 +8,7 @@
   const listHeader = document.querySelector(".list-header"); // Header fallback for toggle button placement.
   const sortForm = document.querySelector(".sort-form"); // Preferred location for the Select/Done button.
   let selectionMode = false; // True while click-to-select behavior is active.
+  let bulkRequestInFlight = false; // Prevent concurrent bulk submissions.
 
   const selectToggleButton = document.createElement("button"); // Button created in JS so templates stay clean.
   selectToggleButton.type = "button"; // Prevent form submission when clicked.
@@ -46,6 +47,27 @@
   }
 
   const selectedIds = new Set(); // Source of truth for currently selected email IDs.
+
+  const requestRefresh = () => { // Ask live list script to refresh rows in place.
+    if (typeof window.mailboxRefreshList === "function") {
+      window.mailboxRefreshList();
+      return;
+    }
+    window.dispatchEvent(new Event("mailbox:refresh-requested"));
+  };
+
+  const submitBulkAction = async () => { // Post bulk action without leaving the current page.
+    const method = (form.getAttribute("method") || "post").toUpperCase();
+    const response = await fetch(form.action, {
+      method,
+      body: new FormData(form),
+      headers: {
+        "X-Requested-With": "fetch",
+      },
+      credentials: "same-origin",
+    });
+    return response.ok;
+  };
 
   const parseBool = (value) => value === "1" || value === "true"; // Normalize bool-ish dataset strings.
   const listRows = () => // Read current rows each time because live polling can replace DOM nodes.
@@ -133,7 +155,7 @@
             movableRows.some((row) => row.dataset.emailType !== targetType); // Only show move if it changes type.
         }
       }
-      button.disabled = !enabled; // Disable invalid operations to prevent bad submissions.
+      button.disabled = bulkRequestInFlight || !enabled; // Disable invalid operations and while request is in flight.
       button.classList.toggle("is-hidden", !enabled); // Hide disabled actions to reduce menu clutter.
     });
 
@@ -201,8 +223,11 @@
   });
 
   actionButtons.forEach((button) => {
-    button.addEventListener("click", () => { // Submit selected action and IDs to backend.
+    button.addEventListener("click", async () => { // Submit selected action and IDs to backend.
       if (button.disabled || selectedIds.size === 0) { // Guard against invalid/empty submissions.
+        return;
+      }
+      if (bulkRequestInFlight) { // Ignore repeated clicks while a request is active.
         return;
       }
       actionInput.value = button.dataset.action || ""; // Backend action verb.
@@ -210,7 +235,23 @@
       if (!actionInput.value) {
         return;
       }
-      form.submit(); // Post bulk action with current hidden field values.
+      bulkRequestInFlight = true;
+      refreshMenu();
+      let requestSucceeded = false;
+      try {
+        requestSucceeded = await submitBulkAction();
+      } catch (error) {
+        requestSucceeded = false;
+      } finally {
+        bulkRequestInFlight = false;
+      }
+      if (requestSucceeded) {
+        selectedIds.clear();
+      }
+      refreshMenu();
+      if (requestSucceeded) {
+        requestRefresh();
+      }
     });
   });
 

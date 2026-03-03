@@ -1,6 +1,7 @@
 ﻿from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 from datetime import datetime
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -140,27 +141,44 @@ LIVE_LIST_CONFIGS = {
     "all": {
         "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
         "empty_message": "Your All Emails tab is empty.",
+        "search_empty_message": "No emails matched your search.",
     },
     "read-only": {
         "email_type": "read-only",
         "empty_message": "Your Read Only tab is empty.",
+        "search_empty_message": "No emails matched your search in Read only.",
     },
     "response-needed": {
         "email_type": "response-needed",
         "empty_message": "Your Response Needed tab is empty.",
+        "search_empty_message": "No emails matched your search in Response needed.",
     },
     "junk": {
         "email_type": "junk",
         "empty_message": "Your Junk tab is empty.",
+        "search_empty_message": "No emails matched your search in Junk.",
     },
     "junk-uncertain": {
         "email_type": "junk-uncertain",
         "empty_message": "You have no Junk Mail to confirm.",
+        "search_empty_message": "No emails matched your search in Junk Confirmation.",
     },
     "archived": {
         "archived_only": True,
         "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
         "empty_message": "Your Archive is empty.",
+        "search_empty_message": "No emails matched your search in Archive.",
+    },
+    "sent": {
+        "email_type": "sent",
+        "empty_message": "Your Sent tab is empty.",
+        "search_empty_message": "No emails matched your search in Sent.",
+    },
+    "draft": {
+        "email_type": "draft",
+        "empty_message": "Your Drafts tab is empty.",
+        "search_empty_message": "No emails matched your search in Drafts.",
+        "sync_drafts": True,
     },
 }
 
@@ -169,6 +187,7 @@ AI_TASK_INDEX = {}
 AI_TASK_LOCK = threading.Lock()
 AI_TASK_MAX_ITEMS = 200
 AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
+SEARCH_TOKEN_PATTERN = re.compile(r"[a-z0-9._%+\-]+")
 
 
 def _env_int(name, default):
@@ -859,13 +878,15 @@ def _set_message_read_state_async(external_id, read=True):
     ).start()
 
 
-def _fetch_live_list_emails(list_view):
+def _fetch_live_list_emails(list_view, search_query=""):
     """Fetch live list emails.
     """
     # Fetch live list emails from storage without mutating persistent state.
     config = LIVE_LIST_CONFIGS.get(list_view)
     if not config:
         return None, None
+    if config.get("sync_drafts"):
+        sync_drafts_from_gmail(max_results=40)
     email_type = config.get("email_type")
     exclude_types = config.get("exclude_types")
     archived_only = bool(config.get("archived_only"))
@@ -879,7 +900,47 @@ def _fetch_live_list_emails(list_view):
             exclude_types=exclude_types,
             archived_only=archived_only,
         )
-    return emails, config["empty_message"]
+    filtered_emails = _filter_emails_by_query(emails, search_query)
+    if (search_query or "").strip():
+        return filtered_emails, config.get("search_empty_message", "No emails matched your search.")
+    return filtered_emails, config["empty_message"]
+
+
+def _search_haystack(email):
+    """Return the normalized search text for an email row."""
+    # Keep search fields in one place so token indexing and substring matching stay aligned.
+    return " ".join(
+        [
+            email.get("title") or "",
+            email.get("sender") or "",
+            email.get("recipients") or "",
+            email.get("cc") or "",
+            email.get("body") or "",
+        ]
+    ).lower()
+
+
+def _search_tokens(text):
+    """Return normalized searchable tokens for index lookups."""
+    # Extract normalized terms so binary search can perform exact token membership checks.
+    return SEARCH_TOKEN_PATTERN.findall(str(text or "").lower())
+
+
+def _binary_search_token(tokens_sorted, token):
+    """Return the index of token in sorted token list, or -1 when missing."""
+    # Perform exact-match token lookup in O(log n).
+    left = 0
+    right = len(tokens_sorted) - 1
+    while left <= right:
+        middle = (left + right) // 2
+        mid_token = tokens_sorted[middle]
+        if mid_token == token:
+            return middle
+        if mid_token < token:
+            left = middle + 1
+        else:
+            right = middle - 1
+    return -1
 
 
 def _filter_emails_by_query(emails, query_text):
@@ -891,18 +952,35 @@ def _filter_emails_by_query(emails, query_text):
         return emails
 
     query_lc = query.lower()
+    haystacks = [_search_haystack(email) for email in emails]
+
+    # Build token -> row buckets, then resolve query terms via binary search.
+    token_to_rows = {}
+    for row_index, haystack in enumerate(haystacks):
+        for token in set(_search_tokens(haystack)):
+            token_to_rows.setdefault(token, []).append(row_index)
+
+    candidate_rows = None
+    query_tokens = _search_tokens(query_lc)
+    if query_tokens:
+        sorted_tokens = sorted(token_to_rows.keys())
+        for token in query_tokens:
+            token_index = _binary_search_token(sorted_tokens, token)
+            if token_index < 0:
+                return []
+            token_rows = set(token_to_rows[sorted_tokens[token_index]])
+            candidate_rows = token_rows if candidate_rows is None else candidate_rows & token_rows
+            if not candidate_rows:
+                return []
+
+    if candidate_rows is None:
+        candidate_rows = set(range(len(emails)))
+
     filtered = []
-    for email in emails:
-        haystack = " ".join(
-            [
-                email.get("title") or "",
-                email.get("sender") or "",
-                email.get("recipients") or "",
-                email.get("cc") or "",
-                email.get("body") or "",
-            ]
-        ).lower()
-        if query_lc in haystack:
+    for row_index, email in enumerate(emails):
+        if row_index not in candidate_rows:
+            continue
+        if query_lc in haystacks[row_index]:
             filtered.append(email)
     return filtered
 
@@ -1049,6 +1127,7 @@ def list_emails_api():
     global _LAST_DEEP_LIVE_SYNC_AT
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
+    search_query = (request.args.get("q") or "").strip()
     current_list_url = _safe_next_url(request.args.get("next"))
 
     # Keep mailbox views fresh while users stay on the page.
@@ -1061,7 +1140,7 @@ def list_emails_api():
         _LAST_DEEP_LIVE_SYNC_AT = now
     trigger_background_sync(force=True, max_results=sync_max_results)
 
-    emails, empty_message = _fetch_live_list_emails(list_view)
+    emails, empty_message = _fetch_live_list_emails(list_view, search_query=search_query)
     if emails is None:
         abort(400)
 
@@ -1253,7 +1332,6 @@ def sent():
     return _render_mailbox_page(
         "sent.html",
         email_type="sent",
-        include_fingerprint=False,
     )
 
 
@@ -1265,7 +1343,6 @@ def drafts():
     return _render_mailbox_page(
         "drafts.html",
         email_type="draft",
-        include_fingerprint=False,
         sync_drafts=True,
     )
 

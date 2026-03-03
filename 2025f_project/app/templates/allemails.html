@@ -17,12 +17,12 @@
   </head>
 
   <body class="mailbox-list-page"
-    {% if not search_query %}
     data-live-email-view="all"
     data-sort="{{ sort }}"
-    data-fingerprint="{{ list_fingerprint }}"
+    data-fingerprint="{{ list_fingerprint|default('') }}"
     data-poll-interval-ms="{{ live_poll_interval_ms }}"
-    {% endif %}
+    data-live-polling-enabled="{{ 1 if not search_query else 0 }}"
+    data-search-query="{{ search_query }}"
   > <!-- Body section with rendered content and controls. -->
     {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
     <div class="container-fluid app-main py-3 px-4"> <!-- Primary content container for this page. -->
@@ -67,8 +67,7 @@
     </a>
     <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Scripts that enable interactive behavior on this page. -->
     <script src="{{ url_for('static', filename='js/email-selection-menu.js') }}"></script>
-    {% if not search_query %}
     <script src="{{ url_for('static', filename='js/live-email-list.js') }}"></script>
-    {% endif %}
+    <script src="{{ url_for('static', filename='js/mailbox-actions.js') }}"></script>
   </body>
 </html>

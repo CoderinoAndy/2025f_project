@@ -16,7 +16,14 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <body class="mailbox-list-page"> <!-- Body section with rendered content and controls. -->
+  <body class="mailbox-list-page"
+    data-live-email-view="sent"
+    data-sort="{{ sort }}"
+    data-fingerprint="{{ list_fingerprint|default('') }}"
+    data-poll-interval-ms="{{ live_poll_interval_ms }}"
+    data-live-polling-enabled="0"
+    data-search-query="{{ search_query }}"
+  > <!-- Body section with rendered content and controls. -->
     {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
     <div class="container-fluid app-main py-3 px-4"> <!-- Primary content container for this page. -->
       <div class="list-header">
@@ -43,64 +50,12 @@
         </form>
       </div>
       <div class="list-shell">
-        {% if emails and emails|length > 0 %}
-          {% for email in emails %}
-            <div
-              class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative"
-              data-email-id="{{ email.id }}"
-              data-email-type="{{ email.type }}"
-              data-is-read="{{ 1 if email.is_read else 0 }}"
-              data-is-archived="{{ 1 if email.is_archived else 0 }}"
-              data-can-delete="1"
-              data-can-archive="0"
-              data-can-unarchive="0"
-              data-can-move="0"
-              data-can-mark-read="0"
-              data-can-mark-unread="0"
-            >
-              <div class="email-select-wrap">
-                <input type="checkbox" class="email-select-checkbox" value="{{ email.id }}" aria-label="Select email">
-              </div>
-              <a class="stretched-link" href="{{ url_for('main.email', id=email.id, next=current_list_url) }}"></a>
-
-              <div class="row g-0 align-items-center flex-grow-1">
-                <div class="col-6 wrap-ellipsis pe-2">
-                  <span class="mail-title">{{ email.title }}</span>
-                  {% if email.priority %}
-                    <span class="priority">{{ "★" * email.priority }}</span>
-                  {% endif %}
-                </div>
-
-                <div class="col-3 text-center muted wrap-ellipsis px-2">
-                  {{ email.type }}
-                </div>
-
-                <div class="col-3 text-end muted ps-2">
-                  {{ email.date|fmt_dt }}
-                </div>
-              </div>
-
-              <div class="row-actions">
-                <form method="post" action="{{ url_for('main.delete_email', id=email.id) }}" class="m-0">
-                  <input type="hidden" name="next" value="{{ current_list_url }}">
-                  <button type="submit" class="row-action-btn" title="Delete" aria-label="Delete">
-                    <i class="bi bi-trash"></i>
-                  </button>
-                </form>
-              </div>
-            </div>
-          {% endfor %}
+        {% if search_query %}
+        {% set empty_message = "No emails matched your search in Sent." %}
         {% else %}
-          <div class="email-row empty-row">
-            <div class="muted">
-              {% if search_query %}
-              No emails matched your search in Sent.
-              {% else %}
-              Your Sent tab is empty.
-              {% endif %}
-            </div>
-          </div>
+        {% set empty_message = "Your Sent tab is empty." %}
         {% endif %}
+        {% include "_live_email_rows.html" %}
       </div>
       {% include "_bulk_selection_menu.html" %}
     </div>
@@ -110,5 +65,7 @@
     </a>
     <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Scripts that enable interactive behavior on this page. -->
     <script src="{{ url_for('static', filename='js/email-selection-menu.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/live-email-list.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/mailbox-actions.js') }}"></script>
   </body>
 </html>

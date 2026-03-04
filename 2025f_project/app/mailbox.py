@@ -4,8 +4,8 @@ import threading
 import time
 from datetime import datetime
 
-from ..db import fetch_emails
-from ..gmail_service import sync_drafts_from_gmail
+from .db import fetch_emails
+from .gmail_service import sync_drafts_from_gmail
 
 HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
 VALID_SORTS = {

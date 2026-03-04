@@ -1,20 +1,24 @@
-<!doctype html> <!-- Page-level HTML scaffold for this view. -->
+<!doctype html> <!-- Standard document shell for this page. -->
 <html lang="en">
-  <head> <!-- Head section with metadata, title, and styles. -->
+  <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Compose</title>
 
+    <!-- Bootstrap base styles. -->
     <link
       href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}"
       rel="stylesheet"
     />
+    <!-- Bootstrap icon font. -->
     <link
       rel="stylesheet"
       href="{{ url_for('static', filename='vendor/bootstrap-icons/font/bootstrap-icons.min.css') }}"
     />
+    <!-- Shared mailbox theme. -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <style>
+      /* Color tokens for this page. */
       :root{
         --bg: #1f1f1f;
         --panel: #2d2d2d;
@@ -22,27 +26,35 @@
         --muted: #bdbdbd;
         --border: #4a4a4a;
       }
+      /* Page-level base colors. */
       body{ background: var(--bg); color: var(--text); }
+      /* Width cap for the compose panel. */
       .compose-shell{
         max-width: min(1200px, 96vw);
       }
+      /* Card container for the compose form. */
       .compose-card{
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 14px;
         padding: 18px;
       }
+      /* Input styling inside compose card. */
       .compose-card .form-control{
         background: rgba(255,255,255,0.04);
         color: var(--text);
         border: 1px solid var(--border);
       }
+      /* Focus state for compose inputs. */
       .compose-card .form-control:focus{
         background: rgba(255,255,255,0.06);
         color: var(--text);
       }
+      /* Placeholder contrast for dark background. */
       .compose-card .form-control::placeholder{ color: var(--muted); }
+      /* Small helper text style. */
       .hint{ color: var(--muted); font-size: 0.9rem; }
+      /* Back arrow link styling. */
       .backlink{
         color: var(--text);
         text-decoration: none;
@@ -50,11 +62,13 @@
         opacity: 0.9;
       }
       .backlink:hover{ opacity: 1; }
+      /* Attachment list layout. */
       .attachment-list{
         display: flex;
         flex-direction: column;
         gap: 8px;
       }
+      /* One attachment row (name + remove). */
       .attachment-item{
         display: flex;
         align-items: center;
@@ -65,17 +79,20 @@
         border-radius: 10px;
         background: rgba(255,255,255,0.03);
       }
+      /* Keep long attachment names from breaking layout. */
       .attachment-name{
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      /* Attachment size label style. */
       .attachment-meta{
         color: var(--muted);
         font-size: 0.85rem;
         margin-left: 6px;
       }
+      /* Remove button inside attachment row. */
       .attachment-remove{
         border: 0;
         background: transparent;
@@ -89,6 +106,7 @@
         color: var(--text);
         background: rgba(255,255,255,0.08);
       }
+      /* Keep native file input hidden; styled label triggers it. */
       .file-picker-input{
         position: absolute;
         left: -9999px;
@@ -100,6 +118,7 @@
       .file-picker-label{
         margin: 0;
       }
+      /* Mark server-loaded attachments differently from new local files. */
       .attachment-item.existing .attachment-name::after{
         content: " (existing)";
         color: var(--muted);
@@ -107,10 +126,10 @@
       }
     </style>
   </head>
-  <body> <!-- Body section with rendered content and controls. -->
-    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
+  <body> <!-- Visible page content and interactive controls. -->
+    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
 
-    <div class="container app-main compose-shell py-4"> <!-- Primary content container for this page. -->
+    <div class="container app-main compose-shell py-4"> <!-- Main page content area. -->
       <a id="compose-backlink" class="backlink d-inline-flex mb-3" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
@@ -120,33 +139,39 @@
         </div>
         <p class="hint mb-3">Leaving this page with unsent changes autosaves a draft.</p>
 
-        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data"> <!-- Main form users submit on this view. -->
+        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data"> <!-- Form used for this action. -->
+          {# Hidden IDs keep local and Gmail draft records linked across saves/sends. #}
           <input type="hidden" name="local_draft_id" value="{{ draft_email.id or '' }}">
           <input type="hidden" name="provider_draft_id" value="{{ draft_email.provider_draft_id or '' }}">
           <input type="hidden" name="thread_id" value="{{ draft_email.thread_id or '' }}">
           <input type="hidden" name="next" value="{{ next_url }}">
 
           <div class="row g-3">
+            {# Core recipient field. #}
             <div class="col-12">
               <label class="form-label" for="compose-to">To</label>
               <input id="compose-to" class="form-control" type="text" name="to" value="{{ draft_email.recipients or '' }}" placeholder="recipient@example.com" required>
             </div>
 
+            {# Optional copy recipients. #}
             <div class="col-12">
               <label class="form-label" for="compose-cc">Cc</label>
               <input id="compose-cc" class="form-control" type="text" name="cc" value="{{ draft_email.cc or '' }}" placeholder="optional">
             </div>
 
+            {# Message subject line. #}
             <div class="col-12">
               <label class="form-label" for="compose-subject">Subject</label>
               <input id="compose-subject" class="form-control" type="text" name="subject" value="{{ draft_email.title or '' }}" placeholder="Email subject">
             </div>
 
+            {# Main message body editor. #}
             <div class="col-12">
               <label class="form-label" for="compose-body">Message</label>
               <textarea id="compose-body" class="form-control" rows="12" name="body" placeholder="Write your email...">{{ draft_email.body or '' }}</textarea>
             </div>
 
+            {# Attachment picker + rendered attachment list. #}
             <div class="col-12">
               <label class="form-label" for="compose-attachments">Attachments</label>
               <input
@@ -167,6 +192,7 @@
             </div>
           </div>
 
+          {# Primary actions: send now or save as draft. #}
           <div class="d-flex gap-2 mt-4">
             <button type="submit" class="btn btn-primary">
               <i class="bi bi-send me-1"></i> Send
@@ -180,21 +206,30 @@
     </div>
 
     <script>
+      // Compose page controller: attachments, dirty tracking, and autosave on leave.
       (() => {
         const form = document.getElementById("compose-form");
         if (!form) {
           return;
         }
 
+        // Tracks whether the user changed anything since last save/send.
         let dirty = false;
+        // Prevent autosave while an intentional submit is in progress.
         let isSubmitting = false;
+        // Autosave endpoint used by sendBeacon during navigation.
         const autosaveUrl = "{{ url_for('main.compose_autosave') }}";
+        // Back link element (uses history when possible).
         const composeBackLink = document.getElementById("compose-backlink");
+        // Hidden file input and visible attachment list container.
         const attachmentInput = document.getElementById("compose-attachments");
         const attachmentList = document.getElementById("attachment-list");
+        // Files added in this browser session.
         let selectedAttachments = [];
+        // Files already attached on the saved draft.
         let existingAttachments = [];
 
+        // Load server-provided draft attachments from data-existing-attachments.
         if (attachmentList) {
           try {
             existingAttachments = JSON.parse(attachmentList.dataset.existingAttachments || "[]");
@@ -203,9 +238,11 @@
           }
         }
 
+        // Stable fingerprint so we can dedupe files selected multiple times.
         const fileKey = (file) =>
           [file.name || "", file.size || 0, file.lastModified || 0].join("::");
 
+        // Human-readable file sizes for attachment labels.
         const formatBytes = (bytes) => {
           const value = Number(bytes) || 0;
           if (value < 1024) {
@@ -217,6 +254,7 @@
           return `${(value / (1024 * 1024)).toFixed(1)} MB`;
         };
 
+        // Push selectedAttachments back into the native file input.
         const syncAttachmentInput = () => {
           if (!attachmentInput || typeof DataTransfer === "undefined") {
             return;
@@ -229,12 +267,14 @@
           attachmentInput.files = transfer.files;
         };
 
+        // Rebuild the visual attachment list from existing + selected arrays.
         const renderAttachmentList = () => {
           if (!attachmentList) {
             return;
           }
           attachmentList.innerHTML = "";
 
+          // Render server-side attachments first.
           existingAttachments.forEach((file) => {
             const item = document.createElement("div");
             item.className = "attachment-item existing";
@@ -253,6 +293,7 @@
             attachmentList.appendChild(item);
           });
 
+          // Render newly selected local files with remove controls.
           selectedAttachments.forEach((file, index) => {
             const item = document.createElement("div");
             item.className = "attachment-item";
@@ -272,6 +313,7 @@
             removeButton.setAttribute("aria-label", `Remove ${file.name || "attachment"}`);
             removeButton.innerHTML = '<i class="bi bi-x-lg"></i>';
             removeButton.addEventListener("click", () => {
+              // Remove file from state and re-sync hidden input.
               selectedAttachments = selectedAttachments.filter((_, fileIndex) => fileIndex !== index);
               syncAttachmentInput();
               renderAttachmentList();
@@ -284,6 +326,7 @@
           });
         };
 
+        // Any typing in these controls marks the draft as dirty.
         const watchSelectors = ["input[type='text']", "textarea"];
         watchSelectors.forEach((selector) => {
           form.querySelectorAll(selector).forEach((element) => {
@@ -293,6 +336,7 @@
           });
         });
 
+        // Add picked files into local state, dedupe, then rerender.
         if (attachmentInput) {
           attachmentInput.addEventListener("change", () => {
             const incomingFiles = Array.from(attachmentInput.files || []);
@@ -311,8 +355,10 @@
           });
         }
 
+        // Initial paint for existing attachments on page load.
         renderAttachmentList();
 
+        // Prefer browser history when available for a natural back experience.
         if (composeBackLink) {
           composeBackLink.addEventListener("click", (event) => {
             if (window.history.length > 1) {
@@ -322,15 +368,18 @@
           });
         }
 
+        // Mark that the current navigation came from form submit.
         form.addEventListener("submit", () => {
           isSubmitting = true;
         });
 
+        // Autosave draft when leaving the page with unsent changes.
         window.addEventListener("beforeunload", () => {
           if (isSubmitting || !dirty) {
             return;
           }
 
+          // Snapshot latest form values right before navigation.
           const toField = form.querySelector("input[name='to']");
           const ccField = form.querySelector("input[name='cc']");
           const subjectField = form.querySelector("input[name='subject']");
@@ -347,12 +396,14 @@
           const providerDraftValue = (providerDraftField?.value || "").trim();
           const threadValue = (threadField?.value || "").trim();
 
+          // Skip autosave for fully empty compose state.
           if (!toValue && !ccValue && !subjectValue && !bodyValue) {
             return;
           }
 
           // sendBeacon lets autosave finish during navigation without blocking the browser.
           const payload = new URLSearchParams();
+          // Keep payload keys aligned with compose_autosave route expectations.
           payload.set("to", toValue);
           payload.set("cc", ccValue);
           payload.set("subject", subjectValue);

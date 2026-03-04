@@ -1,6 +1,6 @@
-<!doctype html> <!-- Page-level HTML scaffold for this view. -->
+<!doctype html> <!-- Standard document shell for this page. -->
 <html lang="en">
-  <head> <!-- Head section with metadata, title, and styles. -->
+  <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Email</title>
@@ -14,7 +14,9 @@
       href="{{ url_for('static', filename='vendor/bootstrap-icons/font/bootstrap-icons.min.css') }}"
     />
 
+    <!-- Page-specific styling for the email detail view. -->
     <style>
+      /* Color variables used across this page. */
       :root{
         --bg: #1f1f1f;
         --panel: #2d2d2d;
@@ -32,6 +34,7 @@
       }
       .backlink:hover{ opacity: 1; }
 
+      /* Top metadata card (author/date/type/etc.). */
       .meta-wrap{
         background: var(--panel);
         border-radius: 12px;
@@ -45,6 +48,7 @@
       }
       .meta-sub{ color: var(--muted); margin-top: 4px; }
 
+      /* Shared card shell for message, summary, and thread panels. */
       .panel-card{
         background: var(--panel);
         border-radius: 12px;
@@ -52,6 +56,7 @@
         border: 1px solid #3f3f3f;
       }
 
+      /* Card header row with title and optional actions. */
       .panel-header{
         display: flex;
         align-items: center;
@@ -64,11 +69,13 @@
         font-size: 20px;
       }
 
+      /* Plain-text email body rendering. */
       .message-content{
         white-space: pre-wrap;
         color: var(--text);
       }
 
+      /* Iframe container used for HTML email content. */
       .message-html-frame{
         width: 100%;
         min-height: 320px;
@@ -77,6 +84,7 @@
         background: #ffffff;
       }
 
+      /* Summary text styling. */
       .summary-text{
       white-space: pre-line;
       color: var(--muted);
@@ -84,6 +92,7 @@
       text-align: left;
       margin: 0;
       }
+      /* Loading row shown while AI analysis runs. */
       .summary-loading{
         display: flex;
         align-items: center;
@@ -96,6 +105,7 @@
       }
 
       /* 3-dot menu button */
+      /* Three-dot actions button in message header. */
       .dots-btn{
         border: 0;
         background: transparent;
@@ -119,6 +129,7 @@
         color: var(--text);
       }
 
+      /* Reply composer card under the message body. */
       .reply-panel{
         background: var(--panel-2);
         border-radius: 12px;
@@ -135,6 +146,7 @@
         margin-bottom: 10px;
       }
 
+      /* Reply field controls. */
       .reply-panel .form-control{
         background: rgba(255,255,255,0.05) !important;
         color: var(--text) !important;
@@ -164,6 +176,7 @@
         margin-bottom: 4px;
       }
 
+      /* Thread message list on the right panel. */
       .thread-list{
         display: flex;
         flex-direction: column;
@@ -194,6 +207,7 @@
         font-size: 0.9rem;
       }
 
+      /* Reply action row (draft + send buttons). */
       .actions{
         display: flex;
         justify-content: flex-end;
@@ -223,6 +237,7 @@
       .file-picker-label{
         margin: 0;
       }
+      /* Attachment list shown under the reply editor. */
       .attachment-list{
         display: flex;
         flex-direction: column;
@@ -262,6 +277,7 @@
         color: var(--text);
         background: rgba(255,255,255,0.08);
       }
+      /* Inline status text for draft generation. */
       .draft-loading-note{
         color: var(--muted);
         font-size: 0.9rem;
@@ -271,17 +287,21 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <body> <!-- Body section with rendered content and controls. -->
-    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
+  <body> <!-- Visible page content and interactive controls. -->
+    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
 
-    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);"> <!-- Primary content container for this page. -->
+    <!-- Wide content container for message + side panels. -->
+    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);"> <!-- Main page content area. -->
       <a class="backlink d-inline-flex mb-2" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
       <!-- Expect: email = object/dict with title, sender, date, type, body, summary, draft -->
+      <!-- Two-column layout: message/reply on left, summary/thread on right. -->
       <div class="row g-3 mt-3 align-items-start">
         <!-- Left column: Message + Reply -->
+        <!-- Left column: message metadata, body, and reply tools. -->
         <div class="col-12 col-md-9">
+        <!-- Message metadata summary block. -->
         <div class="meta-wrap mb-3">
           <div class="row align-items-start g-3">
             <div class="col-12 col-md-6">
@@ -332,6 +352,8 @@
           </div>
         </div>
           <!-- Message panel -->
+          <!-- Message body card. -->
+          <!-- AI summary card. -->
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">{{ email.title }}</div>
@@ -358,7 +380,7 @@
                 ] %}
                   {% if t != current_type %}
                     <li>
-                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0"> <!-- Main form users submit on this view. -->
+                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0"> <!-- Form used for this action. -->
                         <input type="hidden" name="new_type" value="{{ t }}" />
                         <input type="hidden" name="next" value="{{ next_url }}" />
                         <button class="dropdown-item" type="submit">{{ label }}</button>
@@ -405,6 +427,7 @@
           </div>
 
           <!-- Reply panel (now contained in left column) -->
+          <!-- Reply composer section. -->
           <div class="reply-panel">
             <div class="reply-label">Reply</div>
             <div class="reply-hint">
@@ -490,7 +513,10 @@
         </div>
 
         <!-- Right column: Summary -->
+        <!-- Right column: AI summary and thread navigation. -->
         <div class="col-12 col-md-3">
+          <!-- Message body card. -->
+          <!-- AI summary card. -->
           <div class="panel-card">
             <div class="panel-header">
               <div class="panel-title">Summary</div>
@@ -524,6 +550,7 @@
             </div>
           </div>
 
+          <!-- Thread list card. -->
           <div class="panel-card mt-3">
             <div class="panel-header">
               <div class="panel-title">Thread</div>
@@ -550,6 +577,7 @@
       </div>
     </div>
 
+    <!-- Server-rendered config consumed by the AI interaction script below. -->
     <script id="email-page-config" type="application/json">
       {{
         {
@@ -564,8 +592,13 @@
       }}
     </script>
     <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
+    <!-- Client-side behavior for HTML body rendering, attachments, and AI actions. -->
     <script>
+      // Module 1: render HTML email content safely inside an iframe.
+      // Module 2: manage reply attachment selection and removal.
+      // Module 3: trigger/poll AI tasks for summary and draft generation.
       (() => {
+        // DOM nodes required to mount the HTML email body.
         const frame = document.getElementById("message-html-frame");
         const source = document.getElementById("message-html-source");
         if (!frame || !source) {
@@ -580,6 +613,7 @@
         }
 
         // Render email HTML inside an isolated iframe so message CSS cannot break app layout.
+        // Wrap incoming HTML with a minimal document and safe defaults.
         const wrappedHtml = `
 <!doctype html>
 <html lang="en">
@@ -587,6 +621,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <base target="_blank">
+    <!-- Page-specific styling for the email detail view. -->
     <style>
       html, body { margin: 0; padding: 0; }
       body { padding: 12px; color: #111; background: #fff; font: 14px/1.45 Arial, sans-serif; }
@@ -598,6 +633,7 @@
   <body>${rawHtml}</body>
 </html>`.trim();
 
+        // Keep iframe height in sync with rendered content height.
         const resizeFrame = () => {
           try {
             const doc = frame.contentDocument;
@@ -622,7 +658,11 @@
         frame.srcdoc = wrappedHtml;
       })();
 
+      // Module 1: render HTML email content safely inside an iframe.
+      // Module 2: manage reply attachment selection and removal.
+      // Module 3: trigger/poll AI tasks for summary and draft generation.
       (() => {
+        // Attachment input + list container in the reply form.
         const attachmentInput = document.getElementById("reply-attachments");
         const attachmentList = document.getElementById("reply-attachment-list");
         if (!attachmentInput || !attachmentList) {
@@ -631,9 +671,11 @@
 
         let selectedAttachments = [];
 
+        // Stable per-file key for dedupe checks.
         const fileKey = (file) =>
           [file.name || "", file.size || 0, file.lastModified || 0].join("::");
 
+        // Human-readable attachment sizes.
         const formatBytes = (bytes) => {
           const value = Number(bytes) || 0;
           if (value < 1024) {
@@ -645,6 +687,7 @@
           return `${(value / (1024 * 1024)).toFixed(1)} MB`;
         };
 
+        // Rebuild FileList from our in-memory selectedAttachments array.
         const syncAttachmentInput = () => {
           if (typeof DataTransfer === "undefined") {
             return;
@@ -657,6 +700,7 @@
           attachmentInput.files = transfer.files;
         };
 
+        // Repaint the visible attachment list.
         const renderAttachmentList = () => {
           attachmentList.innerHTML = "";
           selectedAttachments.forEach((file, index) => {
@@ -703,7 +747,11 @@
         });
       })();
 
+      // Module 1: render HTML email content safely inside an iframe.
+      // Module 2: manage reply attachment selection and removal.
+      // Module 3: trigger/poll AI tasks for summary and draft generation.
       (() => {
+        // Load API URLs and initial state from server JSON.
         const pageConfigNode = document.getElementById("email-page-config");
         if (!pageConfigNode) {
           return;
@@ -743,8 +791,10 @@
         let drafting = false;
         let draftLoadingBaseValue = null;
 
+        // Small delay helper used by polling and typing animations.
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+        // Toggle summary spinner and message text.
         const setSummaryLoading = (isLoading, label = "Analyzing email...") => {
           if (!summaryLoading) {
             return;
@@ -756,6 +806,7 @@
           summaryLoading.classList.toggle("hidden", !isLoading);
         };
 
+        // Toggle temporary draft-loading text inside the textarea.
         const setDraftLoading = (isLoading, label = "Draft loading...") => {
           if (!replyText) {
             return;
@@ -787,6 +838,7 @@
           }
         };
 
+        // Disable draft/send actions while async work is in flight.
         const setActionButtonsBusy = (isBusy) => {
           if (draftButton) {
             draftButton.disabled = isBusy;
@@ -796,6 +848,7 @@
           }
         };
 
+        // Animate text output for smoother UI updates.
         const typeIntoTarget = async (target, text, isTextarea = false) => {
           if (!target) {
             return;
@@ -822,6 +875,7 @@
           }
         };
 
+        // Fetch wrapper with shared headers and error handling.
         const requestJson = async (url, options = {}) => {
           const response = await fetch(url, {
             credentials: "same-origin",
@@ -837,6 +891,7 @@
           return response.json();
         };
 
+        // Poll task status until completed/error/timeout.
         const pollTask = async (taskId, maxWaitMs = 90000) => {
           const startedAt = Date.now();
           // Poll server-side task state until completion/error to drive async UI updates.
@@ -853,6 +908,7 @@
           throw new Error("AI task timed out.");
         };
 
+        // Start or resume analyze task, then update summary panel.
         const startAnalyze = async (taskIdHint = "") => {
           if (analyzing) {
             return;
@@ -901,6 +957,7 @@
           }
         };
 
+        // Start draft task, then write generated text into reply box.
         const startDraft = async () => {
           if (drafting || !replyText) {
             return;
@@ -945,6 +1002,7 @@
           });
         }
 
+        // Type out server-provided summary on first load.
         const animateInitialSummary = async () => {
           if (!summaryText || !initialSummaryText) {
             return;

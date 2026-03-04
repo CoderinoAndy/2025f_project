@@ -1,3 +1,4 @@
+// Handles row selection mode and bulk actions on mailbox list pages.
 (() => { // Manage selection mode and bulk actions for mailbox rows.
   const shell = document.querySelector(".list-shell"); // List container that receives live row updates.
   const sideMenu = document.querySelector("[data-bulk-side-menu]"); // Floating menu for bulk actions.
@@ -46,7 +47,7 @@
     return;
   }
 
-  const selectedIds = new Set(); // Source of truth for currently selected email IDs.
+  const selectedIds = new Set(); // Single source of truth for selected email IDs.
 
   const requestRefresh = () => { // Ask live list script to refresh rows in place.
     if (typeof window.mailboxRefreshList === "function") {
@@ -199,7 +200,7 @@
     if (event.target.closest("button, a, form, .dropdown-menu, .row-actions")) { // Don't hijack interactive controls.
       return;
     }
-    const row = event.target.closest(".email-row[data-email-id]"); // Toggle the row clicked by the user.
+    const row = event.target.closest(".email-row[data-email-id]"); // Toggle whichever row the user clicked.
     if (!row) {
       return;
     }
@@ -271,9 +272,9 @@
     setSelectionMode(!selectionMode); // Toggle between Select and Done states.
   });
 
-  let refreshScheduled = false; // Debounce flag for mutation-driven refreshes.
+  let refreshScheduled = false; // Debounce flag for refreshes triggered by DOM mutations.
   const scheduleRefresh = () => {
-    if (refreshScheduled) { // Coalesce multiple mutation events into one frame refresh.
+    if (refreshScheduled) { // Combine multiple mutation events into one refresh.
       return;
     }
     refreshScheduled = true;

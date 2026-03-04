@@ -1,4 +1,5 @@
-﻿PRAGMA foreign_keys = ON; -- Ensure foreign key constraints are enforced.
+-- Local mailbox schema plus starter seed data used on first run.
+PRAGMA foreign_keys = ON; -- Ensure foreign key constraints are enforced.
 
 -- Normalized email message table (one row per message)
 CREATE TABLE IF NOT EXISTS email_messages ( -- Primary message table (one row per email or draft).

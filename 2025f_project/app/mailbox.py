@@ -7,6 +7,7 @@ from datetime import datetime
 from .db import fetch_emails
 from .gmail_service import sync_drafts_from_gmail
 
+# Helpers for live mailbox tabs: filtering, sorting, and sync throttling.
 HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
 VALID_SORTS = {
     "date_desc",

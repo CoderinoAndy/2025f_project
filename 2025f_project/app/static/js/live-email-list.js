@@ -1,3 +1,4 @@
+// Polls live mailbox rows and swaps in fresh server-rendered HTML.
 (() => { // Keep mailbox rows synchronized with server updates.
   const pageRoot = document.body; // Page root stores list metadata in data-* attributes.
   const shell = document.querySelector(".list-shell"); // Row container to replace on each refresh.
@@ -52,7 +53,7 @@
         return;
       }
       const payload = await response.json();
-      if (!payload || typeof payload.html !== "string") { // Guard against malformed responses.
+      if (!payload || typeof payload.html !== "string") { // Ignore malformed responses.
         return;
       }
       if (payload.fingerprint && payload.fingerprint === lastFingerprint) { // Skip DOM write when content is unchanged.

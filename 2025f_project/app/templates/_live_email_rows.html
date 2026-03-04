@@ -27,7 +27,7 @@
         <div class="col-6 wrap-ellipsis pe-2">
           <span class="mail-title">{{ email.title }}</span>
           {% if email.priority %}
-            <span class="priority">{{ "★" * email.priority }}</span>
+            <span class="priority">{{ "â˜…" * email.priority }}</span>
           {% endif %}
         </div>
 
@@ -43,7 +43,7 @@
       <div class="row-actions">
         {% if email.type not in ['sent', 'draft'] %}
           {% if email.is_archived %}
-            <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Main form users submit on this view. -->
+            <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Form used for this action. -->
               <input type="hidden" name="next" value="{{ current_list_url }}">
               <button type="submit" class="row-action-btn" title="Unarchive" aria-label="Unarchive">
                 <i class="bi bi-box-arrow-up"></i>

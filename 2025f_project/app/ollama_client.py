@@ -1,4 +1,4 @@
-﻿import ipaddress
+import ipaddress
 import json
 import os
 import re
@@ -15,7 +15,7 @@ from .debug_logger import log_event
 
 # This module now contains both model-calling code and async AI task orchestration.
 OLLAMA_API_URL_DEFAULT = "http://localhost:11434/api/chat"
-OLLAMA_MODEL_DEFAULT = "qwen2.5:7b"
+OLLAMA_MODEL_DEFAULT = "qwen2.5:14b-instruct"
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 12
 SUMMARY_MIN_CHARS_DEFAULT = 200
 VALID_CATEGORIES = {"urgent", "informational", "junk"}
@@ -74,14 +74,38 @@ SUMMARY_NOISE_MARKERS = (
     "open in browser",
     "read online",
     "manage preferences",
+    "manage email preferences",
+    "email preferences",
+    "manage subscription",
     "unsubscribe",
     "privacy policy",
+    "privacy notice",
+    "cookie notice",
     "terms of service",
     "terms of use",
+    "subscriber id",
+    "subscription id",
     "all rights reserved",
     "you are receiving this email",
     "this email was sent to",
     "add us to your address book",
+)
+FOOTER_NOISE_REGEX_PATTERNS = (
+    r"\bmanage\s+(?:email\s+)?preferences\b",
+    r"\bemail\s+preferences\b",
+    r"\bmanage\s+subscription\b",
+    r"\bunsubscribe\b",
+    r"\bprivacy\s+(?:policy|notice)\b",
+    r"\bcookie\s+notice\b",
+    r"\bterms\s+of\s+(?:service|use)\b",
+    r"\bview\s+in\s+browser\b",
+    r"\bopen\s+in\s+browser\b",
+    r"\bread\s+online\b",
+    r"\byou\s+are\s+receiving\s+this\s+email\b",
+    r"\bthis\s+email\s+was\s+sent\s+to\b",
+    r"\badd\s+us\s+to\s+your\s+address\s+book\b",
+    r"\ball\s+rights\s+reserved\b",
+    r"\b(?:subscriber|subscription|member|customer)\s*id\s*[:#]?\s*[a-z0-9\-]{5,}\b",
 )
 DRAFT_FAILURE_MARKERS = (
     "as an ai",
@@ -107,19 +131,22 @@ REQUEST_SENTENCE_MARKERS = (
     "asap",
 )
 EMAIL_ADDRESS_PATTERN = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})")
+SUMMARY_MAX_CHARS = 720
+DRAFT_MIN_CHARS = 20
+DRAFT_MIN_ACTIONABLE_CHARS = 60
 
 
 def _utc_now():
     """Utc now.
     """
-    # Internal helper for utc now used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _action_log_path():
     """Action log path.
     """
-    # Write action log path details in the app's structured log format for debugging and traceability.
+    # Write a structured log entry so this step is easy to trace later.
     configured = (os.getenv("AI_ACTION_LOG_PATH") or "").strip()
     if configured:
         return Path(configured)
@@ -129,7 +156,7 @@ def _action_log_path():
 def _one_line(value):
     """One line.
     """
-    # Internal helper for one line used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     return text[:500]
 
@@ -168,14 +195,14 @@ def _log_action(task, status, email_id=None, detail=""):
 def log_ai_event(task, status, email_id=None, detail=""):
     """Log AI event.
     """
-    # Write log ai event details in the app's structured log format for debugging and traceability.
+    # Write a structured log entry so this step is easy to trace later.
     _log_action(task=task, status=status, email_id=email_id, detail=detail)
 
 
 def _api_url():
     """Api url.
     """
-    # Resolve api url using configuration defaults and safe fallback behavior.
+    # Resolve api url with configured values and a safe fallback.
     value = (os.getenv("OLLAMA_API_URL") or OLLAMA_API_URL_DEFAULT).strip()
     return value or OLLAMA_API_URL_DEFAULT
 
@@ -183,7 +210,7 @@ def _api_url():
 def _model_name():
     """Model name.
     """
-    # Internal helper for model name used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     value = (os.getenv("OLLAMA_MODEL") or OLLAMA_MODEL_DEFAULT).strip()
     return value or OLLAMA_MODEL_DEFAULT
 
@@ -191,7 +218,7 @@ def _model_name():
 def _timeout_seconds():
     """Timeout seconds.
     """
-    # Internal helper for timeout seconds used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     raw = (os.getenv("OLLAMA_TIMEOUT_SECONDS") or "").strip()
     try:
         parsed = float(raw) if raw else float(OLLAMA_TIMEOUT_SECONDS_DEFAULT)
@@ -203,7 +230,7 @@ def _timeout_seconds():
 def _summary_min_chars():
     """Summary min chars.
     """
-    # Internal helper for summary min chars used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     raw = (os.getenv("OLLAMA_SUMMARY_MIN_CHARS") or "").strip()
     try:
         parsed = int(raw) if raw else SUMMARY_MIN_CHARS_DEFAULT
@@ -215,7 +242,7 @@ def _summary_min_chars():
 def _is_loopback_host(hostname):
     """Return whether loopback host.
     """
-    # Internal helper for is loopback host used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     if not hostname:
         return False
     lowered = hostname.lower()
@@ -230,7 +257,7 @@ def _is_loopback_host(hostname):
 def _endpoint_allowed():
     """Endpoint allowed.
     """
-    # Internal helper for endpoint allowed used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     parsed = urlparse(_api_url())
     if parsed.scheme != "http":
         return False
@@ -240,7 +267,7 @@ def _endpoint_allowed():
 def ai_enabled():
     """Ai enabled.
     """
-    # Internal helper for ai enabled used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     return _endpoint_allowed()
 
 
@@ -255,7 +282,7 @@ def should_summarize_email(email_data):
 def classification_to_email_type(classification):
     """Classification recipient email type.
     """
-    # Normalize classification to email type into constrained labels used by mailbox triage logic.
+    # Normalize to the fixed labels used by mailbox triage.
     if not isinstance(classification, dict):
         return "read-only"
     explicit_type = str(classification.get("email_type") or "").strip().lower()
@@ -279,14 +306,129 @@ def classification_to_email_type(classification):
 def _compact_text(value):
     """Compact text.
     """
-    # Internal helper for compact text used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     return " ".join(str(value or "").split()).strip()
+
+
+def _ensure_sentence_ending(text):
+    """Return compacted text with terminal punctuation."""
+    # Keep generated copy readable by avoiding duplicate punctuation patterns.
+    value = _compact_text(text)
+    if not value:
+        return ""
+    if value[-1] in ".!?":
+        return value
+    return f"{value}."
+
+
+def _strip_footer_noise_text(text):
+    """Remove common newsletter/legal footer phrases from text."""
+    # Keep prompts and summaries focused on actionable content rather than boilerplate.
+    cleaned = str(text or "")
+    if not cleaned:
+        return ""
+    for pattern in FOOTER_NOISE_REGEX_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"(?:\(\s*\[link\]\s*\)\s*){2,}",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"(?:\(?\s*\[link\]\s*\)?\s*[|,;/:-]?\s*){2,}",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\[\s*link\s*\](?:\s*[|,;])?\s*\[\s*link\s*\]",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s*[|ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢]+\s*", " ", cleaned)
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
+    cleaned = re.sub(r"\?{2,}", "?", cleaned)
+    cleaned = re.sub(r"!{2,}", "!", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = cleaned.strip(" -|,;:")
+    if _looks_source_signature_sentence(cleaned):
+        return ""
+    return cleaned
+
+
+def _looks_footer_noise_fragment(text):
+    """Return True when text appears to be newsletter/footer boilerplate."""
+    # Keep this rule in one place so behavior stays consistent.
+    normalized = _compact_text(text).lower()
+    if not normalized:
+        return False
+    for pattern in FOOTER_NOISE_REGEX_PATTERNS:
+        if re.search(pattern, normalized, flags=re.IGNORECASE):
+            return True
+    if normalized.count("[link]") >= 2 and len(_text_tokens(normalized)) <= 14:
+        return True
+    return False
+
+
+def _looks_source_signature_sentence(text):
+    """Return True when text looks like a publisher/source signature line."""
+    # Keep summaries focused by dropping short masthead lines (e.g., "<Publisher> Online").
+    normalized = _compact_text(text)
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if "[link]" in lowered:
+        return False
+    if any(marker in lowered for marker in REQUEST_SENTENCE_MARKERS):
+        return False
+
+    tokens = _text_tokens(lowered)
+    if len(tokens) < 3 or len(tokens) > 10:
+        return False
+    common_verbs = {
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "must",
+        "need",
+        "needs",
+        "join",
+        "reply",
+        "confirm",
+        "review",
+        "update",
+    }
+    has_likely_verb = any(
+        token in common_verbs or token.endswith("ed") or token.endswith("ing")
+        for token in tokens
+    )
+    if has_likely_verb:
+        return False
+    return tokens[-1] in {"online", "newsletter", "digest"}
 
 
 def _text_tokens(value):
     """Text tokens.
     """
-    # Internal helper for text tokens used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     text = str(value or "").lower()
     return [token for token in re.findall(r"[a-z0-9']+", text) if len(token) > 2]
 
@@ -294,7 +436,7 @@ def _text_tokens(value):
 def _token_overlap_ratio(left, right):
     """Token overlap ratio.
     """
-    # Internal helper for token overlap ratio used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     left_tokens = set(_text_tokens(left))
     right_tokens = set(_text_tokens(right))
     if not left_tokens or not right_tokens:
@@ -305,9 +447,13 @@ def _token_overlap_ratio(left, right):
 def _is_noise_fragment(text):
     """Return whether noise fragment.
     """
-    # Internal helper for is noise fragment used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     normalized = _compact_text(text).lower()
     if not normalized or normalized == "[link]":
+        return True
+    if _looks_footer_noise_fragment(normalized):
+        return True
+    if _looks_source_signature_sentence(normalized):
         return True
     return any(marker in normalized for marker in SUMMARY_NOISE_MARKERS)
 
@@ -315,7 +461,7 @@ def _is_noise_fragment(text):
 def _is_near_subject_copy(candidate_text, title_text):
     """Return whether near subject copy.
     """
-    # Internal helper for is near subject copy used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     candidate = _compact_text(candidate_text)
     title = _compact_text(title_text)
     if not candidate or not title or title.lower() == "(no subject)":
@@ -356,18 +502,25 @@ def _strip_reply_chain(text):
 def _clean_body_for_prompt(body, max_chars=8000):
     """Clean body for prompt.
     """
-    # Sanitize clean body for prompt so downstream code receives safe, normalized text values.
+    # Clean this value so the rest of the code gets predictable input.
     text = str(body or "").replace("\r\n", "\n").replace("\r", "\n")
     text = _strip_reply_chain(text)
     cleaned_lines = []
     for line in text.split("\n"):
         trimmed = line.strip()
         if not trimmed:
+            # Keep paragraph boundaries for downstream sentence splitting.
             cleaned_lines.append("")
             continue
         if trimmed.startswith(">"):
+            # Ignore quoted history from earlier messages in a thread.
             continue
         normalized_line = re.sub(r"https?://\S+", "[link]", trimmed)
+        normalized_line = _strip_footer_noise_text(normalized_line)
+        normalized_line = _compact_text(normalized_line)
+        if not normalized_line:
+            # Drop lines that collapse to empty after noise stripping.
+            continue
         cleaned_lines.append(normalized_line)
 
     cleaned = "\n".join(cleaned_lines)
@@ -379,7 +532,7 @@ def _clean_body_for_prompt(body, max_chars=8000):
 def _extract_key_sentences(body_text, max_sentences=8):
     """Extract key sentences.
     """
-    # Extract key sentences from provider/user payloads while handling missing fields safely.
+    # Read this field from payloads that may be missing keys.
     cleaned_body = _clean_body_for_prompt(body_text or "", max_chars=5000)
     if not cleaned_body:
         return []
@@ -392,11 +545,13 @@ def _extract_key_sentences(body_text, max_sentences=8):
 
     parts = re.split(r"(?<=[.!?])\s+", flattened)
     if len(parts) <= 1:
+        # Fallback splitter for emails with weak punctuation structure.
         parts = re.split(r";\s+|\.\s+", flattened)
 
     selected = []
     for part in parts:
         sentence = _compact_text(part).strip(" -:")
+        sentence = _strip_footer_noise_text(sentence)
         if len(sentence) < 24:
             continue
         for marker in SUMMARY_NOISE_MARKERS:
@@ -406,10 +561,14 @@ def _extract_key_sentences(body_text, max_sentences=8):
             continue
         lowered = sentence.lower()
         if lowered.startswith(("from:", "to:", "cc:", "bcc:", "sent:", "date:", "subject:")):
+            # Skip copied header metadata that is not semantic body content.
+            continue
+        if _looks_source_signature_sentence(sentence):
             continue
         if _is_noise_fragment(sentence):
             continue
         if any(_token_overlap_ratio(sentence, existing) > 0.94 for existing in selected):
+            # Avoid retaining near-duplicate lines in extracted candidates.
             continue
         selected.append(sentence)
         if len(selected) >= max_sentences:
@@ -428,6 +587,7 @@ def _body_for_context(email_data, max_chars=8000):
         text = _clean_body_for_prompt(email_data.get("body") or "", max_chars=max_chars)
         for marker in SUMMARY_NOISE_MARKERS:
             text = re.sub(re.escape(marker), " ", text, flags=re.IGNORECASE)
+    text = _strip_footer_noise_text(text)
     text = _compact_text(text)
     if len(text) > max_chars:
         return f"{text[: max_chars - 3].rstrip()}..."
@@ -437,7 +597,7 @@ def _body_for_context(email_data, max_chars=8000):
 def _looks_summary_failure(summary_text):
     """Looks summary failure.
     """
-    # Keep this decision logic centralized for predictable control flow.
+    # Keep this rule in one place so behavior stays consistent.
     normalized = _compact_text(summary_text).lower()
     if not normalized:
         return True
@@ -453,37 +613,83 @@ def _looks_summary_failure(summary_text):
 def _extractive_summary_fallback(email_data):
     """Extractive summary fallback.
     """
-    # Internal helper for extractive summary fallback used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     title = _compact_text(email_data.get("title") or "")
-    candidate_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=4)
+    sender_name = _sender_display_name(email_data.get("sender")) or "the sender"
+    candidate_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=8)
     if not candidate_sentences:
+        # Broaden extraction to cleaned body text when sentence-level extraction fails.
         fallback_body = _body_for_context(email_data, max_chars=2400)
         if not fallback_body:
-            return title if title and title.lower() != "(no subject)" else None
+            if title and title.lower() != "(no subject)":
+                return f"You received an email from {sender_name} about {title}."
+            return f"You received an email from {sender_name}."
         candidate_sentences = [fallback_body]
 
     selected = []
     for sentence in candidate_sentences:
+        # Skip candidates that only parrot the subject line.
         if _is_near_subject_copy(sentence, title):
             continue
         selected.append(sentence)
-        if len(" ".join(selected)) >= 220 or len(selected) >= 2:
+        if len(" ".join(selected)) >= 520 or len(selected) >= 4:
             break
     if not selected:
-        selected = candidate_sentences[:2]
+        selected = candidate_sentences[:4]
 
-    summary = _compact_text(" ".join(selected))
+    intro = (
+        f"You received an email from {sender_name} about {title}."
+        if title and title.lower() != "(no subject)"
+        else f"You received an email from {sender_name}."
+    )
+    detail_text = _compact_text(" ".join(selected))
+    summary = intro
+    if detail_text:
+        detail_clause = _ensure_sentence_ending(f"Key details: {detail_text}")
+        summary = _compact_text(f"{intro} {detail_clause}")
+    request_sentence = _first_request_sentence(email_data)
+    if request_sentence:
+        # Surface explicit ask/deadline language directly in fallback output.
+        action_clause = _ensure_sentence_ending(f"Action for you: {request_sentence}")
+        summary = _compact_text(f"{summary} {action_clause}")
     if _is_noise_fragment(summary):
-        return title if title and title.lower() != "(no subject)" else None
-    if len(summary) > 280:
-        summary = f"{summary[:277]}..."
+        if title and title.lower() != "(no subject)":
+            return f"You received an email about {title}."
+        return None
+    if len(summary) > SUMMARY_MAX_CHARS:
+        summary = f"{summary[: SUMMARY_MAX_CHARS - 3]}..."
     return summary or None
+
+
+def _rewrite_summary_for_second_person(summary_text):
+    """Normalize generated summaries to second-person wording."""
+    # Keep summary style predictable so the UI addresses the mailbox owner directly.
+    summary = str(summary_text or "")
+    if not summary:
+        return ""
+    replacements = (
+        (r"\bthe user\b", "you"),
+        (r"\bthis user\b", "you"),
+        (r"\buser's\b", "your"),
+        (r"\bthe recipient\b", "you"),
+        (r"\brecipient's\b", "your"),
+        (r"\bthe email recipient\b", "you"),
+        (r"\bmailbox owner\b", "you"),
+    )
+    for pattern, replacement in replacements:
+        summary = re.sub(pattern, replacement, summary, flags=re.IGNORECASE)
+    return _compact_text(summary)
+
+
+def _uses_second_person(text):
+    """Return True when text explicitly uses second-person wording."""
+    return bool(re.search(r"\b(you|your)\b", str(text or "").lower()))
 
 
 def _normalized_email_for_classification(email_data):
     """Normalized email for classification.
     """
-    # Normalize normalized email for classification into constrained labels used by mailbox triage logic.
+    # Normalize to the fixed labels used by mailbox triage.
     return {
         "title": _compact_text(email_data.get("title") or "(No subject)"),
         "sender": _compact_text(email_data.get("sender")),
@@ -572,7 +778,7 @@ def _sender_parts(sender_text):
 def _sender_address(sender_text):
     """Sender address.
     """
-    # Internal helper for sender address used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     return _sender_parts(sender_text).get("email", "")
 
 
@@ -587,7 +793,7 @@ def _has_any_pattern(text, patterns):
 def _sender_looks_automated(sender_info):
     """Sender looks automated.
     """
-    # Internal helper for sender looks automated used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     if not isinstance(sender_info, dict):
         return False
     identity = sender_info.get("identity", "")
@@ -597,7 +803,7 @@ def _sender_looks_automated(sender_info):
 def _sender_uses_personal_domain(sender_info):
     """Sender uses personal domain.
     """
-    # Internal helper for sender uses personal domain used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     if not isinstance(sender_info, dict):
         return False
     domain = str(sender_info.get("domain") or "").strip().lower()
@@ -609,7 +815,7 @@ def _sender_uses_personal_domain(sender_info):
 def _sender_hint_block(email_data):
     """Sender hint block.
     """
-    # Internal helper for sender hint block used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     sender_info = _sender_parts(email_data.get("sender"))
     sender_automated = _sender_looks_automated(sender_info)
     sender_personal_domain = _sender_uses_personal_domain(sender_info)
@@ -626,7 +832,7 @@ def _sender_hint_block(email_data):
 def _classification_few_shot_block():
     """Classification few shot block.
     """
-    # Normalize classification few shot block into constrained labels used by mailbox triage logic.
+    # Normalize to the fixed labels used by mailbox triage.
     return (
         "Few-shot examples:\n"
         "1) From: promotions@store-updates.example\n"
@@ -651,7 +857,7 @@ def _classification_few_shot_block():
 def _looks_bulk_or_newsletter(email_data):
     """Looks bulk or newsletter.
     """
-    # Keep this decision logic centralized for predictable control flow.
+    # Keep this rule in one place so behavior stays consistent.
     sender = _sender_address(email_data.get("sender"))
     body = str(email_data.get("body") or "").lower()
     title = str(email_data.get("title") or "").lower()
@@ -737,7 +943,7 @@ def _looks_actionable(email_data):
 def _looks_probable_junk(email_data):
     """Looks probable junk.
     """
-    # Keep this decision logic centralized for predictable control flow.
+    # Keep this rule in one place so behavior stays consistent.
     sender = _sender_address(email_data.get("sender"))
     title = str(email_data.get("title") or "").lower()
     body = str(email_data.get("body") or "").lower()
@@ -773,7 +979,7 @@ def _looks_probable_junk(email_data):
 def _heuristic_classification(email_data):
     """Heuristic classification.
     """
-    # Normalize heuristic classification into constrained labels used by mailbox triage logic.
+    # Normalize to the fixed labels used by mailbox triage.
     actionable = _looks_actionable(email_data)
     bulk_signal = _looks_bulk_or_newsletter(email_data)
     junk_signal = _looks_probable_junk(email_data)
@@ -860,7 +1066,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
 def _extract_json_block(text):
     """Extract JSON block.
     """
-    # Extract json block from provider/user payloads while handling missing fields safely.
+    # Read this field from payloads that may be missing keys.
     stripped = str(text or "").strip()
     if stripped.startswith("{") and stripped.endswith("}"):
         return stripped
@@ -874,7 +1080,7 @@ def _extract_json_block(text):
 def _parse_bool(value):
     """Parse bool.
     """
-    # Parse raw bool input into validated values for downstream logic.
+    # Parse and validate this input before using it.
     if isinstance(value, bool):
         return value
     if value is None:
@@ -890,7 +1096,7 @@ def _parse_bool(value):
 def _normalize_classification(raw_value):
     """Normalize classification.
     """
-    # Normalize classification into a canonical value used across the app.
+    # Normalize classification to one format used across the app.
     category = str(raw_value.get("category") or "").strip().lower()
     try:
         priority = int(raw_value.get("priority"))
@@ -1010,7 +1216,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
 def classify_email(email_data, email_id=None):
     """Classify email.
     """
-    # Normalize classify email into constrained labels used by mailbox triage logic.
+    # Normalize to the fixed labels used by mailbox triage.
     normalized_email = _normalized_email_for_classification(email_data)
     body = (normalized_email.get("body") or "").strip()
     title = (normalized_email.get("title") or "").strip()
@@ -1078,19 +1284,27 @@ def classify_email(email_data, email_id=None):
 def summarize_email(email_data, email_id=None):
     """Summarize email.
     """
-    # Transform summarize email data between provider payloads and local mailbox records.
+    # Translate between API payloads and our local mailbox shape.
     if not should_summarize_email(email_data):
         return None
     title = _compact_text(email_data.get("title") or "")
-    fallback_summary = _extractive_summary_fallback(email_data)
+    fallback_summary = _rewrite_summary_for_second_person(
+        _extractive_summary_fallback(email_data)
+    ) or None
 
     system_prompt = (
-        "Summarize emails. Return plain text only. "
-        "Maximum 2 sentences and under 280 characters. "
+        "You write detailed email summaries for the mailbox owner. "
+        "Address the summary in second person using you/your. "
+        "Never refer to the mailbox owner as 'the user' or 'the recipient'. "
+        "Capture: main topic, concrete details, and any requested action or deadline. "
+        "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
+        "privacy/cookie/legal notices, and utility links unless they are the main request. "
+        "Return plain text only as one compact paragraph (no markdown or bullet points). "
+        "Target 3-5 sentences unless the source email is extremely short. "
         "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
-        "Summarize this email.\n\n"
+        "Summarize this email for me so I can quickly understand what I need to do.\n\n"
         f"{_email_context_block(email_data)}"
     )
     response_text = _call_ollama(
@@ -1101,7 +1315,7 @@ def summarize_email(email_data, email_id=None):
         ],
         email_id=email_id,
         temperature=0.1,
-        num_predict=200,
+        num_predict=420,
     )
     if not response_text:
         if fallback_summary:
@@ -1113,7 +1327,7 @@ def summarize_email(email_data, email_id=None):
             )
         return fallback_summary
 
-    summary = _compact_text(response_text)
+    summary = _rewrite_summary_for_second_person(_compact_text(response_text))
     if _looks_summary_failure(summary):
         if fallback_summary:
             _log_action(
@@ -1132,14 +1346,32 @@ def summarize_email(email_data, email_id=None):
                 detail="using_extractive_fallback_subject_parrot",
             )
         return fallback_summary
-    if len(summary) > 280:
-        summary = f"{summary[:277]}..."
+    if not _uses_second_person(summary) and fallback_summary and _uses_second_person(fallback_summary):
+        # Keep mailbox-facing voice consistent when model drifts into third person.
+        _log_action(
+            task="summarize",
+            status="fallback",
+            email_id=email_id,
+            detail="using_extractive_fallback_third_person_model_output",
+        )
+        return fallback_summary
+    if len(summary) < 140 and fallback_summary and len(fallback_summary) > len(summary) + 40:
+        # Prefer richer deterministic fallback over overly terse model responses.
+        _log_action(
+            task="summarize",
+            status="fallback",
+            email_id=email_id,
+            detail="using_extractive_fallback_brief_model_output",
+        )
+        return fallback_summary
+    if len(summary) > SUMMARY_MAX_CHARS:
+        summary = f"{summary[: SUMMARY_MAX_CHARS - 3]}..."
     return summary or fallback_summary
 
 
 def _sender_display_name(sender_text):
     """Extract a readable sender name from the raw sender field."""
-    # Internal helper for sender display name used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     sender_raw = _compact_text(sender_text)
     if not sender_raw:
         return ""
@@ -1152,7 +1384,7 @@ def _sender_display_name(sender_text):
 
 def _first_request_sentence(email_data):
     """Return the first sentence that looks like an explicit request."""
-    # Internal helper for first request sentence used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     for sentence in _extract_key_sentences(email_data.get("body") or "", max_sentences=8):
         lowered = sentence.lower()
         if "?" in sentence:
@@ -1171,6 +1403,7 @@ def _draft_reply_fallback(email_data):
     title = _compact_text(email_data.get("title") or "")
     topic = title if title and title.lower() != "(no subject)" else ""
     if not topic:
+        # Recover a topical anchor from body text when subject is missing/generic.
         key_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=1)
         topic = key_sentences[0] if key_sentences else "your message"
     if len(topic) > 110:
@@ -1179,35 +1412,58 @@ def _draft_reply_fallback(email_data):
     request_sentence = _first_request_sentence(email_data)
     if request_sentence and len(request_sentence) > 150:
         request_sentence = f"{request_sentence[:147].rstrip()}..."
+    key_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=2)
+    additional_detail = key_sentences[0] if key_sentences else ""
+    if additional_detail and len(additional_detail) > 160:
+        additional_detail = f"{additional_detail[:157].rstrip()}..."
 
     if _looks_actionable(email_data):
+        body_parts = [
+            f"Thanks for your email about {topic}.",
+            "I reviewed the details and understand what you need.",
+        ]
         if request_sentence:
-            body_text = (
-                f"Thanks for your email about {topic}. "
-                f"I reviewed your request: {request_sentence} "
-                "I will follow up shortly with next steps."
+            body_parts.append(_ensure_sentence_ending(f"You asked: {request_sentence}"))
+        if additional_detail and (
+            not request_sentence or _token_overlap_ratio(additional_detail, request_sentence) < 0.85
+        ):
+            # Add context only when it adds new information beyond the request sentence.
+            body_parts.append(
+                _ensure_sentence_ending(f"I also noted this context: {additional_detail}")
             )
-        else:
-            body_text = (
-                f"Thanks for your email about {topic}. "
-                "I reviewed the details and will follow up shortly with next steps."
-            )
-    else:
-        body_text = (
-            f"Thanks for sharing the update about {topic}. "
-            "I reviewed it and appreciate the context."
+        body_parts.append(
+            "I will follow up shortly with a complete response and concrete next steps."
         )
+        body_parts.append(
+            "If there is a specific deadline or format you want, please let me know."
+        )
+        body_text = " ".join(body_parts)
+    else:
+        body_parts = [
+            f"Thanks for sharing the update about {topic}.",
+            "I reviewed the information and captured the key points.",
+        ]
+        if additional_detail:
+            body_parts.append(
+                _ensure_sentence_ending(f"The main detail I noted is: {additional_detail}")
+            )
+        body_parts.append("Let me know if you want any follow-up action from my side.")
+        body_text = " ".join(body_parts)
 
     return f"{greeting}\n\n{body_text}\n\nBest regards,"
 
 
 def _looks_draft_failure(draft_text, email_data):
     """Detect placeholder or low-quality drafts that should be replaced."""
-    # Keep this decision logic centralized for predictable control flow.
+    # Keep this rule in one place so behavior stays consistent.
     cleaned = _compact_text(draft_text)
     if not cleaned:
         return True
     lowered = cleaned.lower()
+    if len(cleaned) < DRAFT_MIN_CHARS:
+        return True
+    if _looks_actionable(email_data) and len(cleaned) < DRAFT_MIN_ACTIONABLE_CHARS:
+        return True
     if any(marker in lowered for marker in DRAFT_FAILURE_MARKERS):
         return True
     if _is_noise_fragment(lowered):
@@ -1227,6 +1483,24 @@ def _looks_draft_failure(draft_text, email_data):
     return False
 
 
+def _drafts_too_similar(original_text, revised_text):
+    """Return True when revised draft is effectively unchanged."""
+    # Keep revise behavior useful by detecting near-identical outputs.
+    original = _compact_text(original_text).lower()
+    revised = _compact_text(revised_text).lower()
+    if not original or not revised:
+        return False
+    if original == revised:
+        return True
+    overlap = _token_overlap_ratio(original, revised)
+    length_delta = abs(len(original) - len(revised))
+    if len(original) <= 120 and overlap >= 0.92 and length_delta <= 20:
+        return True
+    if len(original) > 120 and overlap >= 0.96 and length_delta <= 40:
+        return True
+    return False
+
+
 def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     """Draft reply.
     """
@@ -1237,18 +1511,22 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         return None
 
     system_prompt = (
-        "You write concise, professional email replies grounded in the incoming email context. "
+        "You write high-quality professional email replies grounded in the incoming email context. "
+        "Write as the mailbox owner (use I/we), not as an observer. "
+        "Do not refer to the mailbox owner as 'the user'. "
         "Do not copy long spans from the original email. "
-        "If the message is informational/newsletter with no explicit ask, write a short acknowledgment. "
+        "If the message is actionable, include concrete response details and clear next steps. "
+        "If the message is informational/newsletter with no explicit ask, write a concise acknowledgment. "
+        "Default to a complete response with greeting, substantive body, and closing sign-off. "
         "Return only the email body text, no markdown and no subject. "
         "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
-        "Draft a response email.\n\n"
+        "Draft a complete response email.\n\n"
         f"{_email_context_block(email_data)}\n\n"
         f"Reply To: {to_value}\n"
         f"Reply Cc: {cc_value}\n"
-        "Keep it clear and actionable."
+        "Keep it clear, specific, and ready to send."
     )
     response_text = _call_ollama(
         task="draft",
@@ -1258,7 +1536,7 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         ],
         email_id=email_id,
         temperature=0.35,
-        num_predict=420,
+        num_predict=650,
     )
     if not response_text:
         fallback_draft = _draft_reply_fallback(email_data)
@@ -1298,9 +1576,13 @@ def revise_reply(
         return None
 
     system_prompt = (
-        "You improve email drafts using the incoming email context. "
+        "You revise email drafts using the incoming email context. "
+        "Write as the mailbox owner (use I/we), not as an observer. "
+        "Never refer to the mailbox owner as 'the user'. "
+        "Preserve the original intent, but expand vague or very short drafts into complete replies. "
+        "Include concrete details and next steps when the original email asks for action. "
         "Do not copy long spans from the original email. "
-        "Return only the revised email body text, no markdown and no subject. "
+        "Return only the revised email body text with greeting and closing, no markdown and no subject. "
         "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
@@ -1308,9 +1590,11 @@ def revise_reply(
         f"{_email_context_block(email_data)}\n\n"
         f"Reply To: {to_value}\n"
         f"Reply Cc: {cc_value}\n"
-        "Current draft:\n"
-        f"{current_draft_text}\n\n"
-        "Keep intent, improve clarity, and keep it concise."
+        "Current draft (between markers):\n"
+        "---BEGIN CURRENT DRAFT---\n"
+        f"{current_draft_text}\n"
+        "---END CURRENT DRAFT---\n\n"
+        "Keep intent, improve clarity, and make it complete enough to send."
     )
     response_text = _call_ollama(
         task="revise",
@@ -1320,12 +1604,27 @@ def revise_reply(
         ],
         email_id=email_id,
         temperature=0.25,
-        num_predict=420,
+        num_predict=650,
     )
     if not response_text:
-        return current_draft_text
+        # If revision generation fails, attempt a safe fallback before giving up.
+        fallback = _draft_reply_fallback(email_data)
+        return fallback if fallback and not _drafts_too_similar(current_draft_text, fallback) else current_draft_text
     cleaned = str(response_text or "").strip()
-    if _looks_draft_failure(cleaned, email_data):
+    if _looks_draft_failure(cleaned, email_data) or _drafts_too_similar(current_draft_text, cleaned):
+        # Recover from unusable/no-op revisions by forcing a fresh draft generation pass.
+        regenerated = draft_reply(
+            email_data=email_data,
+            to_value=to_value,
+            cc_value=cc_value,
+            email_id=email_id,
+        )
+        regenerated = str(regenerated or "").strip()
+        if regenerated and not _drafts_too_similar(current_draft_text, regenerated):
+            return regenerated
+        fallback = _draft_reply_fallback(email_data)
+        if fallback and not _drafts_too_similar(current_draft_text, fallback):
+            return fallback
         return current_draft_text
     return cleaned or current_draft_text
 
@@ -1486,6 +1785,7 @@ def _cleanup_tasks_locked():
     done_tasks = [
         task for task in AI_TASKS.values() if task.get("status") not in AI_TASK_ACTIVE_STATUSES
     ]
+    # Remove oldest completed items first; active tasks stay pinned.
     done_tasks.sort(key=lambda task: float(task.get("created_at") or 0))
     while len(AI_TASKS) > AI_TASK_MAX_ITEMS and done_tasks:
         task = done_tasks.pop(0)
@@ -1536,6 +1836,7 @@ def _set_ai_task_status(task_id, status, result=None, error=None):
         if error is not None:
             task["error"] = error
         if status not in AI_TASK_ACTIVE_STATUSES:
+            # Release dedupe slot so a new task of the same type/email can be scheduled.
             key = (task["type"], task["email_id"])
             if AI_TASK_INDEX.get(key) == task_id:
                 AI_TASK_INDEX.pop(key, None)

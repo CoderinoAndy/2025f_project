@@ -1,4 +1,4 @@
-<div class="bulk-side-menu" data-bulk-side-menu aria-hidden="true"> <!-- Mounted once per list page; JS toggles visibility in selection mode. -->
+<div class="bulk-side-menu" data-bulk-side-menu aria-hidden="true"> <!-- Bulk action drawer; JS shows it only while selecting rows. -->
   <div class="bulk-side-menu-header">
     <span><strong data-selected-count>0</strong> selected</span>
     <button type="button" class="bulk-clear-btn" data-clear-selection>Clear</button>
@@ -6,7 +6,7 @@
 
   <form method="post" action="{{ url_for('main.bulk_email_action') }}" data-bulk-form>
     <input type="hidden" name="next" value="{{ current_list_url }}">
-    {# Hidden fields are filled by JS just before submit so one form can handle all bulk actions. #}
+    {# JS fills these hidden fields right before submit, so one form can serve every bulk action. #}
     <input type="hidden" name="ids" value="" data-selected-ids-input>
     <input type="hidden" name="action" value="" data-selected-action-input>
     <input type="hidden" name="new_type" value="" data-selected-type-input>

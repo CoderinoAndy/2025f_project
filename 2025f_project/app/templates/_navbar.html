@@ -1,4 +1,4 @@
-<div class="topbar d-flex align-items-center justify-content-between"> <!-- Top navigation, sidebar links, and global search controls. -->
+<div class="topbar d-flex align-items-center justify-content-between"> <!-- Top bar with brand, menu toggle, and About link. -->
   <div class="d-flex align-items-center gap-2">
     <a class="brand-link" href="{{ url_for('main.allemails') }}" aria-label="Home">
       <img class="brand-logo" src="{{ url_for('static', filename='img/atom-logo-violet.svg') }}" alt="App logo">
@@ -32,7 +32,7 @@
   </a>
 </div>
 
-{% if request.endpoint != "main.about" %}
+{% if request.endpoint != "main.about" %} <!-- Hide mailbox nav/search on the About page. -->
 <aside class="app-sidebar" aria-label="Mailbox navigation">
   <a class="sidebar-link{% if request.endpoint == 'main.allemails' %} active{% endif %}" href="{{ url_for('main.allemails') }}">
     <i class="bi bi-inboxes-fill" aria-hidden="true"></i>
@@ -68,6 +68,7 @@
   </a>
 </aside>
 
+{# Route map so search stays in the current mailbox tab. #}
 {% set list_search_targets = {
   "main.allemails": "main.allemails",
   "main.readonly": "main.readonly",
@@ -78,7 +79,7 @@
   "main.sent": "main.sent",
   "main.drafts": "main.drafts"
 } %}
-{# Search submits back to the current mailbox tab so filters/sort context stay local to that view. #}
+{# Search posts back to the current mailbox tab so sorting/filter context is preserved. #}
 {% set search_target = list_search_targets.get(request.endpoint, "main.allemails") %}
 <div class="global-search-shell">
   <form class="global-search-form" method="get" action="{{ url_for(search_target) }}" role="search">

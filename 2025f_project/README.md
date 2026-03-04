@@ -46,7 +46,7 @@ Manual fallback without `make` (Windows):
 - `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `30`)
 - `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `60`)
 - `GMAIL_AI_TRIAGE_PER_SYNC`: max newly-synced emails to auto-classify per sync (default `0`)
-- `OLLAMA_MODEL`: defaults to `qwen2.5:7b`
+- `OLLAMA_MODEL`: defaults to `qwen2.5:14b-instruct`
 - `OLLAMA_API_URL`: defaults to `http://localhost:11434/api/chat`
 - `OLLAMA_TIMEOUT_SECONDS`: AI request timeout in seconds (default `12`)
 - `OLLAMA_SUMMARY_MIN_CHARS`: summary threshold (default `200`)
@@ -60,7 +60,7 @@ AI calls are local-only and go to Ollama chat API (`http://localhost:11434/api/c
 1. Start Ollama:
    - `ollama serve`
 2. Confirm model is available:
-   - `ollama pull qwen2.5:7b`
+   - `ollama pull qwen2.5:14b-instruct`
 3. Start Flask app:
    - `make run`
 

@@ -1,4 +1,4 @@
-﻿import sqlite3
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -94,7 +94,7 @@ def db_session(db_path):
 def init_db(db_path=DB_DEFAULT):
     """Initialize database.
     """
-    # Internal helper for init db used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     schema_path = Path(__file__).resolve().parent / "sql" / "schema.sql"
     if not schema_path.exists():
         raise FileNotFoundError("schema.sql not found in app/sql/")
@@ -344,7 +344,7 @@ def _row_to_dict(row):
 def _split_addresses(raw_value):
     """Split addresses.
     """
-    # Internal helper for split addresses used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     if raw_value is None:
         return []
     text = str(raw_value).replace(";", ",")
@@ -365,7 +365,7 @@ def _split_addresses(raw_value):
 def _insert_recipients(conn, email_id, recipient_type, raw_value):
     """Insert recipients.
     """
-    # Internal helper for insert recipients used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     for address in _split_addresses(raw_value):
         conn.execute(
             """
@@ -379,7 +379,7 @@ def _insert_recipients(conn, email_id, recipient_type, raw_value):
 def _normalize_ai_category(value):
     """Normalize AI category.
     """
-    # Normalize ai category into a canonical value used across the app.
+    # Normalize ai category to one format used across the app.
     category = str(value or "").strip().lower()
     return category if category in AI_CATEGORIES else None
 
@@ -387,7 +387,7 @@ def _normalize_ai_category(value):
 def _normalize_ai_needs_response(value):
     """Normalize AI needs response.
     """
-    # Normalize ai needs response into a canonical value used across the app.
+    # Normalize ai needs response to one format used across the app.
     if value is None:
         return None
     if isinstance(value, bool):
@@ -403,7 +403,7 @@ def _normalize_ai_needs_response(value):
 def _normalize_ai_confidence(value):
     """Normalize AI confidence.
     """
-    # Normalize ai confidence into a canonical value used across the app.
+    # Normalize ai confidence to one format used across the app.
     if value is None or value == "":
         return None
     try:
@@ -416,7 +416,7 @@ def _normalize_ai_confidence(value):
 def _normalize_archived_flag(value):
     """Normalize archived flag.
     """
-    # Normalize archived flag into a canonical value used across the app.
+    # Normalize archived flag to one format used across the app.
     if isinstance(value, bool):
         return 1 if value else 0
     if value is None:
@@ -764,7 +764,7 @@ def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
 def toggle_read_state(email_id, db_path=DB_DEFAULT):
     """Toggle read state.
     """
-    # Internal helper for toggle read state used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     with db_session(db_path) as conn:
         conn.execute(
             """
@@ -1052,4 +1052,3 @@ def create_local_sent_email(
         _insert_recipients(conn, email_id, "to", recipients)
         _insert_recipients(conn, email_id, "cc", cc)
         return email_id
-

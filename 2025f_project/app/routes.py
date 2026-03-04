@@ -1,4 +1,4 @@
-﻿from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
+from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 import os
 import threading
 from urllib.parse import urlsplit
@@ -64,7 +64,7 @@ ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
 def _normalize_addresses(raw_value):
     """Normalize addresses.
     """
-    # Normalize addresses into a canonical value used across the app.
+    # Normalize addresses to one format used across the app.
     if raw_value is None:
         return None
     text = str(raw_value).replace(";", ",")
@@ -75,7 +75,7 @@ def _normalize_addresses(raw_value):
 def _parse_optional_int(raw_value):
     """Parse optional int.
     """
-    # Parse raw optional int input into validated values for downstream logic.
+    # Parse and validate this input before using it.
     try:
         return int(raw_value) if raw_value else None
     except (TypeError, ValueError):
@@ -85,7 +85,7 @@ def _parse_optional_int(raw_value):
 def _collect_compose_fields():
     """Collect compose fields.
     """
-    # Collect compose fields from request/context and return normalized values.
+    # Collect compose fields from request/context and normalize the result.
     return {
         "to": _normalize_addresses(request.form.get("to")) or "",
         "cc": _normalize_addresses(request.form.get("cc")) or "",
@@ -112,7 +112,7 @@ def _has_compose_content(fields):
 def _collect_attachment_payloads():
     """Collect attachment payloads.
     """
-    # Collect attachment payloads from request/context and return normalized values.
+    # Collect attachment payloads from request/context and normalize the result.
     payloads = []
     for item in request.files.getlist("attachments"):
         if item is None:
@@ -136,7 +136,7 @@ def _collect_attachment_payloads():
 def _collect_reply_fields(email_data):
     """Collect reply fields.
     """
-    # Collect reply fields from request/context and return normalized values.
+    # Collect reply fields from request/context and normalize the result.
     to_value = _normalize_addresses(request.form.get("to"))
     if not to_value:
         sender = _normalize_addresses(email_data.get("sender"))
@@ -166,7 +166,7 @@ def _set_message_read_state_async(external_id, read=True):
 def _current_list_url():
     """Current list url.
     """
-    # Resolve current list url using configuration defaults and safe fallback behavior.
+    # Resolve current list url with configured values and a safe fallback.
     return request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
 
 
@@ -201,7 +201,7 @@ def _safe_next_url(raw_next):
 def _next_url_from_request():
     """Next url from request.
     """
-    # Resolve next url from request using configuration defaults and safe fallback behavior.
+    # Resolve next url from request with configured values and a safe fallback.
     return _safe_next_url(request.form.get("next") or request.args.get("next"))
 
 
@@ -296,7 +296,7 @@ def _set_read_state_with_fallback(email_id, email_data, target_read_state):
 def _parse_bulk_email_ids(raw_ids):
     """Parse bulk email IDs.
     """
-    # Parse raw bulk email ids input into validated values for downstream logic.
+    # Parse and validate this input before using it.
     seen = set()
     parsed = []
     for token in str(raw_ids or "").split(","):
@@ -595,7 +595,7 @@ def set_email_type(id):
 def bulk_email_action():
     """Bulk email action.
     """
-    # Transform bulk email action data between provider payloads and local mailbox records.
+    # Translate between API payloads and our local mailbox shape.
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
     email_ids = _parse_bulk_email_ids(request.form.get("ids"))
@@ -669,7 +669,7 @@ def bulk_email_action():
 def archive_email(id):
     """Archive email.
     """
-    # Transform archive email data between provider payloads and local mailbox records.
+    # Translate between API payloads and our local mailbox shape.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -684,7 +684,7 @@ def archive_email(id):
 def unarchive_email(id):
     """Unarchive email.
     """
-    # Transform unarchive email data between provider payloads and local mailbox records.
+    # Translate between API payloads and our local mailbox shape.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -708,7 +708,7 @@ def search():
 def analyze_email_route(id):
     """Analyze email route.
     """
-    # Transform analyze email route data between provider payloads and local mailbox records.
+    # Translate between API payloads and our local mailbox shape.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -810,7 +810,7 @@ def compose():
 def compose_save():
     """Compose save.
     """
-    # Internal helper for compose save used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     next_url = _next_url_from_request()
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
@@ -825,7 +825,7 @@ def compose_save():
 def compose_autosave():
     """Compose autosave.
     """
-    # Internal helper for compose autosave used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     fields = _collect_compose_fields()
     if not _has_compose_content(fields):
         return Response(status=204)
@@ -927,7 +927,7 @@ def delete_email(id):
 def toggle_read(id):
     """Toggle read.
     """
-    # Internal helper for toggle read used by higher-level request and sync workflows.
+    # Used by other functions in this file.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)

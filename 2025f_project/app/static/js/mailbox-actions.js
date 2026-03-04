@@ -1,3 +1,4 @@
+// Submits per-row mailbox actions with fetch and refreshes the list on success.
 (() => { // Submit row action forms asynchronously to avoid full-page reloads.
   const shell = document.querySelector(".list-shell"); // List container where action forms live.
   if (!shell) { // Exit on pages that do not render mailbox rows.

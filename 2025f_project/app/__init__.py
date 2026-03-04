@@ -1,4 +1,4 @@
-﻿from flask import Flask, g, request
+from flask import Flask, g, request
 from werkzeug.exceptions import HTTPException
 from datetime import datetime
 from time import perf_counter
@@ -54,7 +54,7 @@ def create_app():
     @app.before_request
     def _log_request_start():
         """Capture request start timing and write a start event to the debug log."""
-        # Write log request start details in the app's structured log format for debugging and traceability.
+        # Write a structured log entry so this step is easy to trace later.
         g.request_started_at = perf_counter()
         log_event(
             action_type="http_request",
@@ -101,7 +101,7 @@ def create_app():
     @app.teardown_request
     def _log_request_exception(error):
         """Log unexpected request exceptions that were not handled by Flask HTTP errors."""
-        # Write log request exception details in the app's structured log format for debugging and traceability.
+        # Write a structured log entry so this step is easy to trace later.
         if error is None or isinstance(error, HTTPException):
             return
         log_exception(

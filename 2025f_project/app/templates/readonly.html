@@ -1,6 +1,6 @@
-<!doctype html> <!-- Page-level HTML scaffold for this view. -->
+<!doctype html> <!-- Standard document shell for this page. -->
 <html lang="en">
-  <head> <!-- Head section with metadata, title, and styles. -->
+  <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Read only</title>
@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
+  <!-- Live mailbox page root; data-* values feed the polling and action scripts. -->
   <body class="mailbox-list-page"
     data-live-email-view="read-only"
     data-sort="{{ sort }}"
@@ -23,9 +24,9 @@
     data-poll-interval-ms="{{ live_poll_interval_ms }}"
     data-live-polling-enabled="{{ 1 if not search_query else 0 }}"
     data-search-query="{{ search_query }}"
-  > <!-- Body section with rendered content and controls. -->
-    {% include "_navbar.html" %} <!-- Shared navigation partial used across mailbox pages. -->
-    <div class="container-fluid app-main py-3 px-4"> <!-- Primary content container for this page. -->
+  > <!-- Visible page content and interactive controls. -->
+    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
+    <div class="container-fluid app-main py-3 px-4"> <!-- Main page content area. -->
       <div class="list-header">
         {% if search_query %}
         <div class="d-flex align-items-center gap-2">
@@ -33,7 +34,7 @@
           <a class="btn btn-outline-light btn-sm" href="{{ url_for('main.readonly') }}">Clear</a>
         </div>
         {% endif %}
-        <form method="get" class="sort-form"> <!-- Main form users submit on this view. -->
+        <form method="get" class="sort-form"> <!-- Form used for this action. -->
           {% if search_query %}
           <input type="hidden" name="q" value="{{ search_query }}">
           {% endif %}
@@ -61,13 +62,18 @@
       </div>
       {% include "_bulk_selection_menu.html" %}
     </div>
+    <!-- Floating quick action to open compose from any mailbox tab. -->
     <a class="compose-fab" href="{{ url_for('main.compose', next=current_list_url) }}" aria-label="Compose email">
       <i class="bi bi-pencil" aria-hidden="true"></i>
       <span>Compose</span>
     </a>
-    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Scripts that enable interactive behavior on this page. -->
+    <!-- Bootstrap JS for dropdowns, menus, and other interactive components. -->
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Page scripts. -->
+    <!-- Selection mode logic: choose rows and trigger bulk actions. -->
     <script src="{{ url_for('static', filename='js/email-selection-menu.js') }}"></script>
+    <!-- Polling logic: fetch latest rows and patch only when content changed. -->
     <script src="{{ url_for('static', filename='js/live-email-list.js') }}"></script>
+    <!-- Row action logic: submit archive/delete/read toggles without full reload. -->
     <script src="{{ url_for('static', filename='js/mailbox-actions.js') }}"></script>
   </body>
 </html>

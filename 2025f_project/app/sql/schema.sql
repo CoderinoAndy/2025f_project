@@ -39,14 +39,6 @@ CREATE TABLE IF NOT EXISTS email_recipients ( -- Recipient table with one row pe
   UNIQUE (email_id, recipient_type, address)
 );
 
-CREATE TABLE IF NOT EXISTS user_profile ( -- Single-row user profile used for personalization.
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  name TEXT NOT NULL DEFAULT '',
-  occupation TEXT NOT NULL DEFAULT '',
-  photo_path TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_provider_draft_id -- Fast provider draft lookups and uniqueness.
 ON email_messages(provider_draft_id)
 WHERE provider_draft_id IS NOT NULL;
@@ -62,9 +54,6 @@ ON email_messages(thread_id, received_at ASC, id ASC);
 
 CREATE INDEX IF NOT EXISTS idx_email_recipients_email_type_order -- Speeds recipient aggregation subqueries.
 ON email_recipients(email_id, recipient_type, id);
-
-INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path) -- Insert default profile row for new databases.
-VALUES (1, '', '', '');
 
 -- Seed messages
 INSERT INTO email_messages ( -- Insert starter mailbox data for first-time setup.

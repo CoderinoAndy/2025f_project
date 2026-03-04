@@ -13,7 +13,6 @@ from pathlib import Path
 
 from .db import (
     fetch_email_by_id,
-    get_user_profile,
     update_email_ai_fields,
     upsert_email_from_provider,
 )
@@ -58,8 +57,15 @@ BULK_SENDER_MARKERS = (
     "marketing",
 )
 
-_LAST_SYNC_AT = 0.0
-_SYNC_LOCK = threading.Lock()
+class _GmailSyncState:
+    """In-memory sync throttling state for background Gmail sync."""
+
+    def __init__(self):
+        self.last_sync_at = 0.0
+        self.lock = threading.Lock()
+
+
+GMAIL_SYNC_STATE = _GmailSyncState()
 
 
 def _candidate_credentials_paths():
@@ -745,13 +751,12 @@ def _should_ai_triage_email(email_data):
     return classification_missing
 
 
-def _triage_email_with_ai(email_data, user_profile, db_path):
+def _triage_email_with_ai(email_data, db_path):
     """Triage email with ai.
     """
     # Normalize triage email with ai into constrained labels used by mailbox triage logic.
     classification = classify_email(
         email_data=email_data,
-        user_profile=user_profile,
         email_id=email_data.get("id"),
     )
     if not classification:  # Skip updates when classification output is missing/invalid.
@@ -800,7 +805,6 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
     )
     triage_budget = max(0, min(10, int(AI_TRIAGE_PER_SYNC or 0)))
     triage_used = 0
-    profile = get_user_profile(db_path=db_path) if ai_triage_enabled() and triage_budget else None
     page_token = None
     synced = 0
     visited = 0
@@ -852,7 +856,7 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
                         email_id = synced_record.get("id")
                         email_data = fetch_email_by_id(email_id, db_path=db_path)
                         if _should_ai_triage_email(email_data):
-                            if _triage_email_with_ai(email_data, profile, db_path):
+                            if _triage_email_with_ai(email_data, db_path):
                                 triage_used += 1
                     except Exception as exc:
                         log_exception(
@@ -885,10 +889,10 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
 def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
     """Trigger background sync.
     """
-    global _LAST_SYNC_AT
+    sync_state = GMAIL_SYNC_STATE
     now = time.time()
     # Skip background work when a recent sync already ran unless caller explicitly forces it.
-    if not force and now - _LAST_SYNC_AT < SYNC_INTERVAL_SECONDS:
+    if not force and now - sync_state.last_sync_at < SYNC_INTERVAL_SECONDS:
         log_event(
             action_type="gmail_sync",
             action="background_sync_skip",
@@ -897,7 +901,7 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
             reason="rate_limited",
         )
         return False
-    if not _SYNC_LOCK.acquire(blocking=False):
+    if not sync_state.lock.acquire(blocking=False):
         log_event(
             action_type="gmail_sync",
             action="background_sync_skip",
@@ -910,10 +914,9 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
     def _worker():
         """Run one background sync cycle and always release the sync lock afterward."""
         # Manage worker lifecycle so asynchronous UI polling stays consistent.
-        global _LAST_SYNC_AT
         try:
             sync_recent_emails(db_path=db_path, max_results=max_results)
-            _LAST_SYNC_AT = time.time()
+            sync_state.last_sync_at = time.time()
             log_event(
                 action_type="gmail_sync",
                 action="background_sync_complete",
@@ -929,7 +932,7 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
                 details="Background sync worker crashed.",
             )
         finally:
-            _SYNC_LOCK.release()
+            sync_state.lock.release()
 
     log_event(
         action_type="gmail_sync",

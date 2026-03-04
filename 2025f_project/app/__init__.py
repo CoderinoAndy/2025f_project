@@ -2,7 +2,7 @@
 from werkzeug.exceptions import HTTPException
 from datetime import datetime
 from time import perf_counter
-from .db import get_user_profile, init_db
+from .db import init_db
 from .debug_logger import (
     configure_debug_logger,
     get_debug_log_path,
@@ -141,12 +141,6 @@ def create_app():
 
         return dt.strftime("%d/%m/%Y %H:%M")
 
-    @app.context_processor
-    def inject_user_profile():
-        """Provide profile data to every template render call."""
-        # Prepare inject user profile values used to personalize AI analysis and drafts.
-        return {"user_profile": get_user_profile()}
-        
     from .routes import main
     app.register_blueprint(main)
     log_event(

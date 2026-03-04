@@ -240,10 +240,8 @@ body.mailbox-list-page .list-shell{
   opacity: 1;
   background: rgba(124, 58, 237, 0.14);
 }
-.topbar-profile-wrap{
-  margin-left: auto;
-}
 .topbar-about-link{
+  margin-left: auto;
   width: 36px;
   height: 36px;
   border-radius: 999px;
@@ -257,39 +255,6 @@ body.mailbox-list-page .list-shell{
 }
 .topbar-about-link:hover{
   background: rgba(167, 139, 250, 0.16);
-}
-.profile-link{
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  text-decoration: none;
-  color: var(--text) !important;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(236, 233, 245, 0.24);
-  background: rgba(255, 255, 255, 0.04);
-}
-.profile-link:hover{
-  background: rgba(167, 139, 250, 0.16);
-}
-.profile-avatar{
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  object-fit: cover;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.profile-avatar-placeholder{
-  background: rgba(167, 139, 250, 0.26);
-}
-.profile-name{
-  max-width: 160px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 0.92rem;
 }
 
 .panel-card, .meta-wrap, .email-row{
@@ -683,9 +648,6 @@ body.mailbox-list-page .list-shell{
     border-radius: 22px;
     font-size: 0.98rem;
     gap: 10px;
-  }
-  .profile-name{
-    display: none;
   }
   .bulk-side-menu{
     width: calc(100vw - 24px);

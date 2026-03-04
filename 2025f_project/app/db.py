@@ -7,11 +7,6 @@ from .debug_logger import log_event, log_exception
 APP_ROOT = Path(__file__).resolve().parent.parent
 DB_DEFAULT = str(APP_ROOT / "instance" / "app.sqlite")
 LOCAL_USER_EMAIL = "you@example.com"
-DEFAULT_PROFILE = {
-    "name": "",
-    "occupation": "",
-    "photo_path": "",
-}
 ALLOWED_TYPES = {
     "response-needed",
     "read-only",
@@ -206,25 +201,6 @@ def _apply_schema_migrations(conn):
         ON email_recipients(email_id, recipient_type, id)
         """
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_profile (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          name TEXT NOT NULL DEFAULT '',
-          occupation TEXT NOT NULL DEFAULT '',
-          photo_path TEXT NOT NULL DEFAULT '',
-          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO user_profile (id, name, occupation, photo_path)
-        VALUES (1, '', '', '')
-        """
-    )
-
-
 def _rebuild_email_tables(conn, existing_columns):
     """Rebuild email tables.
     """
@@ -1071,45 +1047,4 @@ def create_local_sent_email(
         _insert_recipients(conn, email_id, "to", recipients)
         _insert_recipients(conn, email_id, "cc", cc)
         return email_id
-
-
-def get_user_profile(db_path=DB_DEFAULT):
-    """Get user profile.
-    """
-    # Return user profile with explicit fallback behavior for callers.
-    with db_session(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT name, occupation, photo_path
-            FROM user_profile
-            WHERE id = 1
-            """
-        ).fetchone()
-        if not row:
-            return dict(DEFAULT_PROFILE)
-        profile = dict(DEFAULT_PROFILE)
-        profile.update({k: (row[k] or "") for k in profile})
-        return profile
-
-
-def save_user_profile(name, occupation, photo_path=None, db_path=DB_DEFAULT):
-    """Save user profile.
-    """
-    # Save user profile after sanitizing user-provided input.
-    name_value = (name or "").strip()
-    occupation_value = (occupation or "").strip()
-    photo_value = (photo_path or "").strip()
-    with db_session(db_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO user_profile (id, name, occupation, photo_path, updated_at)
-            VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                occupation = excluded.occupation,
-                photo_path = excluded.photo_path,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (name_value, occupation_value, photo_value),
-        )
 

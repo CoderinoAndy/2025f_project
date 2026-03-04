@@ -27,25 +27,9 @@
     </div>
     {% endif %}
   </div>
-  <div class="d-flex align-items-center gap-2 topbar-profile-wrap">
-    <a class="topbar-about-link" href="{{ url_for('main.about') }}" aria-label="About">
-      <i class="bi bi-info-circle-fill" aria-hidden="true"></i>
-    </a>
-    <a class="profile-link" href="{{ url_for('main.profile') }}" aria-label="Open profile">
-      {% if user_profile.photo_path %}
-      <img
-        class="profile-avatar"
-        src="{{ url_for('static', filename=user_profile.photo_path) }}"
-        alt="Profile picture"
-      >
-      {% else %}
-      <span class="profile-avatar profile-avatar-placeholder">
-        <i class="bi bi-person-fill" aria-hidden="true"></i>
-      </span>
-      {% endif %}
-      <span class="profile-name">{{ user_profile.name or "Profile" }}</span>
-    </a>
-  </div>
+  <a class="topbar-about-link" href="{{ url_for('main.about') }}" aria-label="About">
+    <i class="bi bi-info-circle-fill" aria-hidden="true"></i>
+  </a>
 </div>
 
 {% if request.endpoint != "main.about" %}

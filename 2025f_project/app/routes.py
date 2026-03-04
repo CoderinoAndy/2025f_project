@@ -1,16 +1,8 @@
 ﻿from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
-from datetime import datetime
-from functools import lru_cache
 import os
-import re
 import threading
-import time
-from pathlib import Path
-from urllib.parse import urlsplit, parse_qs
-from uuid import uuid4
-from werkzeug.utils import secure_filename
+from urllib.parse import urlsplit
 from .db import (
-    get_user_profile,
     fetch_emails,
     fetch_email_by_id,
     fetch_email_by_provider_draft_id,
@@ -22,9 +14,7 @@ from .db import (
     update_draft,
     create_reply_email,
     save_local_draft,
-    save_user_profile,
     create_local_sent_email,
-    update_email_ai_fields,
 )
 from .gmail_service import (
     delete_draft_message,
@@ -43,179 +33,37 @@ from .gmail_service import (
 )
 from .ollama_client import (
     ai_enabled,
-    classify_email,
-    summarize_email,
-    draft_reply,
-    revise_reply,
     should_summarize_email,
-    classification_to_email_type,
-    log_ai_event,
 )
+from .services.ai_tasks import (
+    generate_reply_draft as _generate_reply_draft,
+    get_ai_task as _get_ai_task,
+    run_ai_analysis as _run_ai_analysis,
+    serialize_ai_task as _serialize_ai_task,
+    should_auto_analyze_email as _should_auto_analyze_email,
+    start_analysis_task as _start_analysis_task,
+    start_draft_task as _start_draft_task,
+)
+from .services.mailbox import (
+    HIDDEN_FROM_MAIN_LIST_TYPES,
+    LIVE_EMAIL_POLL_INTERVAL_MS,
+    fetch_live_list_emails as _fetch_live_list_emails,
+    filter_emails_by_query as _filter_emails_by_query,
+    maybe_get_live_sync_max_results,
+    trigger_draft_sync_async as _trigger_draft_sync_async,
+)
+from .services.navigation import safe_next_url as _safe_next_url
+from .viewmodels.mailbox import (
+    build_mailbox_context,
+    emails_fingerprint as _emails_fingerprint,
+)
+from .viewmodels.sorting import sort_emails
 
 main = Blueprint("main", __name__)
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
-PROFILE_UPLOAD_DIR = Path(__file__).resolve().parent / "static" / "uploads" / "profiles"
-ALLOWED_PROFILE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-OCCUPATION_OPTIONS = [
-    "Student",
-    "Unemployed",
-    "Software Engineer",
-    "Data Scientist",
-    "Machine Learning Engineer",
-    "DevOps Engineer",
-    "Product Manager",
-    "Project Manager",
-    "UX Designer",
-    "UI Designer",
-    "Graphic Designer",
-    "Marketing Specialist",
-    "Sales Representative",
-    "Accountant",
-    "Financial Analyst",
-    "Teacher",
-    "Professor",
-    "Researcher",
-    "Doctor",
-    "Nurse",
-    "Pharmacist",
-    "Dentist",
-    "Therapist",
-    "Social Worker",
-    "Lawyer",
-    "Paralegal",
-    "HR Specialist",
-    "Recruiter",
-    "Operations Manager",
-    "Business Analyst",
-    "Consultant",
-    "Architect",
-    "Civil Engineer",
-    "Mechanical Engineer",
-    "Electrical Engineer",
-    "Construction Manager",
-    "Real Estate Agent",
-    "Customer Support Specialist",
-    "Administrative Assistant",
-    "Executive Assistant",
-    "Writer",
-    "Editor",
-    "Journalist",
-    "Photographer",
-    "Video Editor",
-    "Chef",
-    "Restaurant Manager",
-    "Barista",
-    "Retail Associate",
-    "Warehouse Associate",
-    "Truck Driver",
-    "Pilot",
-    "Flight Attendant",
-    "Police Officer",
-    "Firefighter",
-    "Military Service Member",
-    "Electrician",
-    "Plumber",
-    "Carpenter",
-    "Mechanic",
-    "Scientist",
-    "Entrepreneur",
-    "Freelancer",
-    "Homemaker",
-    "Retired",
-    "Other",
-]
-
-VALID_SORTS = {
-    "date_desc",
-    "date_asc",
-    "priority_desc",
-    "priority_asc",
-    "unread_first",
-    "read_first",
-}
-MERGE_SORT_MAX_ITEMS = 120
 
 NON_MAIN_TYPES = {"sent", "draft"}
-HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
 ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
-LIVE_LIST_CONFIGS = {
-    "all": {
-        "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
-        "empty_message": "Your All Emails tab is empty.",
-        "search_empty_message": "No emails matched your search.",
-    },
-    "read-only": {
-        "email_type": "read-only",
-        "empty_message": "Your Read Only tab is empty.",
-        "search_empty_message": "No emails matched your search in Read only.",
-    },
-    "response-needed": {
-        "email_type": "response-needed",
-        "empty_message": "Your Response Needed tab is empty.",
-        "search_empty_message": "No emails matched your search in Response needed.",
-    },
-    "junk": {
-        "email_type": "junk",
-        "empty_message": "Your Junk tab is empty.",
-        "search_empty_message": "No emails matched your search in Junk.",
-    },
-    "junk-uncertain": {
-        "email_type": "junk-uncertain",
-        "empty_message": "You have no Junk Mail to confirm.",
-        "search_empty_message": "No emails matched your search in Junk Confirmation.",
-    },
-    "archived": {
-        "archived_only": True,
-        "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
-        "empty_message": "Your Archive is empty.",
-        "search_empty_message": "No emails matched your search in Archive.",
-    },
-    "sent": {
-        "email_type": "sent",
-        "empty_message": "Your Sent tab is empty.",
-        "search_empty_message": "No emails matched your search in Sent.",
-    },
-    "draft": {
-        "email_type": "draft",
-        "empty_message": "Your Drafts tab is empty.",
-        "search_empty_message": "No emails matched your search in Drafts.",
-        "sync_drafts": True,
-    },
-}
-
-AI_TASKS = {}
-AI_TASK_INDEX = {}
-AI_TASK_LOCK = threading.Lock()
-AI_TASK_MAX_ITEMS = 200
-AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
-SEARCH_TOKEN_PATTERN = re.compile(r"[a-z0-9._%+\-]+")
-
-
-def _env_int(name, default):
-    """Environment int.
-    """
-    # Read environment configuration and clamp to safe bounds.
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return int(default)
-
-
-LIVE_EMAIL_POLL_INTERVAL_MS = max(1000, _env_int("LIVE_EMAIL_POLL_INTERVAL_MS", 2000))
-LIVE_EMAIL_SYNC_MAX_RESULTS = max(5, _env_int("LIVE_EMAIL_SYNC_MAX_RESULTS", 15))
-LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS = max(
-    5, _env_int("LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS", 30)
-)
-LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS = max(
-    LIVE_EMAIL_SYNC_MAX_RESULTS,
-    _env_int("LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS", 60),
-)
-_LAST_DEEP_LIVE_SYNC_AT = 0.0
-DRAFT_SYNC_INTERVAL_SECONDS = max(
-    10, _env_int("DRAFT_SYNC_INTERVAL_SECONDS", 45)
-)
-_LAST_DRAFT_SYNC_AT = 0.0
-_DRAFT_SYNC_LOCK = threading.Lock()
 
 def _normalize_addresses(raw_value):
     """Normalize addresses.
@@ -289,29 +137,6 @@ def _collect_attachment_payloads():
     return payloads
 
 
-def _save_profile_photo(file_obj):
-    """Save profile photo.
-    """
-    # Save profile photo after sanitizing user-provided values.
-    if file_obj is None:
-        return None
-    original_name = (file_obj.filename or "").strip()
-    if not original_name:
-        return None
-    safe_name = secure_filename(original_name)
-    extension = Path(safe_name).suffix.lower()
-    if extension not in ALLOWED_PROFILE_IMAGE_EXTENSIONS:
-        abort(400)
-    if file_obj.mimetype and not file_obj.mimetype.startswith("image/"):
-        abort(400)
-
-    PROFILE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    unique_name = f"{uuid4().hex}{extension}"
-    target_path = PROFILE_UPLOAD_DIR / unique_name
-    file_obj.save(target_path)
-    return f"uploads/profiles/{unique_name}"
-
-
 def _collect_reply_fields(email_data):
     """Collect reply fields.
     """
@@ -329,580 +154,6 @@ def _collect_reply_fields(email_data):
     return to_value, cc_value, reply_text
 
 
-def _contextual_reply_fallback(email_data):
-    """Contextual reply fallback.
-    """
-    # Build contextual reply fallback text that is passed into model prompts.
-    sender_raw = str(email_data.get("sender") or "").strip()
-    sender_label = sender_raw.split("<", 1)[0].strip().strip('"')
-    if "@" in sender_label and " " not in sender_label:
-        sender_label = sender_label.split("@", 1)[0]
-    sender_label = (
-        sender_label.replace(".", " ")
-        .replace("_", " ")
-        .replace("-", " ")
-        .strip()
-    )
-    sender_label = " ".join(sender_label.split())
-
-    title = str(email_data.get("title") or "").strip()
-    body = str(email_data.get("body") or "")
-    normalized_body = " ".join(body.replace("\r\n", "\n").replace("\r", "\n").split())
-    sentence_chunks = (
-        normalized_body.replace("?", "?. ").replace("!", "!. ").split(". ")
-        if normalized_body
-        else []
-    )
-    noise_markers = (
-        "view in browser",
-        "is this email difficult to read",
-        "unsubscribe",
-        "manage preferences",
-        "privacy policy",
-        "terms of service",
-        "all rights reserved",
-    )
-    request_markers = (
-        "please reply",
-        "please confirm",
-        "can you",
-        "could you",
-        "would you",
-        "let me know",
-        "respond by",
-        "action required",
-        "approval needed",
-        "deadline",
-        "asap",
-    )
-
-    filtered_sentences = []
-    request_sentence = ""
-    for chunk in sentence_chunks:
-        sentence = " ".join(str(chunk).split()).strip(" .")
-        if len(sentence) < 24:
-            continue
-        lowered = sentence.lower()
-        if any(marker in lowered for marker in noise_markers):
-            continue
-        filtered_sentences.append(sentence)
-        if not request_sentence and (
-            "?" in sentence or any(marker in lowered for marker in request_markers)
-        ):
-            request_sentence = sentence
-        if len(filtered_sentences) >= 4:
-            break
-
-    topic = ""
-    if title and title != "(No subject)":
-        topic = title
-    elif filtered_sentences:
-        topic = filtered_sentences[0]
-    elif normalized_body:
-        topic = normalized_body[:120].rstrip() + ("..." if len(normalized_body) > 120 else "")
-
-    if len(topic) > 110:
-        topic = topic[:107].rstrip() + "..."
-    if len(request_sentence) > 150:
-        request_sentence = request_sentence[:147].rstrip() + "..."
-
-    greeting = f"Hi {sender_label}," if sender_label else "Hi,"
-    if request_sentence:
-        message_line = (
-            f"Thanks for your email about {topic}. "
-            f"I reviewed your request: {request_sentence} "
-            "I will follow up shortly with next steps."
-        )
-    elif topic:
-        message_line = (
-            f"Thanks for sharing the update about {topic}. "
-            "I reviewed it and appreciate the context."
-        )
-    else:
-        message_line = (
-            "Thanks for your email. I reviewed your message and will follow up shortly."
-        )
-
-    return f"{greeting}\n\n{message_line}\n\nBest regards,"
-
-
-def _summary_looks_unusable(email_data):
-    # Internal helper for summary looks unusable used by higher-level request and sync workflows.
-    summary = " ".join(str(email_data.get("summary") or "").split()).strip().lower()
-    if not summary:
-        return False
-
-    title = " ".join(str(email_data.get("title") or "").split()).strip().lower()
-    if title and title != "(no subject)" and summary.startswith(title):
-        remainder = summary[len(title):].strip(" .:-")
-        if len(remainder) < 40:
-            return True
-
-    unusable_markers = (
-        "is this email difficult to read",
-        "view in browser",
-        "summary unavailable",
-        "summary generation failed",
-        "unable to summarize",
-        "unable to interpret",
-    )
-    return any(marker in summary for marker in unusable_markers)
-
-
-def _ai_user_profile():
-    """Return profile data used by AI calls, including canonical user email."""
-    # Keep profile context consistent across AI entry points.
-    profile = dict(get_user_profile() or {})
-    profile["email"] = LOCAL_USER_EMAIL
-    return profile
-
-
-def _should_auto_analyze_email(email_data):
-    """Return whether auto analyze email.
-    """
-    # Keep this decision logic centralized for predictable control flow.
-    if not ai_enabled():
-        return False
-    if not email_data:
-        return False
-    if bool(email_data.get("is_archived")):
-        return False
-    if email_data.get("type") in NON_MAIN_TYPES:
-        return False
-    body = (email_data.get("body") or "").strip()
-    if not body:
-        return False
-    classification_missing = (
-        not str(email_data.get("ai_category") or "").strip()
-        or email_data.get("ai_needs_response") is None
-        or email_data.get("ai_confidence") is None
-    )
-    summary_needed = should_summarize_email(email_data) and (
-        not (email_data.get("summary") or "").strip()
-        or _summary_looks_unusable(email_data)
-    )
-    return classification_missing or summary_needed
-
-
-def _run_ai_analysis(email_data, force=False):
-    """Run ai analysis.
-    """
-    # Execute the full workflow and report whether persisted state changed.
-    profile = _ai_user_profile()
-    updated = False
-    classification_missing = (
-        not str(email_data.get("ai_category") or "").strip()
-        or email_data.get("ai_needs_response") is None
-        or email_data.get("ai_confidence") is None
-    )
-
-    if force or classification_missing:
-        classification = classify_email(
-            email_data,
-            user_profile=profile,
-            email_id=email_data.get("id"),
-        )
-        if classification:
-            update_email_ai_fields(
-                email_id=email_data["id"],
-                email_type=classification_to_email_type(classification),
-                priority=classification.get("priority"),
-                ai_category=classification.get("category"),
-                ai_needs_response=classification.get("needs_response"),
-                ai_confidence=classification.get("confidence"),
-            )
-            updated = True
-
-    summary_missing = not (email_data.get("summary") or "").strip()
-    summary_unusable = _summary_looks_unusable(email_data)
-    should_generate_summary = should_summarize_email(email_data) and (
-        summary_missing or summary_unusable or force
-    )
-    if should_generate_summary:
-        summary = summarize_email(
-            email_data,
-            user_profile=profile,
-            email_id=email_data.get("id"),
-        )
-        if summary:
-            update_email_ai_fields(
-                email_id=email_data["id"],
-                summary=summary,
-            )
-            updated = True
-
-    return updated
-
-
-def _safe_next_url(raw_next):
-    """Return a local list-style URL and collapse nested /email/... next chains."""
-    fallback = url_for("main.allemails")
-    candidate = (raw_next or "").strip()
-    if not candidate:
-        return fallback
-
-    seen = set()
-    while candidate and candidate not in seen:
-        seen.add(candidate)
-        if not candidate.startswith("/"):
-            return fallback
-
-        parsed = urlsplit(candidate)
-        if parsed.scheme or parsed.netloc:
-            return fallback
-
-        path = parsed.path or "/"
-        query = parsed.query
-        if path.startswith("/email/"):
-            # Email pages can wrap another `next` query param; unwrap until a stable list URL.
-            nested = parse_qs(query).get("next", [None])[0]
-            if nested:
-                candidate = nested
-                continue
-            return fallback
-
-        return f"{path}?{query}" if query else path
-
-    return fallback
-
-@lru_cache(maxsize=4096)
-def _parse_dt_cached(text_value):
-    """Parse your existing date strings safely."""
-    # Parse raw dt input into validated values for downstream logic.
-    s = str(text_value or "").strip()
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            pass
-    return None
-
-
-def _parse_dt(value):
-    """Parse your existing date strings safely."""
-    if value is None:
-        return None
-    return _parse_dt_cached(str(value).strip())
-
-def _dt_sort_value(dt):
-    """
-    Turn datetime into a comparable number without using timestamp()
-    (timestamp can be annoying for very old dates on some systems).
-    """
-    # Convert datetime values into sortable integers without platform-dependent timestamp calls.
-    if dt is None:
-        return -1
-    return dt.toordinal() * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
-
-
-def _merge_sorted_rows(left_rows, right_rows):
-    """Merge two sorted row lists while preserving stability."""
-    merged = []
-    left_index = 0
-    right_index = 0
-
-    while left_index < len(left_rows) and right_index < len(right_rows):
-        if left_rows[left_index][1] <= right_rows[right_index][1]:
-            merged.append(left_rows[left_index])
-            left_index += 1
-        else:
-            merged.append(right_rows[right_index])
-            right_index += 1
-
-    if left_index < len(left_rows):
-        merged.extend(left_rows[left_index:])
-    if right_index < len(right_rows):
-        merged.extend(right_rows[right_index:])
-    return merged
-
-
-def _merge_sort_rows(rows):
-    """Sort rows with merge sort using the precomputed tuple key."""
-    if len(rows) <= 1:
-        return rows
-
-    midpoint = len(rows) // 2
-    left_rows = _merge_sort_rows(rows[:midpoint])
-    right_rows = _merge_sort_rows(rows[midpoint:])
-    return _merge_sorted_rows(left_rows, right_rows)
-
-
-def sort_emails(emails, sort_code):
-    """Sort emails.
-    """
-    sort_code = sort_code if sort_code in VALID_SORTS else "date_desc"
-
-    def row_key(email):
-        """Return the sortable tuple used for mailbox ordering."""
-        dt_value = _dt_sort_value(_parse_dt(email.get("date")))
-        pr_value = int(email.get("priority") or 0)
-
-        # Normalize all sorts into ascending tuple comparison so one sorter can handle every mode.
-        if sort_code == "date_desc":
-            return (-dt_value,)
-        if sort_code == "date_asc":
-            return (dt_value,)
-        if sort_code == "priority_desc":
-            return (-pr_value, -dt_value)
-        if sort_code == "priority_asc":
-            return (pr_value, -dt_value)
-        if sort_code == "unread_first":
-            return (bool(email.get("is_read")), -dt_value)
-        if sort_code == "read_first":
-            return (not bool(email.get("is_read")), -dt_value)
-        return (-dt_value,)
-
-    rows = [(email, row_key(email)) for email in emails]
-    if len(rows) <= 1:
-        return [row[0] for row in rows]
-
-    # Use merge sort so normal mailbox ordering stays O(n log n).
-    if len(rows) <= MERGE_SORT_MAX_ITEMS:
-        return [row[0] for row in _merge_sort_rows(list(rows))]
-
-    # Keep performance predictable for very large mailboxes.
-    return [row[0] for row in sorted(rows, key=lambda row: row[1])]
-
-
-def _emails_fingerprint(emails):
-    """Emails fingerprint.
-    """
-    rows = []
-    # Include only fields that affect visible list rows so polling can skip no-op DOM updates.
-    for email in emails:
-        rows.append(
-            ":".join(
-                [
-                    str(email.get("id") or ""),
-                    str(int(bool(email.get("is_read")))),
-                    str(email.get("type") or ""),
-                    str(email.get("date") or ""),
-                    str(int(email.get("priority") or 0)),
-                    str(email.get("title") or ""),
-                ]
-            )
-        )
-    return "|".join(rows)
-
-
-def _prune_ai_tasks_locked():
-    """Prune AI tasks locked.
-    """
-    # Drop completed/old task entries so in-memory task tracking stays bounded.
-    if len(AI_TASKS) <= AI_TASK_MAX_ITEMS:
-        return
-    removable = [
-        task for task in AI_TASKS.values() if task["status"] not in AI_TASK_ACTIVE_STATUSES
-    ]
-    removable.sort(key=lambda task: float(task.get("created_at") or 0))
-    while len(AI_TASKS) > AI_TASK_MAX_ITEMS and removable:
-        task = removable.pop(0)
-        task_id = task["id"]
-        key = (task["type"], task["email_id"])
-        mapped_id = AI_TASK_INDEX.get(key)
-        if mapped_id == task_id:
-            AI_TASK_INDEX.pop(key, None)
-        AI_TASKS.pop(task_id, None)
-
-
-def _create_or_get_ai_task(task_type, email_id):
-    """Create or get AI task.
-    """
-    key = (task_type, int(email_id))
-    with AI_TASK_LOCK:  # Protect shared in-memory AI task state with a lock.
-        existing_id = AI_TASK_INDEX.get(key)
-        existing = AI_TASKS.get(existing_id) if existing_id else None
-        # One active task per (task_type, email_id) keeps polling simple and avoids duplicated AI cost.
-        if existing and existing["status"] in AI_TASK_ACTIVE_STATUSES:
-            return dict(existing), False
-
-        task_id = uuid4().hex
-        now = time.time()
-        task = {
-            "id": task_id,
-            "type": task_type,
-            "email_id": int(email_id),
-            "status": "queued",
-            "result": None,
-            "error": None,
-            "created_at": now,
-            "updated_at": now,
-        }
-        AI_TASKS[task_id] = task
-        AI_TASK_INDEX[key] = task_id
-        _prune_ai_tasks_locked()
-        return dict(task), True
-
-
-def _set_ai_task_status(task_id, status, result=None, error=None):
-    """Set AI task status.
-    """
-    # Update task status/result atomically so polling clients always see consistent state.
-    with AI_TASK_LOCK:
-        task = AI_TASKS.get(task_id)
-        if not task:
-            return
-        task["status"] = status
-        task["updated_at"] = time.time()
-        if result is not None:
-            task["result"] = result
-        if error is not None:
-            task["error"] = error
-        if status not in AI_TASK_ACTIVE_STATUSES:
-            key = (task["type"], task["email_id"])
-            mapped_id = AI_TASK_INDEX.get(key)
-            if mapped_id == task_id:
-                AI_TASK_INDEX.pop(key, None)
-
-
-def _get_ai_task(task_id):
-    """Get AI task.
-    """
-    # Return the requested value while keeping failure behavior explicit for callers.
-    with AI_TASK_LOCK:
-        task = AI_TASKS.get(task_id)
-        return dict(task) if task else None
-
-
-def _serialize_ai_task(task):
-    """Serialize AI task.
-    """
-    # Manage serialize ai task lifecycle so asynchronous UI polling stays consistent.
-    payload = {
-        "task_id": task["id"],
-        "task_type": task["type"],
-        "email_id": task["email_id"],
-        "status": task["status"],
-    }
-    if task.get("result") is not None:
-        payload["result"] = task["result"]
-    if task.get("error"):
-        payload["error"] = task["error"]
-    return payload
-
-
-def _analysis_task_worker(task_id, email_id):
-    """Analysis task worker.
-    """
-    # Run AI analysis in a background thread and publish task result payloads for the UI.
-    _set_ai_task_status(task_id, "running")
-    try:
-        email_data = fetch_email_by_id(email_id)
-        if not email_data:
-            raise ValueError("Email not found.")
-        _run_ai_analysis(email_data, force=True)
-        refreshed = fetch_email_by_id(email_id) or email_data
-        _set_ai_task_status(
-            task_id,
-            "completed",
-            result={
-                "summary": refreshed.get("summary"),
-                "ai_category": refreshed.get("ai_category"),
-                "ai_needs_response": refreshed.get("ai_needs_response"),
-                "ai_confidence": refreshed.get("ai_confidence"),
-                "priority": refreshed.get("priority"),
-                "type": refreshed.get("type"),
-            },
-        )
-    except Exception as exc:
-        log_ai_event(
-            task="analyze",
-            status="error",
-            email_id=email_id,
-            detail=f"task_exception: {exc}",
-        )
-        _set_ai_task_status(task_id, "error", error=str(exc))
-
-
-def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text):
-    """Draft task worker.
-    """
-    # Generate/revise draft text in background and store the finished draft in task state.
-    _set_ai_task_status(task_id, "running")
-    try:
-        email_data = fetch_email_by_id(email_id)
-        if not email_data:
-            raise ValueError("Email not found.")
-
-        if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
-            _run_ai_analysis(email_data, force=True)
-            email_data = fetch_email_by_id(email_id) or email_data
-
-        profile = _ai_user_profile()
-        if current_reply_text:
-            draft_text = revise_reply(
-                email_data=email_data,
-                current_draft_text=current_reply_text,
-                to_value=to_value or "",
-                cc_value=cc_value or "",
-                user_profile=profile,
-                email_id=email_id,
-            )
-        else:
-            draft_text = draft_reply(
-                email_data=email_data,
-                to_value=to_value or "",
-                cc_value=cc_value or "",
-                user_profile=profile,
-                email_id=email_id,
-            )
-        if not draft_text:
-            draft_text = _contextual_reply_fallback(email_data)
-
-        update_draft(email_id, draft_text)
-        _set_ai_task_status(
-            task_id,
-            "completed",
-            result={
-                "draft": draft_text,
-            },
-        )
-    except Exception as exc:
-        log_ai_event(
-            task="draft",
-            status="error",
-            email_id=email_id,
-            detail=f"task_exception: {exc}",
-        )
-        _set_ai_task_status(task_id, "error", error=str(exc))
-
-
-def _start_analysis_task(email_id):
-    """Start analysis task.
-    """
-    # Start background work and return task metadata for polling.
-    task, created = _create_or_get_ai_task("analyze", email_id)
-    if created:
-        threading.Thread(
-            target=_analysis_task_worker,
-            args=(task["id"], int(email_id)),
-            daemon=True,
-        ).start()
-    return task
-
-
-def _start_draft_task(email_id, to_value, cc_value, current_reply_text):
-    """Start draft task.
-    """
-    # Start background work and return task metadata for polling.
-    task, created = _create_or_get_ai_task("draft", email_id)
-    if created:
-        threading.Thread(
-            target=_draft_task_worker,
-            args=(
-                task["id"],
-                int(email_id),
-                to_value or "",
-                cc_value or "",
-                current_reply_text or "",
-            ),
-            daemon=True,
-        ).start()
-    return task
-
-
 def _set_message_read_state_async(external_id, read=True):
     """Set message read state async.
     """
@@ -914,140 +165,6 @@ def _set_message_read_state_async(external_id, read=True):
         args=(external_id, read),
         daemon=True,
     ).start()
-
-
-def _trigger_draft_sync_async(max_results=40, force=False):
-    """Trigger draft sync async.
-    """
-    # Keep draft fetches responsive by running provider sync in the background.
-    global _LAST_DRAFT_SYNC_AT
-    now = time.time()
-    if not force and now - _LAST_DRAFT_SYNC_AT < DRAFT_SYNC_INTERVAL_SECONDS:
-        return False
-    if not _DRAFT_SYNC_LOCK.acquire(blocking=False):
-        return False
-
-    target = max(1, int(max_results or 40))
-
-    def _worker():
-        """Run one draft sync cycle and always release the draft sync lock afterward."""
-        # Manage worker lifecycle so asynchronous draft sync requests stay bounded.
-        global _LAST_DRAFT_SYNC_AT
-        try:
-            sync_drafts_from_gmail(max_results=target)
-            _LAST_DRAFT_SYNC_AT = time.time()
-        finally:
-            _DRAFT_SYNC_LOCK.release()
-
-    threading.Thread(target=_worker, daemon=True).start()
-    return True
-
-
-def _fetch_live_list_emails(list_view, search_query=""):
-    """Fetch live list emails.
-    """
-    # Fetch live list emails from storage without mutating persistent state.
-    config = LIVE_LIST_CONFIGS.get(list_view)
-    if not config:
-        return None, None
-    if config.get("sync_drafts"):
-        _trigger_draft_sync_async(max_results=40)
-    email_type = config.get("email_type")
-    exclude_types = config.get("exclude_types")
-    archived_only = bool(config.get("archived_only"))
-    if email_type:
-        emails = fetch_emails(
-            email_type=email_type,
-            archived_only=archived_only,
-        )
-    else:
-        emails = fetch_emails(
-            exclude_types=exclude_types,
-            archived_only=archived_only,
-        )
-    filtered_emails = _filter_emails_by_query(emails, search_query)
-    if (search_query or "").strip():
-        return filtered_emails, config.get("search_empty_message", "No emails matched your search.")
-    return filtered_emails, config["empty_message"]
-
-
-def _search_haystack(email):
-    """Return the normalized search text for an email row."""
-    # Keep search fields in one place so token indexing and substring matching stay aligned.
-    return " ".join(
-        [
-            email.get("title") or "",
-            email.get("sender") or "",
-            email.get("recipients") or "",
-            email.get("cc") or "",
-            email.get("body") or "",
-        ]
-    ).lower()
-
-
-def _search_tokens(text):
-    """Return normalized searchable tokens for index lookups."""
-    # Extract normalized terms so binary search can perform exact token membership checks.
-    return SEARCH_TOKEN_PATTERN.findall(str(text or "").lower())
-
-
-def _binary_search_token(tokens_sorted, token):
-    """Return the index of token in sorted token list, or -1 when missing."""
-    # Perform exact-match token lookup in O(log n).
-    left = 0
-    right = len(tokens_sorted) - 1
-    while left <= right:
-        middle = (left + right) // 2
-        mid_token = tokens_sorted[middle]
-        if mid_token == token:
-            return middle
-        if mid_token < token:
-            left = middle + 1
-        else:
-            right = middle - 1
-    return -1
-
-
-def _filter_emails_by_query(emails, query_text):
-    """Filter emails by query.
-    """
-    # Filter emails by query using the active query/criteria.
-    query = (query_text or "").strip()
-    if not query:
-        return emails
-
-    query_lc = query.lower()
-    haystacks = [_search_haystack(email) for email in emails]
-
-    # Build token -> row buckets, then resolve query terms via binary search.
-    token_to_rows = {}
-    for row_index, haystack in enumerate(haystacks):
-        for token in set(_search_tokens(haystack)):
-            token_to_rows.setdefault(token, []).append(row_index)
-
-    candidate_rows = None
-    query_tokens = _search_tokens(query_lc)
-    if query_tokens:
-        sorted_tokens = sorted(token_to_rows.keys())
-        for token in query_tokens:
-            token_index = _binary_search_token(sorted_tokens, token)
-            if token_index < 0:
-                return []
-            token_rows = set(token_to_rows[sorted_tokens[token_index]])
-            candidate_rows = token_rows if candidate_rows is None else candidate_rows & token_rows
-            if not candidate_rows:
-                return []
-
-    if candidate_rows is None:
-        candidate_rows = set(range(len(emails)))
-
-    filtered = []
-    for row_index, email in enumerate(emails):
-        if row_index not in candidate_rows:
-            continue
-        if query_lc in haystacks[row_index]:
-            filtered.append(email)
-    return filtered
 
 
 def _current_list_url():
@@ -1084,7 +201,7 @@ def _render_mailbox_page(
 ):
     """Render mailbox page.
     """
-    # Render the target template using already-prepared view-model data.
+    # Render mailbox template with service + view-model prepared data.
     sort_code, search_query, current_list_url = _list_query_state()
     if sync_drafts:
         _trigger_draft_sync_async(max_results=40)
@@ -1094,17 +211,14 @@ def _render_mailbox_page(
         archived_only=archived_only,
     )
     emails = _filter_emails_by_query(emails, search_query)
-    emails_sorted = sort_emails(emails, sort_code)
-
-    context = {
-        "emails": emails_sorted,
-        "sort": sort_code,
-        "current_list_url": current_list_url,
-        "search_query": search_query,
-        "live_poll_interval_ms": LIVE_EMAIL_POLL_INTERVAL_MS,
-    }
-    if include_fingerprint:
-        context["list_fingerprint"] = _emails_fingerprint(emails_sorted)
+    context = build_mailbox_context(
+        emails,
+        sort_code=sort_code,
+        current_list_url=current_list_url,
+        search_query=search_query,
+        live_poll_interval_ms=LIVE_EMAIL_POLL_INTERVAL_MS,
+        include_fingerprint=include_fingerprint,
+    )
     return render_template(template_name, **context)
 
 
@@ -1189,7 +303,6 @@ def _parse_bulk_email_ids(raw_ids):
 def list_emails_api():
     """List emails api.
     """
-    global _LAST_DEEP_LIVE_SYNC_AT
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
@@ -1197,12 +310,8 @@ def list_emails_api():
     current_list_url = _safe_next_url(request.args.get("next"))
 
     # Keep mailbox views fresh while throttling provider sync work.
-    if sync_requested:
-        now = time.time()
-        sync_max_results = LIVE_EMAIL_SYNC_MAX_RESULTS
-        if now - _LAST_DEEP_LIVE_SYNC_AT >= LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS:
-            sync_max_results = max(sync_max_results, LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS)
-            _LAST_DEEP_LIVE_SYNC_AT = now
+    sync_max_results = maybe_get_live_sync_max_results(sync_requested)
+    if sync_max_results is not None:
         trigger_background_sync(max_results=sync_max_results)
 
     emails, empty_message = _fetch_live_list_emails(list_view, search_query=search_query)
@@ -1285,7 +394,6 @@ def sync_from_gmail():
     if request.endpoint in {
         "main.about",
         "main.compose",
-        "main.profile",
         "main.list_emails_api",
     }:
         return
@@ -1305,37 +413,6 @@ def about():
     """
     # Route handler: validate request inputs, then render or redirect.
     return render_template("about.html")
-
-
-@main.route("/profile", methods=["GET", "POST"])
-def profile():
-    """Profile.
-    """
-    # Route handler: validate request inputs, then render or redirect.
-    profile_data = get_user_profile()
-    if request.method == "POST":
-        name_value = (request.form.get("name") or "").strip()
-        occupation_value = (request.form.get("occupation") or "").strip()
-        if occupation_value and occupation_value not in OCCUPATION_OPTIONS:
-            abort(400)
-
-        photo_path = profile_data.get("photo_path") or ""
-        uploaded = request.files.get("picture")
-        if uploaded and (uploaded.filename or "").strip():
-            photo_path = _save_profile_photo(uploaded)
-
-        save_user_profile(
-            name=name_value,
-            occupation=occupation_value,
-            photo_path=photo_path,
-        )
-        return redirect(url_for("main.profile"))
-
-    return render_template(
-        "profile.html",
-        profile=profile_data,
-        occupation_options=OCCUPATION_OPTIONS,
-    )
 
 
 @main.route("/allemails")
@@ -1442,7 +519,7 @@ def email(id):
     ai_analysis_needed = False
     ai_analysis_task_id = None
     ai_summary_expected = should_summarize_email(email_data)
-    if _should_auto_analyze_email(email_data):
+    if _should_auto_analyze_email(email_data, non_main_types=NON_MAIN_TYPES):
         ai_analysis_needed = True
         task = _start_analysis_task(id)
         ai_analysis_task_id = task["id"]
@@ -1794,26 +871,13 @@ def generate_draft(id):
         email_data = fetch_email_by_id(id) or email_data
 
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
-    profile = _ai_user_profile()
-    if current_reply_text:
-        draft = revise_reply(
-            email_data=email_data,
-            current_draft_text=current_reply_text,
-            to_value=to_value or "",
-            cc_value=cc_value or "",
-            user_profile=profile,
-            email_id=id,
-        )
-    else:
-        draft = draft_reply(
-            email_data=email_data,
-            to_value=to_value or "",
-            cc_value=cc_value or "",
-            user_profile=profile,
-            email_id=id,
-        )
-    if not draft:
-        draft = _contextual_reply_fallback(email_data)
+    draft = _generate_reply_draft(
+        email_data=email_data,
+        to_value=to_value or "",
+        cc_value=cc_value or "",
+        current_reply_text=current_reply_text or "",
+        email_id=id,
+    )
 
     update_draft(id, draft)
     next_url = _next_url_from_request()
@@ -1846,4 +910,3 @@ def toggle_read(id):
     _set_read_state_with_fallback(id, email_data, new_read_state)
     next_url = _next_url_from_request()
     return redirect(next_url)
-

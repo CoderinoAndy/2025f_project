@@ -101,7 +101,6 @@ REQUEST_SENTENCE_MARKERS = (
     "deadline",
     "asap",
 )
-LOCAL_USER_EMAIL_DEFAULT = "you@example.com"
 EMAIL_ADDRESS_PATTERN = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})")
 
 
@@ -277,14 +276,6 @@ def _compact_text(value):
     """
     # Internal helper for compact text used by higher-level request and sync workflows.
     return " ".join(str(value or "").split()).strip()
-
-
-def _local_user_email():
-    """Local user email.
-    """
-    # Resolve local user email using configuration defaults and safe fallback behavior.
-    value = _compact_text(os.getenv("LOCAL_USER_EMAIL") or os.getenv("USER_EMAIL"))
-    return value or LOCAL_USER_EMAIL_DEFAULT
 
 
 def _text_tokens(value):
@@ -495,31 +486,6 @@ def _normalized_email_for_classification(email_data):
         "cc": _compact_text(email_data.get("cc")),
         "body": _clean_body_for_prompt(email_data.get("body") or ""),
     }
-
-
-def _profile_prompt_block(user_profile):
-    """Profile prompt block.
-    """
-    # Build profile prompt block text that is passed into model prompts.
-    profile = user_profile if isinstance(user_profile, dict) else {}
-    name_value = _compact_text(profile.get("name"))
-    occupation_value = _compact_text(profile.get("occupation"))
-    account_email = _compact_text(profile.get("email")) or _local_user_email()
-    lines = []
-    if name_value:
-        lines.append(f"User display name: {name_value}")
-    if occupation_value:
-        lines.append(f"User occupation: {occupation_value}")
-    lines.extend(
-        [
-            f"User account email: {account_email}",
-            "Identity rules:",
-            "- The profile name is a display name, not an email address.",
-            "- Never treat a plain name as an email address.",
-            "- Use explicit email addresses in From/To/Cc as canonical.",
-        ]
-    )
-    return "User profile context:\n" + "\n".join(lines) + "\n\n"
 
 
 def _email_context_block(email_data):
@@ -1036,7 +1002,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
     return content
 
 
-def classify_email(email_data, user_profile=None, email_id=None):
+def classify_email(email_data, email_id=None):
     """Classify email.
     """
     # Normalize classify email into constrained labels used by mailbox triage logic.
@@ -1057,7 +1023,7 @@ def classify_email(email_data, user_profile=None, email_id=None):
         "priority must be an integer 1 to 3. "
         "confidence must be a float 0 to 1. "
         "Weighted evidence order: body intent is highest, sender identity/domain is second highest, "
-        "subject is third, user profile is fourth. "
+        "subject is third. "
         "If body and sender conflict weakly, give sender extra weight unless body has a direct response request. "
         "Infer whether the sender appears to be a brand/company/news source or an individual from sender "
         "name/domain using your general knowledge and context in this email. "
@@ -1069,7 +1035,6 @@ def classify_email(email_data, user_profile=None, email_id=None):
     )
     user_prompt = (
         "Classify this email.\n\n"
-        f"{_profile_prompt_block(user_profile)}"
         f"{_classification_few_shot_block()}\n\n"
         f"{_sender_hint_block(normalized_email)}\n"
         f"{_email_context_block(normalized_email)}\n\n"
@@ -1105,7 +1070,7 @@ def classify_email(email_data, user_profile=None, email_id=None):
     return _normalize_classification(merged)
 
 
-def summarize_email(email_data, user_profile=None, email_id=None):
+def summarize_email(email_data, email_id=None):
     """Summarize email.
     """
     # Transform summarize email data between provider payloads and local mailbox records.
@@ -1121,7 +1086,6 @@ def summarize_email(email_data, user_profile=None, email_id=None):
     )
     user_prompt = (
         "Summarize this email.\n\n"
-        f"{_profile_prompt_block(user_profile)}"
         f"{_email_context_block(email_data)}"
     )
     response_text = _call_ollama(
@@ -1258,7 +1222,7 @@ def _looks_draft_failure(draft_text, email_data):
     return False
 
 
-def draft_reply(email_data, to_value="", cc_value="", user_profile=None, email_id=None):
+def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     """Draft reply.
     """
     # Generate, revise, or validate draft reply used by reply and draft workflows.
@@ -1276,7 +1240,6 @@ def draft_reply(email_data, to_value="", cc_value="", user_profile=None, email_i
     )
     user_prompt = (
         "Draft a response email.\n\n"
-        f"{_profile_prompt_block(user_profile)}"
         f"{_email_context_block(email_data)}\n\n"
         f"Reply To: {to_value}\n"
         f"Reply Cc: {cc_value}\n"
@@ -1320,7 +1283,6 @@ def revise_reply(
     current_draft_text,
     to_value="",
     cc_value="",
-    user_profile=None,
     email_id=None,
 ):
     """Revise reply.
@@ -1338,7 +1300,6 @@ def revise_reply(
     )
     user_prompt = (
         "Revise this draft response based on the original email.\n\n"
-        f"{_profile_prompt_block(user_profile)}"
         f"{_email_context_block(email_data)}\n\n"
         f"Reply To: {to_value}\n"
         f"Reply Cc: {cc_value}\n"
@@ -1362,3 +1323,63 @@ def revise_reply(
     if _looks_draft_failure(cleaned, email_data):
         return current_draft_text
     return cleaned or current_draft_text
+
+
+def analyze_email(email_data, email_id=None):
+    """Analyze email.
+    """
+    # Backward-compatible adapter for legacy qwen_client API consumers.
+    classification = classify_email(
+        email_data=email_data,
+        email_id=email_id,
+    )
+    if not classification:
+        return None
+
+    try:
+        priority = int(classification.get("priority") or 1)
+    except (TypeError, ValueError):
+        priority = 1
+    priority = max(1, min(3, priority))
+
+    summary = summarize_email(
+        email_data=email_data,
+        email_id=email_id,
+    )
+    if not summary:
+        summary = _extractive_summary_fallback(email_data)
+    if not summary:
+        summary = _compact_text(email_data.get("summary")) or "No summary generated."
+
+    return {
+        "type": classification_to_email_type(classification),
+        "priority": priority,
+        "summary": summary,
+    }
+
+
+def generate_reply_draft(
+    email_data,
+    to_value="",
+    cc_value="",
+    current_draft_text="",
+    email_id=None,
+):
+    """Generate reply draft.
+    """
+    # Backward-compatible adapter for legacy qwen_client API consumers.
+    current_draft_text = str(current_draft_text or "").strip()
+    if current_draft_text:
+        return revise_reply(
+            email_data=email_data,
+            current_draft_text=current_draft_text,
+            to_value=to_value,
+            cc_value=cc_value,
+            email_id=email_id,
+        )
+    return draft_reply(
+        email_data=email_data,
+        to_value=to_value,
+        cc_value=cc_value,
+        email_id=email_id,
+    )

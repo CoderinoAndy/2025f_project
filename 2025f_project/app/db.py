@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from .debug_logger import log_event, log_exception
 
+# Central DB path and allowed enum-like values used by validation/query code.
 APP_ROOT = Path(__file__).resolve().parent.parent
 DB_DEFAULT = str(APP_ROOT / "instance" / "app.sqlite")
 LOCAL_USER_EMAIL = "you@example.com"
@@ -67,6 +68,7 @@ FROM email_messages m
 def db_session(db_path):
     """Database session.
     """
+    # One connection per context call keeps transaction boundaries explicit.
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -115,6 +117,7 @@ def init_db(db_path=DB_DEFAULT):
 def _apply_schema_migrations(conn):
     """Apply schema migrations.
     """
+    # Snapshot current schema so we can decide whether rebuild/alter is needed.
     columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(email_messages)").fetchall()
@@ -170,6 +173,7 @@ def _apply_schema_migrations(conn):
             """
         )
 
+    # Keep read-heavy mailbox queries fast with explicit supporting indexes.
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_provider_draft_id
@@ -222,6 +226,7 @@ def _rebuild_email_tables(conn, existing_columns):
     conn.execute("PRAGMA foreign_keys = OFF;")
     conn.execute("ALTER TABLE email_messages RENAME TO email_messages_old;")
 
+    # Recreate table with current constraints/defaults in one deterministic schema.
     conn.execute(
         """
         CREATE TABLE email_messages (

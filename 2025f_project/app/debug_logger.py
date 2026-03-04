@@ -11,6 +11,7 @@ MAX_FIELD_LENGTH = 1000
 _CONFIG_LOCK = Lock()
 
 
+# Normalize values so logs stay one-line and easy to grep.
 def _clean_value(value):
     """Clean value.
     """
@@ -98,10 +99,12 @@ def log_event(
 ):
     """Log event.
     """
+    # Convert string level into numeric level used by stdlib logger.
     level_name = str(level or "INFO").upper()
     level_number = getattr(logging, level_name, logging.INFO)
     logger = _logger()
 
+    # Base fields are always present for consistent log parsing.
     payload = {
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "level": logging.getLevelName(level_number),
@@ -113,6 +116,7 @@ def log_event(
     if details:
         payload["details"] = _clean_value(details)
 
+    # Optional metadata is appended as extra key=value fields.
     for key, value in metadata.items():
         if value is None:
             continue

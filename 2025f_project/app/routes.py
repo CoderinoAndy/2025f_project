@@ -57,6 +57,7 @@ from .mailbox import (
 main = Blueprint("main", __name__)
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 
+# App-level mailbox type rules reused by multiple routes.
 NON_MAIN_TYPES = {"sent", "draft"}
 ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
 
@@ -187,6 +188,7 @@ def _safe_next_url(raw_next):
     if not candidate.startswith("/"):
         return fallback
 
+    # Parse once and reject external/absolute targets.
     parsed = urlsplit(candidate)
     if parsed.scheme or parsed.netloc:
         return fallback
@@ -214,7 +216,7 @@ def _render_mailbox_page(
 ):
     """Render mailbox page.
     """
-    # Render mailbox template with service + view-model prepared data.
+    # Shared mailbox renderer used by /allemails, /junk, /archive, etc.
     sort_code, search_query, current_list_url = _list_query_state()
     if sync_drafts:
         _trigger_draft_sync_async(max_results=40)
@@ -316,6 +318,7 @@ def _parse_bulk_email_ids(raw_ids):
 def list_emails_api():
     """List emails api.
     """
+    # Live list polls this endpoint every few seconds.
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
@@ -331,6 +334,7 @@ def list_emails_api():
     if emails is None:
         abort(400)
 
+    # Keep API and full-page list ordering behavior identical.
     emails_sorted = sort_emails(emails, sort_code)
     rows_html = render_template(
         "_live_email_rows.html",
@@ -376,6 +380,7 @@ def start_ai_draft(id):
     if email_data.get("type") in NON_MAIN_TYPES:
         abort(400)
 
+    # Request body is optional; defaults keep API backward-compatible.
     payload = request.get_json(silent=True) or {}
     to_value = _normalize_addresses(payload.get("to")) or ""
     cc_value = _normalize_addresses(payload.get("cc")) or ""
@@ -521,6 +526,7 @@ def email(id):
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
+    # Opening a normal inbox email marks it as read in local DB and provider.
     if email_data.get("type") not in NON_MAIN_TYPES and not bool(email_data.get("is_archived")):
         external_id = email_data.get("external_id")
         if external_id:
@@ -532,6 +538,7 @@ def email(id):
     ai_analysis_needed = False
     ai_analysis_task_id = None
     ai_summary_expected = should_summarize_email(email_data)
+    # Start analysis asynchronously so page render is still fast.
     if _should_auto_analyze_email(email_data, non_main_types=NON_MAIN_TYPES):
         ai_analysis_needed = True
         task = _start_analysis_task(id)
@@ -609,6 +616,7 @@ def bulk_email_action():
     if not email_ids:
         return redirect(next_url)
 
+    # Process each selected row independently so one failure does not block others.
     for email_id in email_ids:
         email_data = fetch_email_by_id(email_id)
         if email_data is None:
@@ -748,6 +756,7 @@ def compose():
     """Compose.
     """
     next_candidate = request.args.get("next")
+    # If caller did not supply next=..., use the referrer list page.
     if not next_candidate:
         referrer = request.referrer or ""
         parsed_referrer = urlsplit(referrer)
@@ -832,6 +841,7 @@ def compose_send():
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
     # Reattach files that already exist in the provider draft/local sent message before sending.
+    # Rehydrate existing draft attachments before sending a final message.
     if fields["provider_draft_id"]:
         attachments = fetch_draft_attachments(fields["provider_draft_id"]) + attachments
     elif fields["local_draft_id"]:
@@ -842,6 +852,7 @@ def compose_send():
     if not fields["to"]:
         abort(400)
 
+    # Try provider send first; local fallback keeps app usable offline.
     sent_external_id = send_compose_message(
         to_value=fields["to"],
         cc_value=fields["cc"],
@@ -879,6 +890,7 @@ def generate_draft(id):
     if email_data is None:
         return "Email not found", 404
 
+    # Ensure classification context exists before generating a reply draft.
     if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
         _run_ai_analysis(email_data, force=True)
         email_data = fetch_email_by_id(id) or email_data

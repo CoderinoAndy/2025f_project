@@ -13,6 +13,7 @@ from uuid import uuid4
 from .db import fetch_email_by_id, update_draft, update_email_ai_fields
 from .debug_logger import log_event
 
+# This module now contains both model-calling code and async AI task orchestration.
 OLLAMA_API_URL_DEFAULT = "http://localhost:11434/api/chat"
 OLLAMA_MODEL_DEFAULT = "qwen2.5:7b"
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 12
@@ -1421,6 +1422,7 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
     if not str(email_data.get("body") or "").strip():
         return False
 
+    # Trigger when either triage fields or long-email summary is missing.
     missing_classification = (
         not str(email_data.get("ai_category") or "").strip()
         or email_data.get("ai_needs_response") is None
@@ -1442,6 +1444,7 @@ def run_ai_analysis(email_data, force=False):
         or email_data.get("ai_confidence") is None
     )
 
+    # Classification and summary are saved independently, so partial success is allowed.
     if force or missing_classification:
         classification = classify_email(email_data, email_id=email_data.get("id"))
         if classification:
@@ -1479,6 +1482,7 @@ def _cleanup_tasks_locked():
     if len(AI_TASKS) <= AI_TASK_MAX_ITEMS:
         return
 
+    # Keep only recent tasks in memory to avoid unbounded growth.
     done_tasks = [
         task for task in AI_TASKS.values() if task.get("status") not in AI_TASK_ACTIVE_STATUSES
     ]
@@ -1498,6 +1502,7 @@ def _create_or_get_ai_task(task_type, email_id):
     with AI_TASK_LOCK:
         existing_id = AI_TASK_INDEX.get(key)
         existing_task = AI_TASKS.get(existing_id) if existing_id else None
+        # Reuse active task so frontend polling has one task id per action.
         if existing_task and existing_task.get("status") in AI_TASK_ACTIVE_STATUSES:
             return dict(existing_task), False
 
@@ -1566,6 +1571,7 @@ def _analysis_task_worker(task_id, email_id):
         if not email_data:
             raise ValueError("Email not found.")
 
+        # Force mode guarantees a fresh pass for explicit user-triggered analysis.
         run_ai_analysis(email_data, force=True)
         refreshed = fetch_email_by_id(email_id) or email_data
         _set_ai_task_status(
@@ -1602,6 +1608,7 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
             run_ai_analysis(email_data, force=True)
             email_data = fetch_email_by_id(email_id) or email_data
 
+        # Draft generation supports both blank and user-edited starting text.
         draft_text = generate_reply_draft(
             email_data=email_data,
             to_value=to_value or "",

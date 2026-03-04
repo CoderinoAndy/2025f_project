@@ -17,6 +17,8 @@ VALID_SORTS = {
     "read_first",
 }
 TOKEN_PATTERN = re.compile(r"[a-z0-9._%+\-]+")
+
+# Per-tab data rules for live mailbox pages and API views.
 LIVE_LIST_CONFIGS = {
     "all": {
         "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -101,6 +103,7 @@ def maybe_get_live_sync_max_results(sync_requested):
         return None
 
     now = time.time()
+    # Most polls use a small sync; every N seconds we run a deeper pass.
     batch_size = LIVE_EMAIL_SYNC_MAX_RESULTS
     if now - MAILBOX_SYNC_STATE.last_deep_live_sync_at >= LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS:
         batch_size = LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS
@@ -116,6 +119,7 @@ def trigger_draft_sync_async(max_results=40, force=False):
     if not MAILBOX_SYNC_STATE.draft_sync_lock.acquire(blocking=False):
         return False
 
+    # Clamp user/config input so worker always receives a valid positive count.
     target = max(1, int(max_results or 40))
 
     def _worker():
@@ -132,6 +136,7 @@ def trigger_draft_sync_async(max_results=40, force=False):
 
 def _email_search_text(email):
     """Build one lowercase string used for simple substring search."""
+    # Put all searchable fields into one normalized text blob.
     return " ".join(
         [
             str(email.get("title") or ""),
@@ -165,6 +170,7 @@ def filter_emails_by_query(emails, query_text):
     # Intersect row sets so we only scan likely matches.
     candidate_rows = None
     for token in query_tokens:
+        # If any token is missing globally, we can stop immediately.
         rows = token_rows.get(token)
         if not rows:
             return []
@@ -205,6 +211,7 @@ def _email_sort_key(email, sort_code):
     priority = int(email.get("priority") or 0)
     is_read = bool(email.get("is_read"))
 
+    # Convert requested sort mode into one tuple so merge-sort can stay generic.
     if sort_code == "date_asc":
         return (date_num,)
     if sort_code == "priority_desc":
@@ -223,6 +230,7 @@ def _merge_sorted_pairs(left_pairs, right_pairs):
     merged = []
     left_i = 0
     right_i = 0
+    # Standard stable merge: equal keys keep left-side order.
     while left_i < len(left_pairs) and right_i < len(right_pairs):
         if left_pairs[left_i][1] <= right_pairs[right_i][1]:
             merged.append(left_pairs[left_i])
@@ -252,6 +260,7 @@ def sort_emails(emails, sort_code):
     if sort_code not in VALID_SORTS:
         sort_code = "date_desc"
 
+    # Precompute keys once; merge-sort compares tuples only.
     pairs = []
     for email in emails:
         pairs.append((email, _email_sort_key(email, sort_code)))
@@ -292,6 +301,7 @@ def build_mailbox_context(
     include_fingerprint=True,
 ):
     """Build the template context used by mailbox pages."""
+    # All mailbox templates receive the same core fields for consistency.
     emails_sorted = sort_emails(emails, sort_code)
     context = {
         "emails": emails_sorted,
@@ -311,6 +321,7 @@ def fetch_live_list_emails(list_view, search_query=""):
     if not config:
         return None, None
 
+    # Draft tab asks Gmail for fresh drafts before reading local DB.
     if config.get("sync_drafts"):
         trigger_draft_sync_async(max_results=40)
 

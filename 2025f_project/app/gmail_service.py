@@ -57,6 +57,8 @@ BULK_SENDER_MARKERS = (
     "marketing",
 )
 
+
+# Background sync state so repeated page loads do not hammer Gmail API.
 class _GmailSyncState:
     """In-memory sync throttling state for background Gmail sync."""
 
@@ -118,6 +120,7 @@ def _load_credentials():
     if not gmail_available():
         return None
 
+    # Start with token file if present, then fall back to refresh/login.
     credentials = None
     if TOKEN_PATH.exists():
         try:
@@ -126,9 +129,11 @@ def _load_credentials():
             credentials = None
 
     # Reuse cached token when valid, otherwise refresh or launch OAuth consent.
+    # Fast path: valid token with required scopes.
     if credentials and credentials.valid and credentials.has_scopes(SCOPES):
         return credentials
 
+    # Next best: refresh existing token without opening browser.
     if credentials and credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(Request())
@@ -142,6 +147,7 @@ def _load_credentials():
     if not credentials_path:
         return None
 
+    # Last resort: interactive OAuth flow.
     try:
         flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
         credentials = flow.run_local_server(port=0)
@@ -163,6 +169,7 @@ def _get_service():
     """Get service.
     """
     # Return the requested value while keeping failure behavior explicit for callers.
+    # Build Gmail API client only when auth is available.
     credentials = _load_credentials()
     if not credentials:
         return None
@@ -247,6 +254,7 @@ def _iter_parts(payload):
     if not payload:
         return
     stack = [payload]
+    # Iterative traversal avoids recursion depth issues on large MIME trees.
     while stack:
         current = stack.pop()
         children = current.get("parts") or []

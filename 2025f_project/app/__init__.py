@@ -11,6 +11,8 @@ from .debug_logger import (
 )
 from .gmail_service import gmail_available
 
+
+# App factory: build Flask app, wire startup tasks, then attach routes.
 def create_app():
     """Create app.
     """
@@ -112,8 +114,8 @@ def create_app():
             endpoint=request.endpoint or "",
         )
     
+    # Template filter is registered during app construction, once per process.
     @app.template_filter("fmt_dt")
-
     def fmt_dt(value):
         """
         Accepts:
@@ -141,6 +143,7 @@ def create_app():
 
         return dt.strftime("%d/%m/%Y %H:%M")
 
+    # Import routes late so startup utilities above are initialized first.
     from .routes import main
     app.register_blueprint(main)
     log_event(

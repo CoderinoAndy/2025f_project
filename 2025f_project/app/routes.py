@@ -47,17 +47,14 @@ from .services.ai_tasks import (
 from .services.mailbox import (
     HIDDEN_FROM_MAIN_LIST_TYPES,
     LIVE_EMAIL_POLL_INTERVAL_MS,
+    build_mailbox_context,
+    emails_fingerprint as _emails_fingerprint,
     fetch_live_list_emails as _fetch_live_list_emails,
     filter_emails_by_query as _filter_emails_by_query,
     maybe_get_live_sync_max_results,
+    sort_emails,
     trigger_draft_sync_async as _trigger_draft_sync_async,
 )
-from .services.navigation import safe_next_url as _safe_next_url
-from .viewmodels.mailbox import (
-    build_mailbox_context,
-    emails_fingerprint as _emails_fingerprint,
-)
-from .viewmodels.sorting import sort_emails
 
 main = Blueprint("main", __name__)
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
@@ -181,6 +178,24 @@ def _list_query_state():
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
     return sort_code, search_query, _current_list_url()
+
+
+def _safe_next_url(raw_next):
+    """Return a local in-app URL for redirects."""
+    fallback = url_for("main.allemails")
+    candidate = (raw_next or "").strip()
+    if not candidate:
+        return fallback
+    if not candidate.startswith("/"):
+        return fallback
+
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc:
+        return fallback
+    if parsed.path.startswith("/email/"):
+        # Keep users on list-style pages after POST actions.
+        return fallback
+    return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
 
 
 def _next_url_from_request():

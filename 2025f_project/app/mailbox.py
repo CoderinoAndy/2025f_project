@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -15,6 +16,7 @@ VALID_SORTS = {
     "unread_first",
     "read_first",
 }
+TOKEN_PATTERN = re.compile(r"[a-z0-9._%+\-]+")
 LIVE_LIST_CONFIGS = {
     "all": {
         "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -142,25 +144,38 @@ def _email_search_text(email):
 
 
 def filter_emails_by_query(emails, query_text):
-    """Filter rows by checking that each query token exists in row text."""
+    """Filter rows using token-index narrowing plus final text verification."""
     query = (query_text or "").strip().lower()
     if not query:
         return emails
 
-    query_tokens = [token for token in query.split() if token]
+    # Keep token parsing simple but robust for punctuation-heavy queries.
+    query_tokens = TOKEN_PATTERN.findall(query)
     if not query_tokens:
         return emails
 
+    haystacks = [_email_search_text(email) for email in emails]
+
+    # Build token -> row index map once for this query.
+    token_rows = {}
+    for row_index, haystack in enumerate(haystacks):
+        for token in set(TOKEN_PATTERN.findall(haystack)):
+            token_rows.setdefault(token, set()).add(row_index)
+
+    # Intersect row sets so we only scan likely matches.
+    candidate_rows = None
+    for token in query_tokens:
+        rows = token_rows.get(token)
+        if not rows:
+            return []
+        candidate_rows = rows if candidate_rows is None else candidate_rows & rows
+        if not candidate_rows:
+            return []
+
     filtered = []
-    for email in emails:
-        search_text = _email_search_text(email)
-        matched = True
-        for token in query_tokens:
-            if token not in search_text:
-                matched = False
-                break
-        if matched:
-            filtered.append(email)
+    for row_index in sorted(candidate_rows):
+        if query in haystacks[row_index]:
+            filtered.append(emails[row_index])
     return filtered
 
 
@@ -203,20 +218,48 @@ def _email_sort_key(email, sort_code):
     return (-date_num,)
 
 
+def _merge_sorted_pairs(left_pairs, right_pairs):
+    """Merge two sorted (email, key) lists."""
+    merged = []
+    left_i = 0
+    right_i = 0
+    while left_i < len(left_pairs) and right_i < len(right_pairs):
+        if left_pairs[left_i][1] <= right_pairs[right_i][1]:
+            merged.append(left_pairs[left_i])
+            left_i += 1
+        else:
+            merged.append(right_pairs[right_i])
+            right_i += 1
+    if left_i < len(left_pairs):
+        merged.extend(left_pairs[left_i:])
+    if right_i < len(right_pairs):
+        merged.extend(right_pairs[right_i:])
+    return merged
+
+
+def _merge_sort_pairs(pairs):
+    """Sort (email, key) pairs with merge sort in O(n log n)."""
+    if len(pairs) <= 1:
+        return pairs
+    mid = len(pairs) // 2
+    left = _merge_sort_pairs(pairs[:mid])
+    right = _merge_sort_pairs(pairs[mid:])
+    return _merge_sorted_pairs(left, right)
+
+
 def sort_emails(emails, sort_code):
-    """Sort emails with a simple insertion-sort implementation."""
+    """Sort emails with custom merge sort (stable, O(n log n))."""
     if sort_code not in VALID_SORTS:
         sort_code = "date_desc"
 
-    sorted_rows = list(emails)
-    for i in range(1, len(sorted_rows)):
-        current = sorted_rows[i]
-        current_key = _email_sort_key(current, sort_code)
-        j = i - 1
-        while j >= 0 and _email_sort_key(sorted_rows[j], sort_code) > current_key:
-            sorted_rows[j + 1] = sorted_rows[j]
-            j -= 1
-        sorted_rows[j + 1] = current
+    pairs = []
+    for email in emails:
+        pairs.append((email, _email_sort_key(email, sort_code)))
+    sorted_pairs = _merge_sort_pairs(pairs)
+
+    sorted_rows = []
+    for email, _key in sorted_pairs:
+        sorted_rows.append(email)
     return sorted_rows
 
 

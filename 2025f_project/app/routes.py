@@ -33,18 +33,16 @@ from .gmail_service import (
 )
 from .ollama_client import (
     ai_enabled,
-    should_summarize_email,
-)
-from .services.ai_tasks import (
     generate_reply_draft as _generate_reply_draft,
     get_ai_task as _get_ai_task,
     run_ai_analysis as _run_ai_analysis,
     serialize_ai_task as _serialize_ai_task,
     should_auto_analyze_email as _should_auto_analyze_email,
+    should_summarize_email,
     start_analysis_task as _start_analysis_task,
     start_draft_task as _start_draft_task,
 )
-from .services.mailbox import (
+from .mailbox import (
     HIDDEN_FROM_MAIN_LIST_TYPES,
     LIVE_EMAIL_POLL_INTERVAL_MS,
     build_mailbox_context,

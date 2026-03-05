@@ -1,4 +1,13 @@
 <!doctype html> <!-- Standard document shell for this page. -->
+<!--
+  Template: archive.html
+  Purpose:
+  - Mailbox list view for archived non-draft/non-sent messages.
+  - Provides the same search, sort, and bulk action affordances as active mailboxes.
+  - Connects this route to live list-refresh logic through data-live-email-view.
+  Expected context:
+  - emails, sort, search_query, list_fingerprint, live_poll_interval_ms, current_list_url.
+-->
 <html lang="en">
   <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />

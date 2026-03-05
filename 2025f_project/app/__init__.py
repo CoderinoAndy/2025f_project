@@ -137,7 +137,7 @@ def create_app():
         return dt.strftime("%d/%m/%Y %H:%M")
 
     # Import routes late so startup utilities above are initialized first.
-    from .routes import main # Essentially, running routes.py and loading all endpoints onto the "main" blueprint object
+    from .routes import main
     app.register_blueprint(main) # Attaches everything in the blueprint to the app object
     log_event(
         action_type="system",

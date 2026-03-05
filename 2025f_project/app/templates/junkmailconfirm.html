@@ -1,4 +1,13 @@
 <!doctype html> <!-- Standard document shell for this page. -->
+<!--
+  Template: junkmailconfirm.html
+  Purpose:
+  - Mailbox list for uncertain junk that still needs user confirmation.
+  - Preserves filter/sort state and defers row rendering to shared partials.
+  - Emits route-specific live view metadata for polling + action scripts.
+  Expected context:
+  - emails, sort, search_query, list_fingerprint, live_poll_interval_ms, current_list_url.
+-->
 <html lang="en">
   <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />

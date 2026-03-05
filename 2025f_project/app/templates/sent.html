@@ -1,4 +1,13 @@
 <!doctype html> <!-- Standard document shell for this page. -->
+<!--
+  Template: sent.html
+  Purpose:
+  - Lists sent messages with search/sort controls and row-level mailbox actions.
+  - Reuses shared partials for navigation, row markup, and bulk-selection workflow.
+  - Exposes data attributes consumed by live polling and action scripts.
+  Expected context:
+  - emails, sort, search_query, list_fingerprint, live_poll_interval_ms, current_list_url.
+-->
 <html lang="en">
   <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />

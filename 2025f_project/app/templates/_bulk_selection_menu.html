@@ -1,3 +1,12 @@
+<!--
+  Template Partial: _bulk_selection_menu.html
+  Purpose:
+  - Slide-out bulk action panel shown when one or more rows are selected.
+  - Uses a single POST form that is parameterized by hidden inputs set in JS.
+  - Action buttons are filtered/enabled client-side by per-row capability flags.
+  Expected context:
+  - current_list_url.
+-->
 <div class="bulk-side-menu" data-bulk-side-menu aria-hidden="true"> <!-- Bulk action drawer; JS shows it only while selecting rows. -->
   <div class="bulk-side-menu-header">
     <span><strong data-selected-count>0</strong> selected</span>

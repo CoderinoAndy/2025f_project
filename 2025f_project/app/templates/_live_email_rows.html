@@ -1,3 +1,12 @@
+<!--
+  Template Partial: _live_email_rows.html
+  Purpose:
+  - Reusable mailbox rows used by both initial page render and live polling refreshes.
+  - Emits capability metadata via data-* attributes for bulk selection/actions JS.
+  - Handles row-level links/forms for archive, move, delete, and read-state toggles.
+  Expected context:
+  - emails, current_list_url, empty_message.
+-->
 {% if emails and emails|length > 0 %} <!-- Shared row partial used by full page render + live polling API responses. -->
   {% for email in emails %}
     {% set priority_value = (email.priority or 1)|int %}

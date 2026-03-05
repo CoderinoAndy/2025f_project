@@ -1742,6 +1742,28 @@ def _drafts_too_similar(original_text, revised_text):
     return False
 
 
+def _draft_preserves_user_context(original_text, revised_text):
+    """Return True when revised draft still reflects user-provided context."""
+    # Keep revise behavior anchored to the user's current reply box content.
+    original = _compact_text(original_text).lower()
+    revised = _compact_text(revised_text).lower()
+    if not original or not revised:
+        return False
+    if original in revised:
+        return True
+
+    original_tokens = set(_text_tokens(original))
+    revised_tokens = set(_text_tokens(revised))
+    if not original_tokens or not revised_tokens:
+        return False
+    overlap = len(original_tokens & revised_tokens) / float(len(original_tokens))
+
+    # Short user drafts need lighter overlap checks; long drafts should retain more substance.
+    if len(original_tokens) <= 12:
+        return overlap >= 0.24
+    return overlap >= 0.34
+
+
 def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     """Draft reply.
     """
@@ -1820,6 +1842,8 @@ def revise_reply(
         "You revise email drafts using the incoming email context. "
         "Write as the mailbox owner (use I/we), not as an observer. "
         "Never refer to the mailbox owner as 'the user'. "
+        "Treat the current draft as required user context: preserve its concrete points and intent. "
+        "Do not discard user-provided constraints, commitments, or questions. "
         "Preserve the original intent, but expand vague or very short drafts into complete replies. "
         "Include concrete details and next steps when the original email asks for action. "
         "Do not copy long spans from the original email. "
@@ -1844,7 +1868,7 @@ def revise_reply(
             {"role": "user", "content": user_prompt},
         ],
         email_id=email_id,
-        temperature=0.25,
+        temperature=0.1,
         num_predict=650,
     )
     if not response_text:
@@ -1852,8 +1876,8 @@ def revise_reply(
         fallback = _draft_reply_fallback(email_data)
         return fallback if fallback and not _drafts_too_similar(current_draft_text, fallback) else current_draft_text
     cleaned = str(response_text or "").strip()
-    if _looks_draft_failure(cleaned, email_data) or _drafts_too_similar(current_draft_text, cleaned):
-        # Recover from unusable/no-op revisions by forcing a fresh draft generation pass.
+    if _looks_draft_failure(cleaned, email_data):
+        # Recover from unusable revisions by forcing a fresh draft generation pass.
         regenerated = draft_reply(
             email_data=email_data,
             to_value=to_value,
@@ -1867,6 +1891,12 @@ def revise_reply(
         if fallback and not _drafts_too_similar(current_draft_text, fallback):
             return fallback
         return current_draft_text
+    if not _draft_preserves_user_context(current_draft_text, cleaned):
+        # Never replace user-provided context with unrelated model content.
+        return current_draft_text
+    if _drafts_too_similar(current_draft_text, cleaned):
+        # Near-identical revisions are still acceptable if they preserve context.
+        return cleaned or current_draft_text
     return cleaned or current_draft_text
 
 
@@ -1991,7 +2021,6 @@ def run_ai_analysis(email_data, force=False):
             update_email_ai_fields(
                 email_id=email_data["id"],
                 email_type=classification_to_email_type(classification),
-                priority=classification.get("priority"),
                 ai_category=classification.get("category"),
                 ai_needs_response=classification.get("needs_response"),
                 ai_confidence=classification.get("confidence"),

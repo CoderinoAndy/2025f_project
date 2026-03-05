@@ -1,4 +1,13 @@
 <!doctype html> <!-- Standard document shell for this page. -->
+<!--
+  Template: responseneeded.html
+  Purpose:
+  - Mailbox list view for emails categorized as "response-needed".
+  - Supports query persistence, sorting, and shared bulk row operations.
+  - Provides live polling metadata so only this tab's list can be refreshed.
+  Expected context:
+  - emails, sort, search_query, list_fingerprint, live_poll_interval_ms, current_list_url.
+-->
 <html lang="en">
   <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />

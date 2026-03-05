@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import hashlib
 import mimetypes
 import os
@@ -166,8 +166,6 @@ def _load_credentials():
 
 
 def _get_service():
-    """Get service.
-    """
     # Return the requested value and return a safe fallback when it fails.
     # Build Gmail API client only when auth is available.
     credentials = _load_credentials()
@@ -778,7 +776,6 @@ def _triage_email_with_ai(email_data, db_path):
     update_email_ai_fields(
         email_id=email_data["id"],
         email_type=ai_type,
-        priority=classification.get("priority"),
         ai_category=classification.get("category"),
         ai_needs_response=classification.get("needs_response"),
         ai_confidence=classification.get("confidence"),

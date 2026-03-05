@@ -1,4 +1,13 @@
 <!doctype html> <!-- Standard document shell for this page. -->
+<!--
+  Template: email.html
+  Purpose:
+  - Renders the email detail experience (metadata, body, summary, thread, and reply).
+  - Coordinates server-rendered actions (move/archive/send) with client-side AI workflows.
+  - Contains inline scripts for HTML body isolation, attachment management, and task polling.
+  Expected context:
+  - email, next_url, thread_emails/thread_count, ai_* flags/task ids, current_user_email.
+-->
 <html lang="en">
   <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />
@@ -386,6 +395,7 @@
                         <button class="dropdown-item" type="submit">{{ label }}</button>
                       </form>
                     </li>
+                  <!-- Conditional render block closes here. -->
                   {% endif %}
                 {% endfor %}
                 {% if email.type != 'draft' %}
@@ -404,6 +414,7 @@
                         <button class="dropdown-item" type="submit">Move to archive</button>
                       </form>
                     </li>
+                  <!-- Conditional render block closes here. -->
                   {% endif %}
                 {% endif %}
               </ul>
@@ -425,8 +436,7 @@
               <div class="message-content">{{ email.body }}</div>
             {% endif %}
           </div>
-
-          <!-- Reply panel (now contained in left column) -->
+          
           <!-- Reply composer section. -->
           <div class="reply-panel">
             <div class="reply-label">Reply</div>

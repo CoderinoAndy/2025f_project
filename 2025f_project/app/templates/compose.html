@@ -1,4 +1,13 @@
 <!doctype html> <!-- Standard document shell for this page. -->
+<!--
+  Template: compose.html
+  Purpose:
+  - Compose/new draft editor with recipients, subject/body, attachments, and send/save actions.
+  - Supports editing existing drafts through hidden draft/thread identifiers.
+  - Includes client-side dirty tracking and beforeunload autosave behavior.
+  Expected context:
+  - draft_email, draft_attachments, next_url.
+-->
 <html lang="en">
   <head> <!-- Page metadata, title, and style links. -->
     <meta charset="utf-8" />

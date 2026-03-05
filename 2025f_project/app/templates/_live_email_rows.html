@@ -1,5 +1,11 @@
 {% if emails and emails|length > 0 %} <!-- Shared row partial used by full page render + live polling API responses. -->
   {% for email in emails %}
+    {% set priority_value = (email.priority or 1)|int %}
+    {% if priority_value < 1 %}
+      {% set priority_value = 1 %}
+    {% elif priority_value > 3 %}
+      {% set priority_value = 3 %}
+    {% endif %}
     <div
       class="email-row {% if not email.is_read %}unread{% endif %} {% if loop.index is even %}alt{% endif %} position-relative"
       data-email-id="{{ email.id }}"
@@ -24,15 +30,20 @@
       {% endif %}
 
       <div class="row g-0 align-items-center flex-grow-1">
-        <div class="col-6 wrap-ellipsis pe-2">
+        <div class="col-5 wrap-ellipsis pe-2">
           <span class="mail-title">{{ email.title }}</span>
-          {% if email.priority %}
-            <span class="priority">{{ "â˜…" * email.priority }}</span>
-          {% endif %}
         </div>
 
-        <div class="col-3 text-center muted wrap-ellipsis px-2">
+        <div class="col-2 text-center muted wrap-ellipsis px-2">
           {{ email.type }}
+        </div>
+
+        <div class="col-2 text-center px-2">
+          <span class="priority priority-{{ priority_value }}" aria-label="Priority {{ priority_value }} of 3">
+            {% for _ in range(priority_value) %}
+              <span aria-hidden="true">&#9733;</span>
+            {% endfor %}
+          </span>
         </div>
 
         <div class="col-3 text-end muted ps-2">

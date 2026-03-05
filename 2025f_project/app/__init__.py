@@ -1,4 +1,4 @@
-from flask import Flask, g, request
+﻿from flask import Flask, g, request
 from werkzeug.exceptions import HTTPException
 from datetime import datetime
 from time import perf_counter
@@ -21,13 +21,6 @@ def create_app():
     configure_debug_logger()
     try:
         init_db()
-        log_event(
-            action_type="database",
-            action="init_db",
-            status="ok",
-            component="startup",
-            details="Database initialization completed.",
-        )
     except Exception as exc:
         log_exception(
             action_type="database",
@@ -144,8 +137,8 @@ def create_app():
         return dt.strftime("%d/%m/%Y %H:%M")
 
     # Import routes late so startup utilities above are initialized first.
-    from .routes import main
-    app.register_blueprint(main)
+    from .routes import main # Essentially, running routes.py and loading all endpoints onto the "main" blueprint object
+    app.register_blueprint(main) # Attaches everything in the blueprint to the app object
     log_event(
         action_type="system",
         action="app_ready",

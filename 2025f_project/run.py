@@ -4,4 +4,3 @@ app = create_app()  # Build one Flask app instance
 
 if __name__ == "__main__":  # Run dev server only when executing `python run.py` directly.
     app.run(host="127.0.0.1", port=5050, debug=True, use_reloader=False)  # Bind local dev host/port with debug on.
-    

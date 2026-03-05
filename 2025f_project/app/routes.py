@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
+﻿from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 import os
 import threading
 from urllib.parse import urlsplit
@@ -98,8 +98,6 @@ def _collect_compose_fields():
 
 
 def _has_compose_content(fields):
-    """Return whether compose content.
-    """
     # Check whether compose content exists before running heavier work.
     return bool(
         fields.get("to")

@@ -90,6 +90,69 @@ SUMMARY_NOISE_MARKERS = (
     "this email was sent to",
     "add us to your address book",
 )
+SUMMARY_HALLUCINATION_MARKERS = (
+    "if you're not subscribed",
+    "if you are not subscribed",
+    "sign up here",
+    "subscribe here",
+    "subscribe now",
+    "click here to subscribe",
+)
+SUMMARY_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "that",
+    "with",
+    "this",
+    "from",
+    "your",
+    "you",
+    "are",
+    "was",
+    "were",
+    "been",
+    "have",
+    "has",
+    "had",
+    "into",
+    "about",
+    "their",
+    "there",
+    "will",
+    "would",
+    "could",
+    "should",
+    "they",
+    "them",
+    "then",
+    "than",
+    "also",
+    "just",
+    "more",
+    "most",
+    "very",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "after",
+    "before",
+    "over",
+    "under",
+    "between",
+    "because",
+    "through",
+    "these",
+    "those",
+    "within",
+    "without",
+    "about",
+    "into",
+    "onto",
+    "upon",
+}
 FOOTER_NOISE_REGEX_PATTERNS = (
     r"\bmanage\s+(?:email\s+)?preferences\b",
     r"\bemail\s+preferences\b",
@@ -347,7 +410,8 @@ def _strip_footer_noise_text(text):
         cleaned,
         flags=re.IGNORECASE,
     )
-    cleaned = re.sub(r"\s*[|ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢]+\s*", " ", cleaned)
+    cleaned = re.sub(r"\[\s*link\s*\]", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*[|]+\s*", " ", cleaned)
     cleaned = re.sub(r"\.{2,}", ".", cleaned)
     cleaned = re.sub(r"\?{2,}", "?", cleaned)
     cleaned = re.sub(r"!{2,}", "!", cleaned)
@@ -610,48 +674,210 @@ def _looks_summary_failure(summary_text):
     return any(marker in normalized for marker in SUMMARY_FAILURE_MARKERS)
 
 
-def _extractive_summary_fallback(email_data):
-    """Extractive summary fallback.
-    """
+def _content_tokens(value):
+    """Return content-heavy tokens for grounding checks."""
     # Used by other functions in this file.
+    tokens = _text_tokens(value)
+    return [token for token in tokens if token not in SUMMARY_STOPWORDS]
+
+
+def _summary_support_ratio(sentence_text, reference_tokens):
+    """Return how strongly sentence tokens are grounded in the source."""
+    # Keep hallucination filtering deterministic and cheap.
+    tokens = _content_tokens(sentence_text)
+    if not tokens:
+        return 0.0
+    if not reference_tokens:
+        return 0.0
+    supported = sum(1 for token in tokens if token in reference_tokens)
+    return supported / float(len(tokens))
+
+
+def _sanitize_model_summary(summary_text, email_data):
+    """Normalize and ground model summary text against source content."""
+    # Keep only concise, source-supported sentences from model output.
+    summary = _compact_text(summary_text)
+    if not summary:
+        return None
+    summary = re.sub(r"\?", ".", summary)
+    summary = re.sub(r"\bkey details\s*:\s*", "", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"\baction for you\s*:\s*", "", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"\bsummary\s*:\s*", "", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"\s{2,}", " ", summary).strip()
+    if not summary:
+        return None
+
+    title = _compact_text(email_data.get("title") or "")
+    source = _compact_text(
+        " ".join(
+            part
+            for part in [
+                title,
+                _body_for_context(email_data, max_chars=3600),
+            ]
+            if part
+        )
+    )
+    source_tokens = set(_content_tokens(source))
+
+    parts = [
+        _compact_text(fragment).strip(" -:")
+        for fragment in re.split(r"(?<=[.!?])\s+", summary)
+    ]
+    parts = [fragment for fragment in parts if fragment]
+    if not parts:
+        parts = [summary]
+
+    kept = []
+    for sentence in parts:
+        cleaned = _compact_text(_strip_footer_noise_text(sentence))
+        if len(cleaned) < 22:
+            continue
+        lowered = cleaned.lower()
+        if any(marker in lowered for marker in SUMMARY_HALLUCINATION_MARKERS):
+            continue
+        if _is_noise_fragment(cleaned):
+            continue
+        if any(_token_overlap_ratio(cleaned, existing) > 0.93 for existing in kept):
+            continue
+        support_ratio = _summary_support_ratio(cleaned, source_tokens)
+        if support_ratio < 0.52 and not _is_near_subject_copy(cleaned, title):
+            continue
+        kept.append(cleaned)
+        if len(kept) >= 3:
+            break
+
+    if not kept:
+        return None
+
+    normalized = " ".join(_ensure_sentence_ending(sentence) for sentence in kept)
+    normalized = _compact_text(normalized)
+    if len(normalized) > SUMMARY_MAX_CHARS:
+        normalized = f"{normalized[: SUMMARY_MAX_CHARS - 3]}..."
+    return normalized or None
+
+
+def _looks_summary_parrot(summary_text, email_data):
+    """Return True when summary appears copied from the email body."""
+    # Keep model summaries readable by rejecting near-verbatim source echoes.
+    summary = _compact_text(summary_text)
+    if len(summary) < 60:
+        return False
+
+    source = _compact_text(_body_for_context(email_data, max_chars=3600))
+    if not source:
+        return False
+
+    summary_lower = summary.lower()
+    source_lower = source.lower()
+    if len(summary) >= 80 and summary_lower in source_lower:
+        return True
+
+    summary_sentences = [
+        _compact_text(part).strip(" -:")
+        for part in re.split(r"(?<=[.!?])\s+", summary)
+    ]
+    summary_sentences = [part for part in summary_sentences if len(part) >= 24]
+    if not summary_sentences:
+        summary_sentences = [summary]
+
+    source_sentences = _extract_key_sentences(source, max_sentences=20)
+    if not source_sentences:
+        source_sentences = [
+            _compact_text(part).strip(" -:")
+            for part in re.split(r"(?<=[.!?])\s+", source)
+            if _compact_text(part)
+        ]
+
+    copied_sentences = 0
+    for sentence in summary_sentences:
+        sentence_lower = sentence.lower()
+        if len(sentence) >= 36 and sentence_lower in source_lower:
+            copied_sentences += 1
+            continue
+        if any(
+            _token_overlap_ratio(sentence, source_sentence) >= 0.96
+            and abs(len(sentence) - len(source_sentence)) <= 40
+            for source_sentence in source_sentences
+        ):
+            copied_sentences += 1
+
+    required_copied = max(1, (len(summary_sentences) + 1) // 2)
+    return copied_sentences >= required_copied
+
+
+def _rewrite_parroted_summary(summary_text, email_data, email_id=None):
+    """Attempt to rewrite a copied summary into original condensed wording."""
+    # Give the model one more chance to paraphrase before falling back.
+    candidate = _compact_text(summary_text)
+    if not candidate:
+        return None
+
+    system_prompt = (
+        "You rewrite copied email summaries into original condensed wording. "
+        "Address the mailbox owner directly using you/your. "
+        "Use only explicit facts present in the email context. "
+        "Do not copy or quote source sentences. "
+        "Do not add subscription/sign-up suggestions unless explicitly requested in the email. "
+        "Use declarative statements only (no questions). "
+        "Return one compact plain-text paragraph, 2-4 sentences."
+    )
+    user_prompt = (
+        "Rewrite this summary in your own words so it is not copied from the email.\n\n"
+        f"Current summary:\n{candidate}\n\n"
+        f"{_email_context_block(email_data)}"
+    )
+    response_text = _call_ollama(
+        task="summarize_rewrite",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        email_id=email_id,
+        temperature=0.25,
+        num_predict=280,
+    )
+    if not response_text:
+        return None
+
+    rewritten = _rewrite_summary_for_second_person(
+        _sanitize_model_summary(response_text, email_data) or ""
+    )
+    if _looks_summary_failure(rewritten):
+        return None
+    if _looks_summary_parrot(rewritten, email_data):
+        return None
+    if len(rewritten) > SUMMARY_MAX_CHARS:
+        rewritten = f"{rewritten[: SUMMARY_MAX_CHARS - 3]}..."
+    return rewritten or None
+
+
+def _extractive_summary_fallback(email_data):
+    """Contextual summary fallback.
+    """
+    # Keep fallback summaries useful without copying long spans from the body.
     title = _compact_text(email_data.get("title") or "")
     sender_name = _sender_display_name(email_data.get("sender")) or "the sender"
-    candidate_sentences = _extract_key_sentences(email_data.get("body") or "", max_sentences=8)
-    if not candidate_sentences:
-        # Broaden extraction to cleaned body text when sentence-level extraction fails.
-        fallback_body = _body_for_context(email_data, max_chars=2400)
-        if not fallback_body:
-            if title and title.lower() != "(no subject)":
-                return f"You received an email from {sender_name} about {title}."
-            return f"You received an email from {sender_name}."
-        candidate_sentences = [fallback_body]
-
-    selected = []
-    for sentence in candidate_sentences:
-        # Skip candidates that only parrot the subject line.
-        if _is_near_subject_copy(sentence, title):
-            continue
-        selected.append(sentence)
-        if len(" ".join(selected)) >= 520 or len(selected) >= 4:
-            break
-    if not selected:
-        selected = candidate_sentences[:4]
+    actionable = _looks_actionable(email_data)
+    newsletter_like = _looks_bulk_or_newsletter(email_data)
 
     intro = (
-        f"You received an email from {sender_name} about {title}."
+        f"This email from {sender_name} is about {title}."
         if title and title.lower() != "(no subject)"
-        else f"You received an email from {sender_name}."
+        else f"This email is from {sender_name}."
     )
-    detail_text = _compact_text(" ".join(selected))
-    summary = intro
-    if detail_text:
-        detail_clause = _ensure_sentence_ending(f"Key details: {detail_text}")
-        summary = _compact_text(f"{intro} {detail_clause}")
-    request_sentence = _first_request_sentence(email_data)
-    if request_sentence:
-        # Surface explicit ask/deadline language directly in fallback output.
-        action_clause = _ensure_sentence_ending(f"Action for you: {request_sentence}")
-        summary = _compact_text(f"{summary} {action_clause}")
+
+    if actionable:
+        posture = "It appears to include a request that needs your response."
+        action = "Review the message and reply with the requested details."
+    elif newsletter_like:
+        posture = "It looks like an informational update or newsletter."
+        action = "No direct reply appears to be required."
+    else:
+        posture = "It appears to be an informational message."
+        action = "No explicit action request is obvious from the content."
+
+    summary = _compact_text(f"{intro} {posture} {action}")
     if _is_noise_fragment(summary):
         if title and title.lower() != "(no subject)":
             return f"You received an email about {title}."
@@ -1293,18 +1519,28 @@ def summarize_email(email_data, email_id=None):
     ) or None
 
     system_prompt = (
-        "You write detailed email summaries for the mailbox owner. "
+        "You write condensed email summaries for the mailbox owner. "
         "Address the summary in second person using you/your. "
         "Never refer to the mailbox owner as 'the user' or 'the recipient'. "
+        "Use only facts explicitly present in the email context; do not infer new details. "
+        "Write in your own words: paraphrase and compress instead of copying source sentences. "
+        "Do not quote long spans from the email body; only keep exact wording for short facts "
+        "like names, dates, times, and amounts when necessary. "
+        "Do not add subscription/sign-up suggestions unless explicitly requested in the email. "
+        "Use declarative statements only (no questions). "
+        "Synthesize themes instead of retelling sentences in source order. "
         "Capture: main topic, concrete details, and any requested action or deadline. "
         "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
         "privacy/cookie/legal notices, and utility links unless they are the main request. "
         "Return plain text only as one compact paragraph (no markdown or bullet points). "
-        "Target 3-5 sentences unless the source email is extremely short. "
+        "Target 2-4 sentences unless the source email is extremely short. "
         "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
-        "Summarize this email for me so I can quickly understand what I need to do.\n\n"
+        "Generate an original condensed summary in your own words. "
+        "Do not copy or closely quote the email body. "
+        "Only include claims that are explicitly supported by the email content. "
+        "Focus on what happened, key facts, and what you need to do next.\n\n"
         f"{_email_context_block(email_data)}"
     )
     response_text = _call_ollama(
@@ -1314,7 +1550,7 @@ def summarize_email(email_data, email_id=None):
             {"role": "user", "content": user_prompt},
         ],
         email_id=email_id,
-        temperature=0.1,
+        temperature=0.0,
         num_predict=420,
     )
     if not response_text:
@@ -1327,7 +1563,9 @@ def summarize_email(email_data, email_id=None):
             )
         return fallback_summary
 
-    summary = _rewrite_summary_for_second_person(_compact_text(response_text))
+    summary = _rewrite_summary_for_second_person(
+        _sanitize_model_summary(response_text, email_data) or ""
+    )
     if _looks_summary_failure(summary):
         if fallback_summary:
             _log_action(
@@ -1346,6 +1584,18 @@ def summarize_email(email_data, email_id=None):
                 detail="using_extractive_fallback_subject_parrot",
             )
         return fallback_summary
+    if _looks_summary_parrot(summary, email_data):
+        rewritten = _rewrite_parroted_summary(summary, email_data, email_id=email_id)
+        if rewritten and not _is_near_subject_copy(rewritten, title):
+            return rewritten
+        if fallback_summary:
+            _log_action(
+                task="summarize",
+                status="fallback",
+                email_id=email_id,
+                detail="using_extractive_fallback_model_body_parrot",
+            )
+        return fallback_summary
     if not _uses_second_person(summary) and fallback_summary and _uses_second_person(fallback_summary):
         # Keep mailbox-facing voice consistent when model drifts into third person.
         _log_action(
@@ -1353,15 +1603,6 @@ def summarize_email(email_data, email_id=None):
             status="fallback",
             email_id=email_id,
             detail="using_extractive_fallback_third_person_model_output",
-        )
-        return fallback_summary
-    if len(summary) < 140 and fallback_summary and len(fallback_summary) > len(summary) + 40:
-        # Prefer richer deterministic fallback over overly terse model responses.
-        _log_action(
-            task="summarize",
-            status="fallback",
-            email_id=email_id,
-            detail="using_extractive_fallback_brief_model_output",
         )
         return fallback_summary
     if len(summary) > SUMMARY_MAX_CHARS:

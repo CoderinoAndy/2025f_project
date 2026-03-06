@@ -74,6 +74,7 @@ def _env_int(name, default):
         return int(default)
 
 
+# Environment-tunable polling/sync knobs; each value is clamped to safe minimums.
 LIVE_EMAIL_POLL_INTERVAL_MS = max(1000, _env_int("LIVE_EMAIL_POLL_INTERVAL_MS", 2000))
 LIVE_EMAIL_SYNC_MAX_RESULTS = max(5, _env_int("LIVE_EMAIL_SYNC_MAX_RESULTS", 15))
 LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS = max(

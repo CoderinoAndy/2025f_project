@@ -799,6 +799,8 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
         )
         return 0
 
+    # Separate throughput controls: sync up to caller target, but cap AI triage work
+    # per run so classification latency does not dominate normal mailbox syncing.
     target = max(1, int(max_results or SYNC_MAX_RESULTS))
     log_event(
         action_type="gmail_sync",
@@ -814,7 +816,8 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
     synced = 0
     visited = 0
 
-    # Paginate through Gmail list API until we reach caller budget or messages run out.
+    # Pull message IDs page-by-page and stop on either budget exhaustion, empty pages,
+    # or list API errors (logged and treated as a graceful early exit).
     while visited < target:
         page_size = min(100, target - visited)
         try:
@@ -839,11 +842,12 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
                 db_path=db_path,
             )
             break
-
         messages = response.get("messages") or []
         if not messages:
             break
 
+        # Sync each message id immediately; only after a successful sync do we attempt
+        # optional AI triage, and only while triage budget remains for this run.
         for item in messages:
             visited += 1
             external_id = item.get("id")
@@ -874,11 +878,13 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
                         )
             if visited >= target:
                 break
-
+        # Advance to the next page token from Gmail; missing token means we reached
+        # the end of the result set and should finish this sync cycle.
         page_token = response.get("nextPageToken")
         if not page_token:
             break
-
+    # Emit one completion event with counters so downstream logs can track sync depth
+    # and how much AI triage work happened within this invocation.
     log_event(
         action_type="gmail_sync",
         action="sync_recent_complete",
@@ -1033,6 +1039,7 @@ def send_compose_message(
         attachment_count=len(attachments or []),
     )
 
+    # Build RFC822 payload once, then optionally attach thread context for replies.
     message = _build_email_message(to_value, cc_value, subject, body_text, attachments)
     body = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")}
     if thread_id:
@@ -1051,6 +1058,7 @@ def send_compose_message(
         )
         return None
 
+    # Re-sync the just-sent message so local mailbox state reflects provider labels/body.
     sent_id = sent.get("id")
     if sent_id:
         sync_message_by_external_id(sent_id, db_path=db_path, service=service)
@@ -1090,6 +1098,7 @@ def upsert_gmail_draft(
         attachment_count=len(attachments or []),
     )
 
+    # For draft updates, preserve existing Gmail attachments and merge in new uploads.
     effective_attachments = attachments or []
     if draft_id:
         draft_data = _get_draft_data(service, draft_id)
@@ -1132,6 +1141,7 @@ def upsert_gmail_draft(
 
     provider_draft_id = draft_data.get("id")
     message_data = draft_data.get("message") or {}
+    # Mirror provider draft state into the local DB so compose + drafts views stay aligned.
     if message_data:
         record = _to_db_record(
             message_data,
@@ -1208,6 +1218,7 @@ def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
     synced = 0
     visited = 0
 
+    # Page through provider drafts until caller budget is exhausted or list ends/errors.
     while visited < target:
         page_size = min(100, target - visited)
         try:
@@ -1231,6 +1242,7 @@ def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
         if not draft_refs:
             break
 
+        # Fetch each draft payload and mirror it into local storage as a "draft" row.
         for entry in draft_refs:
             visited += 1
             provider_draft_id = entry.get("id")
@@ -1256,6 +1268,7 @@ def sync_drafts_from_gmail(db_path=DB_DEFAULT, max_results=50):
             if visited >= target:
                 break
 
+        # Advance list pagination; no next token means we reached the end of drafts.
         page_token = response.get("nextPageToken")
         if not page_token:
             break

@@ -258,6 +258,7 @@ def _rebuild_email_tables(conn, existing_columns):
         """
     )
 
+    # Copy legacy rows into the new schema while coercing enum-like values safely.
     conn.execute(
         f"""
         INSERT INTO email_messages (
@@ -292,6 +293,7 @@ def _rebuild_email_tables(conn, existing_columns):
         """
     )
 
+    # Rebuild recipients table so FK/cascade and uniqueness constraints are re-applied.
     conn.execute("ALTER TABLE email_recipients RENAME TO email_recipients_old;")
     conn.execute(
         """
@@ -531,6 +533,7 @@ def mark_read(email_id, read=True, db_path=DB_DEFAULT):
 def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
     """Upsert email from provider.
     """
+    # Accept either message external_id or provider draft id as the stable upsert key.
     external_id = (email_data.get("external_id") or "").strip()
     provider_draft_id = (email_data.get("provider_draft_id") or "").strip()
     if not external_id and not provider_draft_id:
@@ -547,6 +550,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
     if not received_at:
         received_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Normalize provider payload into one canonical shape before DB reads/writes.
     normalized = {
         "thread_id": email_data.get("thread_id"),
         "provider_draft_id": provider_draft_id or None,
@@ -571,6 +575,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
     }
 
     with db_session(db_path) as conn:
+        # First match by external message id; fallback to provider draft id for draft flows.
         cur = conn.execute(
             """
             SELECT
@@ -688,6 +693,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             )
             email_id = existing["id"]
         else:
+            # Insert a new row when provider identifiers do not match any local email.
             cur = conn.execute(
                 """
                 INSERT INTO email_messages (
@@ -733,6 +739,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             )
             email_id = cur.lastrowid
 
+        # Rebuild recipients from normalized payload so local TO/CC stay authoritative.
         conn.execute("DELETE FROM email_recipients WHERE email_id = ?", (email_id,))
         _insert_recipients(conn, email_id, "to", normalized["recipients"])
         _insert_recipients(conn, email_id, "cc", normalized["cc"])
@@ -904,6 +911,7 @@ def save_local_draft(
                 ),
             )
         else:
+            # Create a brand-new local draft row when no prior mapping exists.
             cur = conn.execute(
                 """
                 INSERT INTO email_messages (
@@ -930,6 +938,7 @@ def save_local_draft(
             )
             draft_id = cur.lastrowid
 
+        # Rewrite recipients each save so local draft always reflects latest compose fields.
         conn.execute("DELETE FROM email_recipients WHERE email_id = ?", (draft_id,))
         _insert_recipients(conn, draft_id, "to", recipients)
         _insert_recipients(conn, draft_id, "cc", cc)

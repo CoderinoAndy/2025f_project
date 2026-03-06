@@ -14,6 +14,7 @@ from .db import fetch_email_by_id, update_draft, update_email_ai_fields
 from .debug_logger import log_event
 
 # This module now contains both model-calling code and async AI task orchestration.
+# Core runtime defaults and normalized label sets shared across classify/summarize flows.
 OLLAMA_API_URL_DEFAULT = "http://localhost:11434/api/chat"
 OLLAMA_MODEL_DEFAULT = "qwen2.5:14b-instruct"
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 12
@@ -22,6 +23,7 @@ VALID_CATEGORIES = {"urgent", "informational", "junk"}
 VALID_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
 LOCALHOST_NAMES = {"localhost"}
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
+# Sender/domain heuristics used to separate person-to-person mail from automated mail.
 PERSONAL_EMAIL_DOMAINS = (
     "gmail.com",
     "outlook.com",
@@ -54,6 +56,7 @@ REPLY_CHAIN_PATTERNS = (
     r"\nOn\s.+?wrote:",
     r"\nFrom:\s.+\nSent:\s.+\nTo:\s.+\nSubject:\s.+",
 )
+# Marker sets for filtering unusable summaries and stripping newsletter/footer boilerplate.
 SUMMARY_FAILURE_MARKERS = (
     "unable to summarize",
     "unable to provide a summary",
@@ -68,6 +71,7 @@ SUMMARY_FAILURE_MARKERS = (
     "no content provided",
     "no email content",
 )
+# Phrases frequently found in footer/utility text that should not dominate summaries.
 SUMMARY_NOISE_MARKERS = (
     "is this email difficult to read",
     "view in browser",
@@ -90,6 +94,7 @@ SUMMARY_NOISE_MARKERS = (
     "this email was sent to",
     "add us to your address book",
 )
+# Common model-inserted lines that are not grounded in the source email.
 SUMMARY_HALLUCINATION_MARKERS = (
     "if you're not subscribed",
     "if you are not subscribed",
@@ -98,6 +103,7 @@ SUMMARY_HALLUCINATION_MARKERS = (
     "subscribe now",
     "click here to subscribe",
 )
+# Stopwords removed before token-overlap grounding checks.
 SUMMARY_STOPWORDS = {
     "the",
     "and",
@@ -153,6 +159,7 @@ SUMMARY_STOPWORDS = {
     "onto",
     "upon",
 }
+# Regex-level footer patterns used for sentence/fragment noise filtering.
 FOOTER_NOISE_REGEX_PATTERNS = (
     r"\bmanage\s+(?:email\s+)?preferences\b",
     r"\bemail\s+preferences\b",
@@ -170,6 +177,7 @@ FOOTER_NOISE_REGEX_PATTERNS = (
     r"\ball\s+rights\s+reserved\b",
     r"\b(?:subscriber|subscription|member|customer)\s*id\s*[:#]?\s*[a-z0-9\-]{5,}\b",
 )
+# Draft-quality failure markers plus request-language cues for actionable detection.
 DRAFT_FAILURE_MARKERS = (
     "as an ai",
     "unable to draft",
@@ -452,6 +460,7 @@ def _looks_source_signature_sentence(text):
     tokens = _text_tokens(lowered)
     if len(tokens) < 3 or len(tokens) > 10:
         return False
+    # Treat bare publication mastheads as non-content when no action verbs are present.
     common_verbs = {
         "is",
         "are",
@@ -720,6 +729,7 @@ def _sanitize_model_summary(summary_text, email_data):
     )
     source_tokens = set(_content_tokens(source))
 
+    # Split generated text into candidate sentences and filter for grounded facts only.
     parts = [
         _compact_text(fragment).strip(" -:")
         for fragment in re.split(r"(?<=[.!?])\s+", summary)
@@ -740,6 +750,7 @@ def _sanitize_model_summary(summary_text, email_data):
             continue
         if any(_token_overlap_ratio(cleaned, existing) > 0.93 for existing in kept):
             continue
+        # Require reasonable grounding in source content unless sentence is title-aligned.
         support_ratio = _summary_support_ratio(cleaned, source_tokens)
         if support_ratio < 0.52 and not _is_near_subject_copy(cleaned, title):
             continue
@@ -773,6 +784,7 @@ def _looks_summary_parrot(summary_text, email_data):
     if len(summary) >= 80 and summary_lower in source_lower:
         return True
 
+    # Compare sentence-level overlap so paraphrase-light outputs are treated as copied.
     summary_sentences = [
         _compact_text(part).strip(" -:")
         for part in re.split(r"(?<=[.!?])\s+", summary)
@@ -968,6 +980,7 @@ def _sender_parts(sender_text):
         }
 
     email = ""
+    # Prefer explicit addresses; fallback to bracketed sender forms when needed.
     email_match = EMAIL_ADDRESS_PATTERN.search(raw)
     if email_match:
         email = email_match.group(1)
@@ -1132,6 +1145,7 @@ def _looks_actionable(email_data):
     body = str(email_data.get("body") or "").lower()
     combined = " ".join([title, body])
 
+    # Require stronger response-language cues when message resembles bulk mail.
     explicit_question = "?" in title or "?" in body
     direct_question_markers = (
         "can you",
@@ -1206,6 +1220,7 @@ def _heuristic_classification(email_data):
     """Heuristic classification.
     """
     # Normalize to the fixed labels used by mailbox triage.
+    # Heuristics provide deterministic fallback labels when model output is absent/uncertain.
     actionable = _looks_actionable(email_data)
     bulk_signal = _looks_bulk_or_newsletter(email_data)
     junk_signal = _looks_probable_junk(email_data)
@@ -1267,6 +1282,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
         model_confidence = 0.0
     heuristic_type = heuristic_classification.get("email_type")
 
+    # Nudge uncertain model outputs toward safer mailbox behavior.
     if heuristic_type == "read-only":
         if bool(merged.get("needs_response")) and model_confidence < 0.9:
             merged["category"] = "informational"
@@ -1347,6 +1363,7 @@ def _normalize_classification(raw_value):
         else:
             category = "informational"
 
+    # Enforce category/type consistency so downstream DB writes stay canonical.
     if email_type == "response-needed":
         needs_response = True
     elif email_type == "read-only":
@@ -1381,8 +1398,7 @@ def _normalize_classification(raw_value):
 
 
 def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320):
-    """Call ollama.
-    """
+    """Call Ollama chat API and return response content or None on failure."""
     # Send one non-streaming chat request to Ollama and return the model text payload.
     _log_action(task=task, status="call_start", email_id=email_id, detail="ollama_chat")
 
@@ -1451,6 +1467,7 @@ def classify_email(email_data, email_id=None):
 
     heuristic = _heuristic_classification(normalized_email)
 
+    # Ask for strict JSON, then combine with deterministic heuristics for stability.
     system_prompt = (
         "You classify emails for triage. Think step-by-step internally, but never output your chain-of-thought. "
         "Return valid JSON only with exactly these keys: "
@@ -1477,7 +1494,6 @@ def classify_email(email_data, email_id=None):
         f"{_email_context_block(normalized_email)}\n\n"
         "Return JSON only."
     )
-
     response_text = _call_ollama(
         task="classify",
         messages=[
@@ -1490,18 +1506,16 @@ def classify_email(email_data, email_id=None):
     )
     if not response_text:
         return heuristic
-
+    # Fall back cleanly when the model emits malformed/non-JSON output.
     json_block = _extract_json_block(response_text)
     if not json_block:
         _log_action(task="classify", status="error", email_id=email_id, detail="missing_json_block")
         return heuristic
-
     try:
         parsed = json.loads(json_block)
     except json.JSONDecodeError as exc:
         _log_action(task="classify", status="error", email_id=email_id, detail=f"invalid_json: {exc}")
         return heuristic
-
     normalized = _normalize_classification(parsed)
     merged = _merge_with_heuristics(normalized, heuristic)
     return _normalize_classification(merged)
@@ -1518,6 +1532,7 @@ def summarize_email(email_data, email_id=None):
         _extractive_summary_fallback(email_data)
     ) or None
 
+    # Keep prompts tightly constrained, then post-filter for grounding/paraphrase quality.
     system_prompt = (
         "You write condensed email summaries for the mailbox owner. "
         "Address the summary in second person using you/your. "
@@ -1553,6 +1568,7 @@ def summarize_email(email_data, email_id=None):
         temperature=0.0,
         num_predict=420,
     )
+    # Prefer deterministic fallback whenever model output is missing or unusable.
     if not response_text:
         if fallback_summary:
             _log_action(
@@ -1773,6 +1789,7 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     if not body and not title:
         return None
 
+    # Generate a complete send-ready draft; fallback template keeps UX functional on failure.
     system_prompt = (
         "You write high-quality professional email replies grounded in the incoming email context. "
         "Write as the mailbox owner (use I/we), not as an observer. "
@@ -1838,6 +1855,7 @@ def revise_reply(
     if not current_draft_text:
         return None
 
+    # Preserve user-provided intent while improving clarity/completeness against source context.
     system_prompt = (
         "You revise email drafts using the incoming email context. "
         "Write as the mailbox owner (use I/we), not as an observer. "
@@ -2041,6 +2059,7 @@ def run_ai_analysis(email_data, force=False):
 
 AI_TASK_MAX_ITEMS = 200
 AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
+# In-memory async task registry used by polling endpoints; kept bounded by cleanup.
 AI_TASKS = {}
 AI_TASK_INDEX = {}
 AI_TASK_LOCK = threading.Lock()

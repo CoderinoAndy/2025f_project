@@ -25,6 +25,7 @@
     />
 
     <style>
+      /* Visual tokens for the glass-card palette used on this standalone page. */
       :root{
         --text: #edf4f0;
         --muted: #d2dfd8;
@@ -33,6 +34,7 @@
         --shadow: rgba(0, 0, 0, 0.46);
       }
 
+      /* Build the layered background treatment: gradient + photo + soft radial highlights. */
       body.about-page{
         margin: 0;
         color: var(--text) !important;
@@ -53,6 +55,7 @@
           radial-gradient(circle at 84% 76%, rgba(120, 179, 149, 0.1), transparent 42%);
       }
 
+      /* Card-centric layout styles for readable text over the photographic backdrop. */
       .topbar{
         background: #121212;
         padding: 14px 18px;

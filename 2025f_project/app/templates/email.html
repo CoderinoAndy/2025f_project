@@ -96,9 +96,11 @@
       /* Summary text styling. */
       .summary-text{
       white-space: pre-line;
-      color: var(--muted);
-      font-style: italic;
+      color: var(--text);
+      font-style: normal;
       text-align: left;
+      line-height: 1.6;
+      overflow-wrap: anywhere;
       margin: 0;
       }
       /* Loading row shown while AI analysis runs. */
@@ -298,6 +300,7 @@
 
   <body> <!-- Visible page content and interactive controls. -->
     {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
+    {% set ai_draft_available_value = ai_draft_available|default(false) %}
 
     <!-- Wide content container for message + side panels. -->
     <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);"> <!-- Main page content area. -->
@@ -309,7 +312,7 @@
       <div class="row g-3 mt-3 align-items-start">
         <!-- Left column: Message + Reply -->
         <!-- Left column: message metadata, body, and reply tools. -->
-        <div class="col-12 col-md-9">
+        <div class="col-12 col-lg-8">
         <!-- Message metadata summary block. -->
         <div class="meta-wrap mb-3">
           <div class="row align-items-start g-3">
@@ -500,8 +503,9 @@
                   type="button"
                   id="generate-draft-btn"
                   class="action-icon"
-                  title="Generate draft"
+                  title="{% if ai_draft_available_value or email.draft %}Generate or revise draft{% else %}Type a draft first, or use AI on emails that need a response{% endif %}"
                   aria-label="Generate draft"
+                  {% if not ai_draft_available_value and not email.draft %}disabled{% endif %}
                 >
                   <i class="bi bi-lightbulb"></i>
                 </button>
@@ -524,7 +528,7 @@
 
         <!-- Right column: Summary -->
         <!-- Right column: AI summary and thread navigation. -->
-        <div class="col-12 col-md-3">
+        <div class="col-12 col-lg-4">
           <!-- Message body card. -->
           <!-- AI summary card. -->
           <div class="panel-card">
@@ -595,6 +599,7 @@
           "analyzeUrl": url_for('main.start_ai_analyze', id=email.id),
           "draftUrl": url_for('main.start_ai_draft', id=email.id),
           "autoAnalyzeNeeded": ai_analysis_needed,
+          "draftAvailable": ai_draft_available_value,
           "summaryExpected": ai_summary_expected,
           "initialAnalyzeTaskId": ai_analysis_task_id or "",
           "initialSummaryText": (email.summary|trim if email.summary else "")
@@ -783,6 +788,7 @@
         const draftUrl = String(pageConfig.draftUrl || "");
         const taskStatusBase = "/api/ai-task/";
         const autoAnalyzeNeeded = Boolean(pageConfig.autoAnalyzeNeeded);
+        const draftAvailable = Boolean(pageConfig.draftAvailable);
         const summaryExpected = Boolean(pageConfig.summaryExpected);
         const initialAnalyzeTaskId = String(pageConfig.initialAnalyzeTaskId || "");
         const initialSummaryText = String(pageConfig.initialSummaryText || "");
@@ -796,6 +802,9 @@
         const draftLoadingNote = document.getElementById("draft-loading-note");
         const summaryText = document.getElementById("summary-text");
         const summaryLoading = document.getElementById("summary-loading");
+        const draftButtonDefaultTitle = draftButton
+          ? String(draftButton.getAttribute("title") || "")
+          : "";
 
         let analyzing = false;
         let drafting = false;
@@ -814,6 +823,18 @@
             textNode.textContent = label;
           }
           summaryLoading.classList.toggle("hidden", !isLoading);
+        };
+
+        const syncDraftButtonState = () => {
+          if (!draftButton || !replyText) {
+            return;
+          }
+          const hasUserDraft = Boolean(String(replyText.value || "").trim());
+          const enabled = draftAvailable || hasUserDraft;
+          draftButton.disabled = drafting || !enabled;
+          draftButton.title = enabled
+            ? "Generate or revise draft"
+            : (draftButtonDefaultTitle || "Type a draft first, or use AI on emails that need a response");
         };
 
         // Toggle temporary draft-loading text inside the textarea.
@@ -846,12 +867,14 @@
           if (draftLoadingNote) {
             draftLoadingNote.classList.add("hidden");
           }
+          syncDraftButtonState();
         };
 
         // Disable draft/send actions while async work is in flight.
         const setActionButtonsBusy = (isBusy) => {
           if (draftButton) {
-            draftButton.disabled = isBusy;
+            drafting = Boolean(isBusy);
+            syncDraftButtonState();
           }
           if (sendButton) {
             sendButton.disabled = isBusy;
@@ -872,7 +895,12 @@
           if (!fullText) {
             return;
           }
-          const step = fullText.length > 600 ? 4 : 2;
+          if (!isTextarea && fullText.length > 1200) {
+            target.textContent = fullText;
+            return;
+          }
+          const step = fullText.length > 1000 ? 10 : (fullText.length > 600 ? 4 : 2);
+          const delay = fullText.length > 1000 ? 4 : 12;
           for (let index = 0; index < fullText.length; index += step) {
             const next = fullText.slice(0, Math.min(fullText.length, index + step));
             if (isTextarea) {
@@ -881,7 +909,7 @@
             } else {
               target.textContent = next;
             }
-            await sleep(12);
+            await sleep(delay);
           }
         };
 
@@ -972,9 +1000,13 @@
           if (drafting || !replyText) {
             return;
           }
+          const currentReplyValue = replyText.value || "";
+          if (!draftAvailable && !String(currentReplyValue).trim()) {
+            syncDraftButtonState();
+            return;
+          }
           drafting = true;
           setActionButtonsBusy(true);
-          const currentReplyValue = replyText.value || "";
           setDraftLoading(true, "Draft loading...");
           try {
             const started = await requestJson(draftUrl, {
@@ -1011,6 +1043,14 @@
             startDraft();
           });
         }
+        if (replyText) {
+          replyText.addEventListener("input", () => {
+            if (!drafting) {
+              syncDraftButtonState();
+            }
+          });
+        }
+        syncDraftButtonState();
 
         // Type out server-provided summary on first load.
         const animateInitialSummary = async () => {

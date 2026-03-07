@@ -34,6 +34,7 @@ from .gmail_service import (
 )
 from .ollama_client import (
     ai_enabled,
+    can_generate_reply_draft as _can_generate_reply_draft,
     generate_reply_draft as _generate_reply_draft,
     get_ai_task as _get_ai_task,
     run_ai_analysis as _run_ai_analysis,
@@ -273,10 +274,9 @@ def _set_email_type_with_fallback(email_id, email_data, new_type):
         return
     external_id = email_data.get("external_id")
     if external_id:
-        # Update provider labels first so Gmail and local mailbox tabs stay aligned.
-        if not set_message_type(external_id, new_type):
-            db_set_email_type(email_id, new_type)
-        return
+        # Update provider labels first, then persist the user's explicit mailbox move
+        # locally because provider sync preserves existing triage for older rows.
+        set_message_type(external_id, new_type)
     db_set_email_type(email_id, new_type)
 
 
@@ -384,6 +384,11 @@ def start_ai_draft(id):
     to_value = _normalize_addresses(payload.get("to")) or ""
     cc_value = _normalize_addresses(payload.get("cc")) or ""
     current_reply_text = str(payload.get("reply_text") or "").strip()
+    if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
+        _run_ai_analysis(email_data, force=True)
+        email_data = fetch_email_by_id(id) or email_data
+    if not _can_generate_reply_draft(email_data, current_draft_text=current_reply_text):
+        return jsonify({"error": "AI draft is only available for emails that need a response."}), 400
     task = _start_draft_task(id, to_value, cc_value, current_reply_text)
     return jsonify(_serialize_ai_task(task))
 
@@ -537,6 +542,7 @@ def email(id):
     ai_analysis_needed = False
     ai_analysis_task_id = None
     ai_summary_expected = should_summarize_email(email_data)
+    ai_draft_available = _can_generate_reply_draft(email_data)
     # Start analysis asynchronously so page render is still fast.
     if _should_auto_analyze_email(email_data, non_main_types=NON_MAIN_TYPES):
         ai_analysis_needed = True
@@ -563,6 +569,7 @@ def email(id):
         ai_analysis_needed=ai_analysis_needed,
         ai_analysis_task_id=ai_analysis_task_id,
         ai_summary_expected=ai_summary_expected,
+        ai_draft_available=ai_draft_available,
     )
 
 @main.route("/email/<int:id>/set-type", methods=["POST"])
@@ -895,6 +902,9 @@ def generate_draft(id):
         email_data = fetch_email_by_id(id) or email_data
 
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
+    if not _can_generate_reply_draft(email_data, current_draft_text=current_reply_text or ""):
+        next_url = _next_url_from_request()
+        return redirect(url_for("main.email", id=id, next=next_url))
     draft = _generate_reply_draft(
         email_data=email_data,
         to_value=to_value or "",

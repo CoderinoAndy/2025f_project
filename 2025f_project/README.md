@@ -46,21 +46,25 @@ Manual fallback without `make` (Windows):
 - `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `30`)
 - `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `60`)
 - `GMAIL_AI_TRIAGE_PER_SYNC`: max newly-synced emails to auto-classify per sync (default `0`)
-- `OLLAMA_MODEL`: defaults to `qwen2.5:14b-instruct`
-- `OLLAMA_API_URL`: defaults to `http://localhost:11434/api/chat`
-- `OLLAMA_TIMEOUT_SECONDS`: AI request timeout in seconds (default `12`)
+- `OLLAMA_MODEL`: defaults to `qwen2.5:7b`
+- `OLLAMA_CLASSIFY_MODEL`: optional override for classification requests
+- `OLLAMA_DRAFT_MODEL`: optional override for draft/revise requests
+- `OLLAMA_SUMMARY_MODEL`: optional override for summary requests
+- `OLLAMA_API_URL`: defaults to `http://127.0.0.1:11434/api/chat`
+- `OLLAMA_TIMEOUT_SECONDS`: base AI request timeout in seconds (default `45`)
+- `OLLAMA_LONG_TASK_TIMEOUT_SECONDS`: timeout for draft/revise/summarize requests (default `180`)
 - `OLLAMA_SUMMARY_MIN_CHARS`: summary threshold (default `200`)
 - `AI_ACTION_LOG_PATH`: path to `.txt` AI action log (default `instance/ai_actions.txt`)
 - `APP_DEBUG_LOG_PATH`: path to structured debug log (default `instance/debug_log.txt`)
 
 ## Local Ollama mode (no external AI calls)
 
-AI calls are local-only and go to Ollama chat API (`http://localhost:11434/api/chat`) by default. Non-loopback endpoints are blocked.
+AI calls are local-only and go to Ollama chat API (`http://127.0.0.1:11434/api/chat`) by default. Non-loopback endpoints are blocked.
 
 1. Start Ollama:
    - `ollama serve`
 2. Confirm model is available:
-   - `ollama pull qwen2.5:14b-instruct`
+   - `ollama pull qwen2.5:7b`
 3. Start Flask app:
    - `make run`
 

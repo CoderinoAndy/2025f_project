@@ -337,6 +337,8 @@ def _row_to_dict(row):
         data["priority"] = int(data["priority"])
     if "ai_confidence" in data and data["ai_confidence"] is not None:
         data["ai_confidence"] = float(data["ai_confidence"])
+    if "summary" in data and data["summary"] is not None:
+        data["summary"] = " ".join(str(data["summary"]).split()).strip()
     if "title" not in data and "subject" in data:
         data["title"] = data["subject"]
     if "received_at" in data and "date" not in data:

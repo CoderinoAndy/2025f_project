@@ -104,7 +104,7 @@
 
       /* Summary text styling. */
       .summary-text{
-      white-space: pre-line;
+      white-space: normal;
       color: var(--text);
       font-style: normal;
       text-align: left;
@@ -842,6 +842,7 @@
         let analyzing = false;
         let drafting = false;
         let draftLoadingBaseValue = null;
+        const aiTaskPollMaxWaitMs = 240000;
 
         // Small delay helper used by polling and typing animations.
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -963,7 +964,7 @@
         };
 
         // Poll task status until completed/error/timeout.
-        const pollTask = async (taskId, maxWaitMs = 90000) => {
+        const pollTask = async (taskId, maxWaitMs = aiTaskPollMaxWaitMs) => {
           const startedAt = Date.now();
           // Poll server-side task state until completion/error to drive async UI updates.
           while (Date.now() - startedAt < maxWaitMs) {
@@ -1056,7 +1057,13 @@
             await typeIntoTarget(replyText, result.draft || "", true);
           } catch (error) {
             console.error(error);
-            setDraftLoading(true, "Draft generation failed.");
+            const errorMessage = String((error && error.message) || "");
+            setDraftLoading(
+              true,
+              errorMessage.includes("timed out")
+                ? "Draft generation is taking longer than expected."
+                : "Draft generation failed."
+            );
             await sleep(1100);
             setDraftLoading(false);
           } finally {

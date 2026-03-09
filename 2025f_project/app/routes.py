@@ -38,7 +38,6 @@ from .ollama_client import (
     can_generate_reply_draft as _can_generate_reply_draft,
     generate_reply_draft as _generate_reply_draft,
     get_ai_task as _get_ai_task,
-    run_ai_analysis as _run_ai_analysis,
     serialize_ai_task as _serialize_ai_task,
     should_auto_analyze_email as _should_auto_analyze_email,
     should_summarize_email,
@@ -385,9 +384,6 @@ def start_ai_draft(id):
     to_value = _normalize_addresses(payload.get("to")) or ""
     cc_value = _normalize_addresses(payload.get("cc")) or ""
     current_reply_text = str(payload.get("reply_text") or "").strip()
-    if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
-        _run_ai_analysis(email_data, force=True)
-        email_data = fetch_email_by_id(id) or email_data
     if not _can_generate_reply_draft(email_data, current_draft_text=current_reply_text):
         return jsonify({"error": "AI draft is only available for emails that need a response."}), 400
     task = _start_draft_task(id, to_value, cc_value, current_reply_text)
@@ -896,11 +892,6 @@ def generate_draft(id):
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
-
-    # Ensure classification context exists before generating a reply draft.
-    if ai_enabled() and not str(email_data.get("ai_category") or "").strip():
-        _run_ai_analysis(email_data, force=True)
-        email_data = fetch_email_by_id(id) or email_data
 
     to_value, cc_value, current_reply_text = _collect_reply_fields(email_data)
     if not _can_generate_reply_draft(email_data, current_draft_text=current_reply_text or ""):

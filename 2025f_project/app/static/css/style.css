@@ -1,3 +1,4 @@
+/* MVC: View */
 /* Shared visual system for mailbox pages and reusable UI elements. */
 :root{ /* Theme tokens reused across the app. */
   --bg: #15121a;

@@ -1,3 +1,4 @@
+// MVC: Controller
 // Handles row selection mode and bulk actions on mailbox list pages.
 (() => { // Manage selection mode and bulk actions for mailbox rows.
   const shell = document.querySelector(".list-shell"); // List container that receives live row updates.

@@ -1,4 +1,5 @@
-﻿from flask import Flask, g, request
+# MVC: Controller
+from flask import Flask, g, request
 from werkzeug.exceptions import HTTPException
 from datetime import datetime
 from time import perf_counter
@@ -10,6 +11,14 @@ from .debug_logger import (
     log_exception,
 )
 from .gmail_service import gmail_available
+from markupsafe import Markup, escape
+import re
+
+
+PLAIN_TEXT_URL_RE = re.compile(
+    r"(?P<url>(?:https?://|www\.)[^\s<]+|mailto:[^\s<]+|tel:[^\s<]+)",
+    re.IGNORECASE,
+)
 
 
 # App factory: build Flask app, wire startup tasks, then attach routes.
@@ -135,6 +144,41 @@ def create_app():
             return s  # fallback: show original text if parsing fails
 
         return dt.strftime("%d/%m/%Y %H:%M")
+
+    @app.template_filter("linkify_email_text")
+    def linkify_email_text(value):
+        """Render plain-text email content with clickable external links."""
+        if value is None:
+            return Markup("")
+
+        def _linkify_line(line):
+            rendered = Markup("")
+            last_index = 0
+            for match in PLAIN_TEXT_URL_RE.finditer(line):
+                start, end = match.span()
+                rendered += escape(line[last_index:start])
+
+                raw_url = match.group("url")
+                suffix = ""
+                while raw_url and raw_url[-1] in ".,!?;:":
+                    suffix = raw_url[-1] + suffix
+                    raw_url = raw_url[:-1]
+
+                href = raw_url
+                if raw_url.lower().startswith("www."):
+                    href = f"https://{raw_url}"
+
+                rendered += Markup(
+                    f'<a href="{escape(href)}" target="_blank" rel="noopener noreferrer">{escape(raw_url)}</a>'
+                )
+                if suffix:
+                    rendered += escape(suffix)
+                last_index = end
+
+            rendered += escape(line[last_index:])
+            return rendered
+
+        return Markup("\n").join(_linkify_line(line) for line in str(value).split("\n"))
 
     # Import routes late so startup utilities above are initialized first.
     from .routes import main

@@ -1,4 +1,5 @@
-﻿# Flask routes for mailbox pages, compose flows, and lightweight JSON action APIs.
+# MVC: Controller
+# Flask routes for mailbox pages, compose flows, and lightweight JSON action APIs.
 from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 import os
 import threading
@@ -944,4 +945,3 @@ def toggle_read(id):
     _set_read_state_with_fallback(id, email_data, new_read_state)
     next_url = _next_url_from_request()
     return redirect(next_url)
-

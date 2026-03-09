@@ -1,4 +1,5 @@
-﻿import base64
+# MVC: Model
+import base64
 import hashlib
 import mimetypes
 import os

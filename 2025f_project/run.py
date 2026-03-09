@@ -1,3 +1,4 @@
+# MVC: Controller
 """Application entrypoint used by both WSGI servers and local development.
 
 Create the Flask app once at import time, and only start Flask's built-in

@@ -1,3 +1,4 @@
+// MVC: Controller
 // Polls live mailbox rows and swaps in fresh server-rendered HTML.
 (() => { // Keep mailbox rows synchronized with server updates.
   const pageRoot = document.body; // Page root stores list metadata in data-* attributes.

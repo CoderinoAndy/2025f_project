@@ -9,13 +9,17 @@ import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses
-from html import unescape
 from pathlib import Path
 
 from .db import (
     fetch_email_by_id,
     update_email_ai_fields,
     upsert_email_from_provider,
+)
+from .email_content import (
+    decode_transfer_encoded_text,
+    repair_body_text,
+    repair_header_text,
 )
 from .ollama_client import (
     ai_enabled as ai_triage_enabled,
@@ -476,22 +480,6 @@ def fetch_message_attachment_metadata(external_id):
     return _extract_attachment_metadata(message_data.get("payload") or {})
 
 
-def _html_to_text(raw_html):
-    """Html recipient text.
-    """
-    # Used by other functions in this file.
-    if not raw_html:
-        return ""
-    no_scripts = re.sub(
-        r"(?is)<(script|style)[^>]*>.*?</\1>",
-        " ",
-        raw_html,
-    )
-    stripped = re.sub(r"<[^>]+>", " ", no_scripts)
-    normalized = re.sub(r"\s+", " ", stripped).strip()
-    return unescape(normalized)
-
-
 def _replace_inline_cid_sources(raw_html, cid_sources):
     """Replace inline cid sources.
     """
@@ -538,6 +526,8 @@ def _extract_message_content(payload, service=None, message_id=None):
         mime_type = (current.get("mimeType") or "").lower()
         body_info = current.get("body") or {}
         content_id = _normalize_cid(_extract_part_header(current, "Content-ID"))
+        content_type = _extract_part_header(current, "Content-Type") or mime_type
+        transfer_encoding = _extract_part_header(current, "Content-Transfer-Encoding")
         content_bytes = _decode_body_bytes(body_info.get("data"))
 
         attachment_id = body_info.get("attachmentId")
@@ -552,11 +542,23 @@ def _extract_message_content(payload, service=None, message_id=None):
             continue
 
         if mime_type.startswith("text/plain"):
-            plain_text_parts.append(content_bytes.decode("utf-8", errors="ignore"))
+            plain_text_parts.append(
+                decode_transfer_encoded_text(
+                    content_bytes,
+                    content_type=content_type,
+                    transfer_encoding=transfer_encoding,
+                )
+            )
             continue
 
         if mime_type.startswith("text/html"):
-            html_parts.append(content_bytes.decode("utf-8", errors="ignore"))
+            html_parts.append(
+                decode_transfer_encoded_text(
+                    content_bytes,
+                    content_type=content_type,
+                    transfer_encoding=transfer_encoding,
+                )
+            )
             continue
 
         if mime_type.startswith("image/") and content_id:
@@ -569,9 +571,10 @@ def _extract_message_content(payload, service=None, message_id=None):
     else:
         html_body = None
 
-    plain_body = "\n".join(part for part in plain_text_parts if part.strip()).strip()
-    if not plain_body and html_body:
-        plain_body = _html_to_text(html_body)
+    plain_body = repair_body_text(
+        "\n".join(part for part in plain_text_parts if part.strip()).strip(),
+        html_body,
+    )
 
     return plain_body, html_body
 
@@ -678,10 +681,10 @@ def _to_db_record(message, service=None, provider_draft_id=None):
         "external_id": message.get("id"),
         "provider_draft_id": provider_draft_id,
         "thread_id": message.get("threadId"),
-        "title": (_extract_header(payload, "Subject") or "(No subject)").strip(),
-        "sender": (_extract_header(payload, "From") or "unknown@unknown").strip(),
-        "recipients": _parse_addresses(_extract_header(payload, "To")),
-        "cc": _parse_addresses(_extract_header(payload, "Cc")),
+        "title": repair_header_text(_extract_header(payload, "Subject") or "(No subject)"),
+        "sender": repair_header_text(_extract_header(payload, "From") or "unknown@unknown"),
+        "recipients": _parse_addresses(repair_header_text(_extract_header(payload, "To"))),
+        "cc": _parse_addresses(repair_header_text(_extract_header(payload, "Cc"))),
         "body": body,
         "body_html": body_html,
         "type": _labels_to_type(label_ids, payload=payload),

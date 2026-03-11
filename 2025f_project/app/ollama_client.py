@@ -18,7 +18,7 @@ from .email_content import repair_body_text, repair_header_text
 # This module now contains both model-calling code and async AI task orchestration.
 # Core runtime defaults and normalized label sets shared across classify/summarize flows.
 OLLAMA_API_URL_DEFAULT = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL_DEFAULT = "qwen2.5:7b"
+OLLAMA_MODEL_DEFAULT = "qwen2.5:14b"
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 45
 OLLAMA_LONG_TASK_TIMEOUT_SECONDS_DEFAULT = 180
 SUMMARY_MIN_CHARS_DEFAULT = 200
@@ -1782,7 +1782,7 @@ def _bulk_newsletter_summary(email_data):
         if summary:
             return summary[:SUMMARY_MAX_CHARS]
 
-    # Article alerts should summarize the headline plus teaser sentence.
+    # Article alerts should prefer a natural teaser sentence over awkward topic-clause rewrites.
     if title and key_sentences and not multi_item_digest:
         teaser = next(
             (
@@ -1795,11 +1795,17 @@ def _bulk_newsletter_summary(email_data):
         teaser = _strip_footer_noise_text(teaser)
         teaser = _compact_text(teaser)
         if teaser and len(teaser) >= 30 and len(body) < 1800:
-            focus = _topic_phrase_from_sentence(teaser) or teaser
-            summary = _compact_text(
-                f"You received an article alert from {sender_name} about {title_topic or title}. "
-                f"It focuses on {focus}"
-            )
+            title_basis = title_topic or title
+            teaser_overlap = _token_overlap_ratio(teaser, title_basis)
+            if teaser_overlap >= 0.72 or _is_near_subject_copy(teaser, title_basis):
+                summary = _compact_text(
+                    f"You received an article alert from {sender_name} about {title_basis}."
+                )
+            else:
+                summary = _compact_text(
+                    f"You received an article alert from {sender_name}. "
+                    f"{_ensure_sentence_ending(teaser)}"
+                )
             if summary and len(summary) <= SUMMARY_MAX_CHARS:
                 return summary
 
@@ -1932,6 +1938,8 @@ def _looks_summary_failure(summary_text):
         return True
     if normalized.startswith("{") or normalized.startswith("["):
         return True
+    if re.search(r"(?:â€™|â€œ|â€“|â€”|â€¦|Ã|Â)", str(summary_text or "")):
+        return True
     if _is_noise_fragment(normalized):
         return True
     return any(marker in normalized for marker in SUMMARY_FAILURE_MARKERS)
@@ -2026,7 +2034,7 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
     if not parts:
         return None
 
-    title = _compact_text(email_data.get("title") or "")
+    title = _normalized_header_text(email_data.get("title") or "")
     source = _compact_text(
         " ".join(
             part
@@ -2673,7 +2681,7 @@ def _rewrite_summary_for_second_person(summary_text):
             bullet_prefix = "- "
         for pattern, replacement in replacements:
             stripped = re.sub(pattern, replacement, stripped, flags=re.IGNORECASE)
-        stripped = _compact_text(stripped)
+        stripped = _normalized_header_text(stripped)
         if not stripped:
             continue
         normalized_lines.append(f"{bullet_prefix}{stripped}" if bullet_prefix else stripped)
@@ -3563,17 +3571,12 @@ def summarize_email(email_data, email_id=None):
     # Translate between API payloads and our local mailbox shape.
     if not should_summarize_email(email_data):
         return None
-    structured_summary = _should_use_structured_summary(email_data)
-    deterministic_bulk_summary = None if structured_summary else _bulk_newsletter_summary(email_data)
+    deterministic_bulk_summary = _bulk_newsletter_summary(email_data)
     if deterministic_bulk_summary:
         return _rewrite_summary_for_second_person(deterministic_bulk_summary)
     profile = _summary_profile(email_data)
     title = _normalized_header_text(email_data.get("title") or "")
-    fallback_source = (
-        _structured_summary_fallback(email_data)
-        if structured_summary
-        else _extractive_summary_fallback(email_data)
-    )
+    fallback_source = _extractive_summary_fallback(email_data)
     fallback_summary = _rewrite_summary_for_second_person(fallback_source) or None
 
     # Keep prompts tightly constrained, then post-filter for grounding/paraphrase quality.
@@ -3594,12 +3597,7 @@ def summarize_email(email_data, email_id=None):
         "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
         "privacy/cookie/legal notices, and utility links unless they are the main request. "
         "Ignore subscription prompts like sign-up or subscribe CTAs unless the email is explicitly about subscribing. "
-        + (
-            "Return plain text only as a bullet list. Use '- ' for each distinct section or story, "
-            "put one section per bullet, and leave a blank line between bullets. "
-            if structured_summary
-            else "Return plain text only as one compact paragraph (no markdown or bullet points). "
-        )
+        "Return plain text only as one compact paragraph (no markdown or bullet points). "
         + f"Target {profile['prompt_target']} for long emails; keep shorter emails concise. "
         "Treat plain person names as names, not email addresses."
     )
@@ -3609,12 +3607,7 @@ def summarize_email(email_data, email_id=None):
         "Only include claims that are explicitly supported by the email content. "
         "Rewrite headlines and teaser copy into fresh wording instead of repeating them. "
         "For long emails, cover all major sections instead of summarizing only the opening lines. "
-        + (
-            "If the email has several distinct updates, stories, or sections, split them into separate bullets and "
-            "give each bullet its own concise summary. "
-            if structured_summary
-            else "If the email has several distinct updates, features, or sections, include each one at least briefly. "
-        )
+        "If the email has several distinct updates, features, or sections, include each one at least briefly. "
         + "Focus on what happened, key facts, and what you need to do next.\n\n"
         f"{_email_context_block(
             email_data,
@@ -3644,7 +3637,7 @@ def summarize_email(email_data, email_id=None):
         return fallback_summary
 
     summary = _rewrite_summary_for_second_person(
-        _sanitize_model_summary(response_text, email_data, structured=structured_summary) or ""
+        _sanitize_model_summary(response_text, email_data, structured=False) or ""
     )
     if _looks_summary_failure(summary):
         if fallback_summary:
@@ -3678,7 +3671,7 @@ def summarize_email(email_data, email_id=None):
             summary,
             email_data,
             email_id=email_id,
-            structured=structured_summary,
+            structured=False,
         )
         if rewritten and not _is_near_subject_copy(rewritten, title):
             return rewritten
@@ -4219,6 +4212,7 @@ def _revise_reply_fallback(email_data, current_draft_text):
     reference_detail = request_sentence or (key_sentences[0] if key_sentences else "") or title
     detail_metrics = _draft_specificity_metrics(core_body, email_data)
     actionable = _looks_actionable(email_data)
+    bulk_like = _looks_bulk_or_newsletter(email_data)
     deadline = _extract_deadline_phrase(
         request_sentence or _body_for_context(email_data, max_chars=600, max_sentences=4)
     )
@@ -4256,7 +4250,12 @@ def _revise_reply_fallback(email_data, current_draft_text):
 
     if actionable and reference_detail and detail_metrics["request_overlap"] < 2:
         _append_unique(f"I'm following up on {reference_detail}")
-    elif not actionable and reference_detail and detail_metrics["detail_overlap"] < 1:
+    elif (
+        not actionable
+        and not bulk_like
+        and reference_detail
+        and detail_metrics["detail_overlap"] < 1
+    ):
         _append_unique(f"I appreciate the note about {reference_detail}")
 
     if actionable and len(_text_tokens(core_body)) <= 18:
@@ -4611,6 +4610,8 @@ def summary_looks_unusable(email_data):
     if _looks_utility_sentence(raw_summary):
         return True
     if _is_noise_fragment(raw_summary):
+        return True
+    if re.search(r"(?:â€™|â€œ|â€“|â€”|â€¦|Ã|Â)", raw_summary):
         return True
     if _looks_summary_call_to_action(raw_summary, email_data):
         return True

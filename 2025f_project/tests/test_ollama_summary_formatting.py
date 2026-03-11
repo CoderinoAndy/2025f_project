@@ -22,19 +22,14 @@ def _digest_email():
 
 
 class OllamaSummaryFormattingTests(unittest.TestCase):
-    def test_multistory_digest_uses_structured_summary_mode(self):
+    def test_multistory_digest_gets_digest_overview_summary(self):
         email = _digest_email()
-
-        self.assertTrue(ollama_client._should_use_structured_summary(email))
-
-    def test_structured_summary_fallback_returns_spaced_bullets(self):
-        email = _digest_email()
-
-        summary = ollama_client._structured_summary_fallback(email)
+        summary = ollama_client._bulk_newsletter_summary(email)
 
         self.assertIsNotNone(summary)
-        self.assertTrue(summary.startswith("- "))
-        self.assertIn("\n\n- ", summary)
+        self.assertIn("news digest", summary.lower())
+        self.assertIn("it covers", summary.lower())
+        self.assertNotIn("\n", summary)
 
     def test_rewrite_summary_for_second_person_preserves_bullets(self):
         rewritten = ollama_client._rewrite_summary_for_second_person(
@@ -62,19 +57,34 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertFalse(ollama_client.summary_looks_unusable(email))
 
+    def test_article_alert_summary_uses_natural_teaser_sentence(self):
+        email = {
+            "sender": "The Wall Street Journal <alerts@wsj.example>",
+            "title": "Nvidia to Invest $2 Billion in Nebius to Expand AI Cloud Infrastructure",
+            "body": (
+                "Nvidia will invest $2 billion in Nebius Group to expand AI cloud infrastructure. "
+                "Read more"
+            ),
+            "recipients": "",
+            "cc": "",
+        }
+
+        summary = ollama_client._bulk_newsletter_summary(email)
+
+        self.assertIsNotNone(summary)
+        self.assertNotIn("It focuses on", summary)
+        self.assertIn("Nvidia", summary)
+        self.assertNotIn("nvidia will invest", summary)
+
     @mock.patch("app.ollama_client._call_ollama", return_value=None)
-    def test_summarize_email_requests_bullets_for_structured_emails(self, mock_call):
+    def test_summarize_email_uses_paragraph_prompt_for_digest_emails(self, mock_call):
         email = _digest_email()
 
         summary = ollama_client.summarize_email(email, email_id="digest-1")
-        messages = mock_call.call_args.kwargs["messages"]
-        system_prompt = messages[0]["content"]
-        user_prompt = messages[1]["content"]
-
         self.assertIsNotNone(summary)
-        self.assertTrue(summary.startswith("- "))
-        self.assertIn("bullet list", system_prompt)
-        self.assertIn("split them into separate bullets", user_prompt)
+        self.assertIn("news digest", summary.lower())
+        self.assertNotIn("\n", summary)
+        mock_call.assert_not_called()
 
 
 if __name__ == "__main__":

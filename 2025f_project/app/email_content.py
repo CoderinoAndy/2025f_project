@@ -12,6 +12,10 @@ _HTML_COMMENT_PATTERN = re.compile(r"(?is)<!--.*?-->")
 _HTML_DROP_BLOCK_PATTERN = re.compile(
     r"(?is)<(script|style|head|title|meta|noscript|svg)[^>]*>.*?</\1>"
 )
+_HTML_ENTITY_PATTERN = re.compile(
+    r"&(?:#\d{2,7}|#x[0-9a-f]{2,6}|[a-z][a-z0-9]{1,31});",
+    re.IGNORECASE,
+)
 _HTML_BREAK_PATTERN = re.compile(r"(?is)<\s*br\s*/?\s*>")
 _HTML_BLOCK_TAG_PATTERN = re.compile(
     r"(?is)</?\s*(?:p|div|li|tr|table|td|th|section|article|header|footer|"
@@ -49,6 +53,10 @@ def _extract_charset(content_type):
 def _mojibake_marker_count(text):
     value = str(text or "")
     return sum(value.count(marker) for marker in _MOJIBAKE_MARKERS)
+
+
+def _html_entity_count(text):
+    return len(_HTML_ENTITY_PATTERN.findall(str(text or "")))
 
 
 def _repair_common_mojibake(text):
@@ -113,8 +121,15 @@ def _text_quality_score(text):
     )
     qp_hits = len(_QP_ESCAPE_PATTERN.findall(compact))
     markdown_hits = len(_MARKDOWN_LINK_PATTERN.findall(compact))
+    html_entity_hits = _html_entity_count(text)
     soft_break_hits = compact.count("=\n") + compact.count("=\r\n")
-    penalty = min(0.85, (qp_hits * 0.03) + (markdown_hits * 0.05) + (soft_break_hits * 0.04))
+    penalty = min(
+        0.9,
+        (qp_hits * 0.03)
+        + (markdown_hits * 0.05)
+        + (soft_break_hits * 0.04)
+        + (html_entity_hits * 0.006),
+    )
     return max(0.0, min(1.0, (readable_chars / length) - penalty))
 
 
@@ -180,6 +195,8 @@ def repair_body_text(body_text, body_html=None):
         if _text_quality_score(decoded_plain) >= _text_quality_score(plain_text):
             plain_text = decoded_plain
 
+    plain_html_entity_hits = _html_entity_count(plain_text)
+    plain_text = unescape(plain_text)
     plain_text = _normalize_visible_text(plain_text.replace("\r\n", "\n").replace("\r", "\n"))
     html_text = html_to_text(body_html)
     plain_markdown_links = len(_MARKDOWN_LINK_PATTERN.findall(plain_text))
@@ -189,6 +206,7 @@ def repair_body_text(body_text, body_html=None):
             not plain_text
             or looks_transfer_encoded_text(plain_text)
             or plain_markdown_links >= 3
+            or plain_html_entity_hits >= 6
             or _text_quality_score(html_text) > (_text_quality_score(plain_text) + 0.08)
         ):
             plain_text = html_text

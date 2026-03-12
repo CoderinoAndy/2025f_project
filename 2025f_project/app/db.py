@@ -4,6 +4,13 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from .debug_logger import log_event, log_exception
+from .email_content import (
+    contains_common_mojibake,
+    repair_body_text,
+    repair_header_text,
+    repair_html_content,
+    normalize_outgoing_text,
+)
 
 # Central DB path and allowed enum-like values used by validation/query code.
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +29,8 @@ AI_CATEGORIES = {
     "informational",
     "junk",
 }
+USER_DISPLAY_NAME_SETTING_KEY = "user_display_name"
+SETTING_VALUE_MAX_CHARS = 80
 
 EMAIL_SELECT_SQL = """
 SELECT
@@ -60,7 +69,10 @@ SELECT
     m.is_archived,
     m.ai_category,
     m.ai_needs_response,
-    m.ai_confidence
+    m.ai_confidence,
+    m.ai_image_context,
+    m.ai_image_context_status,
+    m.ai_image_context_updated_at
 FROM email_messages m
 """
 
@@ -165,6 +177,28 @@ def _apply_schema_migrations(conn):
             ADD COLUMN ai_confidence REAL
             """
         )
+    if "ai_image_context" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN ai_image_context TEXT
+            """
+        )
+    if "ai_image_context_status" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN ai_image_context_status TEXT
+              CHECK (ai_image_context_status IN ('ready','skipped','error'))
+            """
+        )
+    if "ai_image_context_updated_at" not in columns_after:
+        conn.execute(
+            """
+            ALTER TABLE email_messages
+            ADD COLUMN ai_image_context_updated_at TEXT
+            """
+        )
     if "is_archived" not in columns_after:
         conn.execute(
             """
@@ -173,6 +207,7 @@ def _apply_schema_migrations(conn):
               CHECK (is_archived IN (0,1))
             """
         )
+    _ensure_settings_table(conn)
 
     # Keep read-heavy mailbox queries fast with explicit supporting indexes.
     conn.execute(
@@ -206,6 +241,31 @@ def _apply_schema_migrations(conn):
         ON email_recipients(email_id, recipient_type, id)
         """
     )
+
+
+def _ensure_settings_table(conn):
+    """Create the lightweight app settings table when missing."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def _normalize_setting_value(value, max_chars=SETTING_VALUE_MAX_CHARS):
+    """Normalize short app-setting text values before storage."""
+    if value is None:
+        return None
+    cleaned = " ".join(str(value).split()).strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_chars]
+
+
 def _rebuild_email_tables(conn, existing_columns):
     """Rebuild email tables.
     """
@@ -220,6 +280,19 @@ def _rebuild_email_tables(conn, existing_columns):
     )
     ai_confidence_expr = (
         "ai_confidence" if "ai_confidence" in existing_columns else "NULL"
+    )
+    ai_image_context_expr = (
+        "ai_image_context" if "ai_image_context" in existing_columns else "NULL"
+    )
+    ai_image_context_status_expr = (
+        "ai_image_context_status"
+        if "ai_image_context_status" in existing_columns
+        else "NULL"
+    )
+    ai_image_context_updated_at_expr = (
+        "ai_image_context_updated_at"
+        if "ai_image_context_updated_at" in existing_columns
+        else "NULL"
     )
     is_archived_expr = "is_archived" if "is_archived" in existing_columns else "0"
 
@@ -254,7 +327,11 @@ def _rebuild_email_tables(conn, existing_columns):
             CHECK (ai_category IN ('urgent','informational','junk')),
           ai_needs_response INTEGER
             CHECK (ai_needs_response IN (0,1)),
-          ai_confidence REAL
+          ai_confidence REAL,
+          ai_image_context TEXT,
+          ai_image_context_status TEXT
+            CHECK (ai_image_context_status IN ('ready','skipped','error')),
+          ai_image_context_updated_at TEXT
         );
         """
     )
@@ -265,7 +342,8 @@ def _rebuild_email_tables(conn, existing_columns):
         INSERT INTO email_messages (
             id, external_id, provider_draft_id, thread_id, title, sender, body, body_html,
             type, priority, is_read, received_at, summary, draft, is_archived,
-            ai_category, ai_needs_response, ai_confidence
+            ai_category, ai_needs_response, ai_confidence,
+            ai_image_context, ai_image_context_status, ai_image_context_updated_at
         )
         SELECT
             id,
@@ -289,7 +367,10 @@ def _rebuild_email_tables(conn, existing_columns):
             {is_archived_expr},
             {ai_category_expr},
             {ai_needs_response_expr},
-            {ai_confidence_expr}
+            {ai_confidence_expr},
+            {ai_image_context_expr},
+            {ai_image_context_status_expr},
+            {ai_image_context_updated_at_expr}
         FROM email_messages_old
         """
     )
@@ -326,6 +407,24 @@ def _row_to_dict(row):
     """Row recipient dict.
     """
     data = dict(row)
+    repaired_body_html = None
+    if data.get("body_html") is not None:
+        repaired_body_html = repair_html_content(data.get("body_html") or "")
+        if contains_common_mojibake(repaired_body_html):
+            repaired_body_html = None
+        data["body_html"] = repaired_body_html or None
+    if "body" in data:
+        data["body"] = repair_body_text(data.get("body") or "", repaired_body_html)
+    if "title" in data and data["title"] is not None:
+        data["title"] = repair_header_text(data["title"])
+    if "sender" in data and data["sender"] is not None:
+        data["sender"] = repair_header_text(data["sender"])
+    if "recipients" in data and data["recipients"] is not None:
+        data["recipients"] = repair_header_text(data["recipients"])
+    if "cc" in data and data["cc"] is not None:
+        data["cc"] = repair_header_text(data["cc"])
+    if "draft" in data and data["draft"] is not None:
+        data["draft"] = normalize_outgoing_text(data["draft"])
     # Normalize SQLite scalar types (0/1/REAL) into Python values used by templates/API code.
     if "is_read" in data:
         data["is_read"] = bool(data["is_read"])
@@ -338,7 +437,11 @@ def _row_to_dict(row):
     if "ai_confidence" in data and data["ai_confidence"] is not None:
         data["ai_confidence"] = float(data["ai_confidence"])
     if "summary" in data and data["summary"] is not None:
-        data["summary"] = " ".join(str(data["summary"]).split()).strip()
+        data["summary"] = " ".join(repair_body_text(data["summary"], None).split()).strip()
+    if "ai_image_context_status" in data and data["ai_image_context_status"] is not None:
+        data["ai_image_context_status"] = _normalize_ai_image_context_status(
+            data["ai_image_context_status"]
+        )
     if "title" not in data and "subject" in data:
         data["title"] = data["subject"]
     if "received_at" in data and "date" not in data:
@@ -418,6 +521,17 @@ def _normalize_ai_confidence(value):
     return max(0.0, min(1.0, confidence))
 
 
+def _normalize_ai_image_context_status(value):
+    """Normalize ai image context status.
+    """
+    if value is None:
+        return None
+    lowered = str(value).strip().lower()
+    if lowered in {"ready", "skipped", "error"}:
+        return lowered
+    return None
+
+
 def _normalize_archived_flag(value):
     """Normalize archived flag.
     """
@@ -469,6 +583,69 @@ def fetch_emails(
             params,
         )
         return [_row_to_dict(r) for r in cur.fetchall()]
+
+
+def get_app_setting(key, default=None, db_path=DB_DEFAULT):
+    """Fetch a single app setting value."""
+    setting_key = str(key or "").strip()
+    if not setting_key:
+        return default
+    if not Path(db_path).exists():
+        return default
+    with db_session(db_path) as conn:
+        _ensure_settings_table(conn)
+        row = conn.execute(
+            """
+            SELECT value
+            FROM app_settings
+            WHERE key = ?
+            """,
+            (setting_key,),
+        ).fetchone()
+    return row["value"] if row and row["value"] is not None else default
+
+
+def set_app_setting(key, value, db_path=DB_DEFAULT):
+    """Insert, update, or clear a single app setting value."""
+    setting_key = str(key or "").strip()
+    if not setting_key:
+        raise ValueError("Setting key is required.")
+
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_value = _normalize_setting_value(value)
+    with db_session(db_path) as conn:
+        _ensure_settings_table(conn)
+        if normalized_value is None:
+            conn.execute("DELETE FROM app_settings WHERE key = ?", (setting_key,))
+            return None
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE
+            SET value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (setting_key, normalized_value),
+        )
+    return normalized_value
+
+
+def get_user_display_name(db_path=DB_DEFAULT):
+    """Return the stored mailbox-owner display name, if any."""
+    return _normalize_setting_value(
+        get_app_setting(USER_DISPLAY_NAME_SETTING_KEY, default=None, db_path=db_path)
+    )
+
+
+def set_user_display_name(display_name, db_path=DB_DEFAULT):
+    """Persist or clear the mailbox-owner display name."""
+    return set_app_setting(
+        USER_DISPLAY_NAME_SETTING_KEY,
+        display_name,
+        db_path=db_path,
+    )
 
 
 def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
@@ -583,6 +760,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             """
             SELECT
                 id,
+                body,
                 summary,
                 draft,
                 body_html,
@@ -592,7 +770,10 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                 is_archived,
                 ai_category,
                 ai_needs_response,
-                ai_confidence
+                ai_confidence,
+                ai_image_context,
+                ai_image_context_status,
+                ai_image_context_updated_at
             FROM email_messages
             WHERE external_id = ?
             """,
@@ -604,6 +785,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                 """
                 SELECT
                     id,
+                    body,
                     summary,
                     draft,
                     body_html,
@@ -613,7 +795,10 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_archived,
                     ai_category,
                     ai_needs_response,
-                    ai_confidence
+                    ai_confidence,
+                    ai_image_context,
+                    ai_image_context_status,
+                    ai_image_context_updated_at
                 FROM email_messages
                 WHERE provider_draft_id = ?
                 """,
@@ -640,6 +825,17 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             is_archived_value = normalized["is_archived"]
             if is_archived_value is None:
                 is_archived_value = existing["is_archived"]
+            content_changed = (
+                str(existing["body"] or "") != str(normalized["body"] or "")
+                or str(existing["body_html"] or "") != str(body_html_value or "")
+            )
+            ai_image_context_value = existing["ai_image_context"]
+            ai_image_context_status_value = existing["ai_image_context_status"]
+            ai_image_context_updated_at_value = existing["ai_image_context_updated_at"]
+            if content_changed:
+                ai_image_context_value = None
+                ai_image_context_status_value = None
+                ai_image_context_updated_at_value = None
             existing_priority = existing["priority"]
             priority_value = (
                 int(existing_priority)
@@ -671,7 +867,10 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_archived = ?,
                     ai_category = ?,
                     ai_needs_response = ?,
-                    ai_confidence = ?
+                    ai_confidence = ?,
+                    ai_image_context = ?,
+                    ai_image_context_status = ?,
+                    ai_image_context_updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -691,6 +890,9 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     ai_category_value,
                     ai_needs_response_value,
                     ai_confidence_value,
+                    ai_image_context_value,
+                    ai_image_context_status_value,
+                    ai_image_context_updated_at_value,
                     existing["id"],
                 ),
             )
@@ -716,9 +918,12 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_archived,
                     ai_category,
                     ai_needs_response,
-                    ai_confidence
+                    ai_confidence,
+                    ai_image_context,
+                    ai_image_context_status,
+                    ai_image_context_updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     external_id,
@@ -738,6 +943,9 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     normalized["ai_category"],
                     normalized["ai_needs_response"],
                     normalized["ai_confidence"],
+                    None,
+                    None,
+                    None,
                 ),
             )
             email_id = cur.lastrowid
@@ -790,8 +998,9 @@ def update_draft(email_id, draft_text, db_path=DB_DEFAULT):
     """Update draft.
     """
     # Update draft fields while preserving schema and business constraints.
+    clean_draft = normalize_outgoing_text(draft_text or "")
     with db_session(db_path) as conn:
-        conn.execute("UPDATE email_messages SET draft = ? WHERE id = ?", (draft_text, email_id))
+        conn.execute("UPDATE email_messages SET draft = ? WHERE id = ?", (clean_draft, email_id))
 
 
 def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_DEFAULT):
@@ -812,9 +1021,10 @@ def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_D
             raise ValueError("Source email not found.")
 
         thread_id = source["thread_id"] or f"thread-{source_email_id}"
-        title = source["title"] or "No subject"
+        title = repair_header_text(source["title"] or "No subject")
         if not title.lower().startswith("re:"):
             title = f"Re: {title}"
+        clean_reply_text = normalize_outgoing_text(reply_text or "")
 
         priority = int(source["priority"] or 1)
         priority = max(1, min(3, priority))
@@ -835,7 +1045,7 @@ def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_D
             )
             VALUES (NULL, NULL, ?, ?, ?, ?, 'sent', ?, 1, CURRENT_TIMESTAMP)
             """,
-            (thread_id, title, LOCAL_USER_EMAIL, reply_text, priority),
+            (thread_id, title, LOCAL_USER_EMAIL, clean_reply_text, priority),
         )
 
         new_email_id = cur.lastrowid
@@ -865,8 +1075,8 @@ def save_local_draft(
 ):
     """Save local draft.
     """
-    clean_title = (title or "(No subject)").strip()
-    clean_body = body or ""
+    clean_title = repair_header_text(title or "(No subject)")
+    clean_body = normalize_outgoing_text(body or "")
     with db_session(db_path) as conn:
         draft_id = None
         if email_id:
@@ -956,6 +1166,8 @@ def update_email_ai_fields(
     ai_category=None,
     ai_needs_response=None,
     ai_confidence=None,
+    ai_image_context=None,
+    ai_image_context_status=None,
     lock_existing_classification=True,
     db_path=DB_DEFAULT,
 ):
@@ -978,7 +1190,7 @@ def update_email_ai_fields(
 
         if summary is not None:
             assignments.append("summary = ?")
-            params.append(summary)
+            params.append(repair_body_text(summary, None))
 
         classification_locked = bool(
             lock_existing_classification
@@ -1020,6 +1232,22 @@ def update_email_ai_fields(
             assignments.append("ai_confidence = ?")
             params.append(normalized_confidence)
 
+        if ai_image_context is not None:
+            assignments.append("ai_image_context = ?")
+            params.append(str(ai_image_context).strip() or None)
+            assignments.append("ai_image_context_updated_at = CURRENT_TIMESTAMP")
+
+        if ai_image_context_status is not None:
+            normalized_image_status = _normalize_ai_image_context_status(
+                ai_image_context_status
+            )
+            if normalized_image_status is None:
+                raise ValueError("Invalid AI image context status.")
+            assignments.append("ai_image_context_status = ?")
+            params.append(normalized_image_status)
+            if ai_image_context is None:
+                assignments.append("ai_image_context_updated_at = CURRENT_TIMESTAMP")
+
         if not assignments:
             return
 
@@ -1040,7 +1268,8 @@ def create_local_sent_email(
     """Create local sent email.
     """
     # Create local sent email from validated inputs and return the new identifier.
-    clean_title = (title or "(No subject)").strip()
+    clean_title = repair_header_text(title or "(No subject)")
+    clean_body = normalize_outgoing_text(body or "")
     with db_session(db_path) as conn:
         cur = conn.execute(
             """
@@ -1058,7 +1287,7 @@ def create_local_sent_email(
             )
             VALUES (NULL, NULL, ?, ?, ?, ?, 'sent', 1, 1, CURRENT_TIMESTAMP)
             """,
-            (thread_id, clean_title, sender, body or ""),
+            (thread_id, clean_title, sender, clean_body),
         )
         email_id = cur.lastrowid
         _insert_recipients(conn, email_id, "to", recipients)

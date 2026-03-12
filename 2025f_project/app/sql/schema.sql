@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS email_messages ( -- Primary message table (one row pe
     CHECK (ai_category IN ('urgent','informational','junk')),
   ai_needs_response INTEGER
     CHECK (ai_needs_response IN (0,1)),
-  ai_confidence REAL
+  ai_confidence REAL,
+  ai_image_context TEXT,
+  ai_image_context_status TEXT
+    CHECK (ai_image_context_status IN ('ready','skipped','error')),
+  ai_image_context_updated_at TEXT
 );
 
 -- Recipient rows (one row per address per email), instead of comma-separated columns
@@ -39,6 +43,12 @@ CREATE TABLE IF NOT EXISTS email_recipients ( -- Recipient table with one row pe
   address TEXT NOT NULL,
   FOREIGN KEY (email_id) REFERENCES email_messages(id) ON DELETE CASCADE,
   UNIQUE (email_id, recipient_type, address)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings ( -- Small key/value store for lightweight user preferences.
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_provider_draft_id -- Fast provider draft lookups and uniqueness.

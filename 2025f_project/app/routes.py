@@ -9,8 +9,10 @@ from .db import (
     fetch_email_by_id,
     fetch_email_by_provider_draft_id,
     fetch_thread_emails,
+    get_user_display_name,
     set_email_type as db_set_email_type,
     set_email_archived,
+    set_user_display_name,
     delete_email as db_delete_email,
     mark_read,
     update_draft,
@@ -62,6 +64,12 @@ LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() 
 # App-level mailbox type rules reused by multiple routes.
 NON_MAIN_TYPES = {"sent", "draft"}
 ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
+
+
+@main.app_context_processor
+def inject_user_display_name():
+    """Expose the mailbox-owner display name to shared templates."""
+    return {"user_display_name": get_user_display_name() or ""}
 
 def _normalize_addresses(raw_value):
     """Normalize addresses.
@@ -362,7 +370,7 @@ def start_ai_analyze(id):
         abort(400)
     if email_data.get("type") in NON_MAIN_TYPES:
         abort(400)
-    task = _start_analysis_task(id)
+    task = _start_analysis_task(id, force=True)
     return jsonify(_serialize_ai_task(task))
 
 
@@ -399,6 +407,19 @@ def ai_task_status(task_id):
     if not task:
         abort(404)
     return jsonify(_serialize_ai_task(task))
+
+
+@main.route("/api/settings/display-name", methods=["POST"])
+def save_display_name():
+    """Persist the mailbox-owner display name for shared AI/UI context."""
+    payload = request.get_json(silent=True)
+    raw_name = None
+    if isinstance(payload, dict):
+        raw_name = payload.get("display_name")
+    if raw_name is None:
+        raw_name = request.form.get("display_name")
+    saved_name = set_user_display_name(raw_name)
+    return jsonify({"display_name": saved_name or ""})
 
 
 @main.before_app_request
@@ -543,7 +564,7 @@ def email(id):
     # Start analysis asynchronously so page render is still fast.
     if _should_auto_analyze_email(email_data, non_main_types=NON_MAIN_TYPES):
         ai_analysis_needed = True
-        task = _start_analysis_task(id)
+        task = _start_analysis_task(id, force=False)
         ai_analysis_task_id = task["id"]
 
     thread_emails = fetch_thread_emails(email_data.get("thread_id"))
@@ -720,7 +741,7 @@ def analyze_email_route(id):
     if email_data.get("type") in NON_MAIN_TYPES:
         abort(400)
 
-    _start_analysis_task(id)
+    _start_analysis_task(id, force=True)
     next_url = _next_url_from_request()
     return redirect(url_for("main.email", id=id, next=next_url))
 

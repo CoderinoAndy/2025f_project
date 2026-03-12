@@ -160,6 +160,56 @@ body.mailbox-list-page .list-shell{
   display: none;
 }
 
+.topbar-right{
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.topbar-name-form{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topbar-name-input{
+  width: min(220px, 34vw);
+  min-width: 128px;
+  border: 1px solid rgba(236, 233, 245, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 7px 14px;
+  line-height: 1.2;
+}
+
+.topbar-name-input::placeholder{
+  color: var(--muted);
+}
+
+.topbar-name-input:focus{
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.75);
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.18);
+}
+
+.topbar-name-status{
+  min-width: 42px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.topbar-name-form[data-save-state="ok"] .topbar-name-input{
+  border-color: rgba(34, 197, 94, 0.65);
+}
+
+.topbar-name-form[data-save-state="error"] .topbar-name-input{
+  border-color: rgba(248, 113, 113, 0.7);
+}
+
 .app-sidebar{
   position: fixed;
   top: 0;
@@ -243,7 +293,6 @@ body.mailbox-list-page .list-shell{
   background: rgba(124, 58, 237, 0.14);
 }
 .topbar-about-link{
-  margin-left: auto;
   width: 36px;
   height: 36px;
   border-radius: 999px;
@@ -674,6 +723,12 @@ body.mailbox-list-page .list-shell{
   }
   .topbar-mobile-nav{
     display: inline-flex;
+  }
+  .topbar-name-input{
+    width: min(180px, 44vw);
+  }
+  .topbar-name-status{
+    display: none;
   }
   .app-main{
     margin-left: 0;

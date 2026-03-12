@@ -37,9 +37,33 @@
     </div>
     {% endif %}
   </div>
-  <a class="topbar-about-link" href="{{ url_for('main.about') }}" aria-label="About">
-    <i class="bi bi-info-circle-fill" aria-hidden="true"></i>
-  </a>
+  <div class="topbar-right">
+    <form
+      class="topbar-name-form"
+      method="post"
+      action="{{ url_for('main.save_display_name') }}"
+      data-display-name-form
+      novalidate
+    >
+      <label class="visually-hidden" for="topbar-display-name-input">Your name</label>
+      <input
+        id="topbar-display-name-input"
+        class="topbar-name-input"
+        type="text"
+        name="display_name"
+        value="{{ user_display_name or '' }}"
+        placeholder="Add your name"
+        maxlength="80"
+        autocomplete="name"
+        spellcheck="false"
+        data-display-name-input
+      >
+      <span class="topbar-name-status" data-display-name-status aria-live="polite"></span>
+    </form>
+    <a class="topbar-about-link" href="{{ url_for('main.about') }}" aria-label="About">
+      <i class="bi bi-info-circle-fill" aria-hidden="true"></i>
+    </a>
+  </div>
 </div>
 
 {% if request.endpoint != "main.about" %} <!-- Hide mailbox nav/search on the About page. -->
@@ -112,3 +136,106 @@
   </form>
 </div>
 {% endif %}
+
+<script>
+  (() => {
+    const form = document.querySelector("[data-display-name-form]");
+    if (!form) {
+      return;
+    }
+
+    const input = form.querySelector("[data-display-name-input]");
+    const status = form.querySelector("[data-display-name-status]");
+    if (!input) {
+      return;
+    }
+
+    let lastSavedValue = String(input.value || "").trim();
+    let clearStatusTimer = null;
+
+    const normalizeValue = (value) =>
+      String(value || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+
+    const showStatus = (message, state = "") => {
+      form.dataset.saveState = state;
+      if (status) {
+        status.textContent = message;
+      }
+      if (clearStatusTimer) {
+        window.clearTimeout(clearStatusTimer);
+      }
+      if (message && state && state !== "pending") {
+        clearStatusTimer = window.setTimeout(() => {
+          form.dataset.saveState = "";
+          if (status) {
+            status.textContent = "";
+          }
+        }, 1800);
+      }
+    };
+
+    const saveDisplayName = async () => {
+      const normalized = normalizeValue(input.value);
+      input.value = normalized;
+      if (normalized === lastSavedValue) {
+        return;
+      }
+
+      showStatus("Saving...", "pending");
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Requested-With": "fetch",
+          },
+          body: JSON.stringify({ display_name: normalized }),
+        });
+        if (!response.ok) {
+          throw new Error(`Request failed with ${response.status}`);
+        }
+        const result = await response.json();
+        lastSavedValue = normalizeValue(result.display_name || "");
+        input.value = lastSavedValue;
+        showStatus(lastSavedValue ? "Saved" : "Cleared", "ok");
+      } catch (_error) {
+        showStatus("Save failed", "error");
+      }
+    };
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void saveDisplayName();
+    });
+
+    input.addEventListener("blur", () => {
+      void saveDisplayName();
+    });
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+        return;
+      }
+      if (event.key === "Escape") {
+        input.value = lastSavedValue;
+        form.dataset.saveState = "";
+        if (status) {
+          status.textContent = "";
+        }
+        input.blur();
+      }
+    });
+
+    input.addEventListener("input", () => {
+      form.dataset.saveState = "";
+      if (status) {
+        status.textContent = "";
+      }
+    });
+  })();
+</script>

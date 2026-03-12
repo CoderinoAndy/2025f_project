@@ -1,5 +1,6 @@
-import re
 import quopri
+import re
+import unicodedata
 from html import unescape
 
 
@@ -26,19 +27,59 @@ _CHARSET_PATTERN = re.compile(r"charset\s*=\s*[\"']?([^\"';\s]+)", re.IGNORECASE
 _INVISIBLE_CHAR_PATTERN = re.compile(
     r"[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u2000-\u200f\u2028-\u202f\u2060-\u206f\ufeff]"
 )
-_MOJIBAKE_MARKERS = (
-    "â€™",
-    "â€œ",
-    "â€\x9d",
-    "â€˜",
-    "â€“",
-    "â€”",
-    "â€¦",
-    "â€¢",
-    "â„¢",
-    "Ã",
-    "Â",
+_UNSAFE_TEXT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MOJIBAKE_SEQUENCE_PATTERN = re.compile(
+    r"(?:"
+    r"[\u00c2\u00c3\u00e2\u00ef\u00f0]"
+    r"[\u0080-\u00bf\u00a0-\u00ff\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192"
+    r"\u2010-\u203a\u20ac\u2122]{1,4}"
+    r")+"
 )
+_COMMON_EMAIL_CHAR_TRANSLATION = {
+    0x00A0: " ",
+    0x00A9: "(C)",
+    0x00AB: '"',
+    0x00AE: "(R)",
+    0x00B7: "-",
+    0x00BB: '"',
+    0x2010: "-",
+    0x2011: "-",
+    0x2012: "-",
+    0x2013: "-",
+    0x2014: "-",
+    0x2015: "-",
+    0x2018: "'",
+    0x2019: "'",
+    0x201A: "'",
+    0x201B: "'",
+    0x201C: '"',
+    0x201D: '"',
+    0x201E: '"',
+    0x201F: '"',
+    0x2022: "-",
+    0x2023: "-",
+    0x2024: ".",
+    0x2025: "..",
+    0x2026: "...",
+    0x2032: "'",
+    0x2033: '"',
+    0x2039: "<",
+    0x203A: ">",
+    0x2043: "-",
+    0x2122: "TM",
+    0x2190: "<-",
+    0x2192: "->",
+    0x21D0: "<=",
+    0x21D2: "=>",
+    0x25B6: ">",
+    0x25C0: "<",
+    0x25CF: "*",
+    0x25E6: "*",
+    0x2605: "*",
+    0x2606: "*",
+    0x2713: "OK",
+    0x2714: "OK",
+}
 
 
 def _compact_text(value):
@@ -52,11 +93,20 @@ def _extract_charset(content_type):
 
 def _mojibake_marker_count(text):
     value = str(text or "")
-    return sum(value.count(marker) for marker in _MOJIBAKE_MARKERS)
+    return len(_MOJIBAKE_SEQUENCE_PATTERN.findall(value))
+
+
+def contains_common_mojibake(text):
+    """Return True when text still looks like UTF-8 bytes decoded with the wrong charset."""
+    return _mojibake_marker_count(text) > 0
 
 
 def _html_entity_count(text):
     return len(_HTML_ENTITY_PATTERN.findall(str(text or "")))
+
+
+def _replace_common_email_symbols(text):
+    return str(text or "").translate(_COMMON_EMAIL_CHAR_TRANSLATION)
 
 
 def _repair_common_mojibake(text):
@@ -65,20 +115,38 @@ def _repair_common_mojibake(text):
         return ""
 
     marker_count = _mojibake_marker_count(value)
-    if marker_count <= 0 and not re.search(r"[ÃÂâ].{0,2}[€™€œ”‘–—…•™]", value):
+    if marker_count <= 0:
         return value
 
     best = value
-    best_score = _text_quality_score(value) - (_mojibake_marker_count(value) * 0.04)
-    for encoding in ("cp1252", "latin-1"):
-        try:
-            repaired = value.encode(encoding).decode("utf-8")
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            continue
-        candidate_score = _text_quality_score(repaired) - (_mojibake_marker_count(repaired) * 0.04)
-        if candidate_score > (best_score + 0.08):
-            best = repaired
-            best_score = candidate_score
+    best_marker_count = marker_count
+    best_score = _text_quality_score(value) - (best_marker_count * 0.04)
+    for _ in range(2):
+        improved = False
+        next_best = best
+        next_marker_count = best_marker_count
+        next_score = best_score
+        for encoding in ("cp1252", "latin-1"):
+            try:
+                repaired = best.encode(encoding).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+            repaired = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", repaired)
+            repaired_marker_count = _mojibake_marker_count(repaired)
+            candidate_score = _text_quality_score(repaired) - (repaired_marker_count * 0.04)
+            if (
+                repaired_marker_count < next_marker_count
+                and candidate_score >= (next_score - 0.02)
+            ) or candidate_score > (next_score + 0.08):
+                next_best = repaired
+                next_marker_count = repaired_marker_count
+                next_score = candidate_score
+                improved = True
+        if not improved:
+            break
+        best = next_best
+        best_marker_count = next_marker_count
+        best_score = next_score
     return best
 
 
@@ -103,7 +171,9 @@ def _decode_bytes(content_bytes, charset=""):
 
 def _normalize_visible_text(text):
     cleaned = _repair_common_mojibake(str(text or "")).replace("\xa0", " ")
+    cleaned = _replace_common_email_symbols(cleaned)
     cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)
+    cleaned = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"[ \t\f\v]+", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -117,7 +187,12 @@ def _text_quality_score(text):
 
     length = float(len(compact))
     readable_chars = sum(
-        1 for char in compact if char.isalnum() or char.isspace() or char in ".,:;!?'-()/%&"
+        1
+        for char in compact
+        if char.isalnum()
+        or char.isspace()
+        or unicodedata.category(char).startswith("P")
+        or unicodedata.category(char) in {"Sc", "Sm"}
     )
     qp_hits = len(_QP_ESCAPE_PATTERN.findall(compact))
     markdown_hits = len(_MARKDOWN_LINK_PATTERN.findall(compact))
@@ -185,6 +260,33 @@ def html_to_text(raw_html):
     return _normalize_visible_text(cleaned)
 
 
+def repair_html_content(raw_html):
+    """Repair mojibake and risky punctuation in HTML content without stripping markup."""
+    html = str(raw_html or "")
+    if not html:
+        return ""
+    cleaned = _repair_common_mojibake(html)
+    cleaned = _replace_common_email_symbols(cleaned)
+    cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)
+    cleaned = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", cleaned)
+    return cleaned.strip()
+
+
+def normalize_outgoing_text(value, *, preserve_newlines=True):
+    """Normalize outgoing text into email-safe punctuation before save/send."""
+    text = _repair_common_mojibake(str(value or ""))
+    text = _replace_common_email_symbols(text)
+    text = _INVISIBLE_CHAR_PATTERN.sub(" ", text)
+    text = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if preserve_newlines:
+        text = re.sub(r"[ \t\f\v]+", " ", text)
+        text = re.sub(r" *\n *", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+    return " ".join(text.split()).strip()
+
+
 def repair_body_text(body_text, body_html=None):
     plain_text = str(body_text or "")
     if looks_transfer_encoded_text(plain_text):
@@ -216,4 +318,4 @@ def repair_body_text(body_text, body_html=None):
 
 def repair_header_text(value):
     """Repair and normalize short header text like subject or sender."""
-    return _normalize_visible_text(str(value or ""))
+    return normalize_outgoing_text(value, preserve_newlines=False)

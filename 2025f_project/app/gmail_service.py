@@ -17,8 +17,11 @@ from .db import (
     upsert_email_from_provider,
 )
 from .email_content import (
+    contains_common_mojibake,
     decode_transfer_encoded_text,
+    normalize_outgoing_text,
     repair_body_text,
+    repair_html_content,
     repair_header_text,
 )
 from .ollama_client import (
@@ -568,6 +571,9 @@ def _extract_message_content(payload, service=None, message_id=None):
     html_body = "\n".join(part for part in html_parts if part.strip()).strip()
     if html_body:
         html_body = _replace_inline_cid_sources(html_body, inline_cid_sources)
+        html_body = repair_html_content(html_body)
+        if contains_common_mojibake(html_body):
+            html_body = None
     else:
         html_body = None
 
@@ -997,8 +1003,15 @@ def _build_email_message(to_value, cc_value, subject, body_text, attachments=Non
         message["To"] = to_value
     if cc_value:
         message["Cc"] = cc_value
-    message["Subject"] = (subject or "(No subject)").strip()
-    message.set_content(body_text or "")
+    message["Subject"] = normalize_outgoing_text(
+        subject or "(No subject)",
+        preserve_newlines=False,
+    )
+    message.set_content(
+        normalize_outgoing_text(body_text or ""),
+        charset="utf-8",
+        cte="quoted-printable",
+    )
 
     for attachment in attachments or []:
         filename = (attachment.get("filename") or "attachment.bin").strip() or "attachment.bin"

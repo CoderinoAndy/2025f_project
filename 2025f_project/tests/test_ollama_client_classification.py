@@ -51,6 +51,24 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertEqual(result["category"], "informational")
         self.assertEqual(result["email_type"], "read-only")
 
+    def test_general_brand_advertising_becomes_junk_uncertain(self):
+        email = _email(
+            "Style Desk <hello@fashion-brand.example>",
+            "New arrivals for spring",
+            (
+                "Discover fresh styles and featured picks from the new collection. "
+                "Shop the collection online for weekend looks."
+            ),
+        )
+
+        assessment = ollama_client._junk_signal_assessment(email)
+        result = ollama_client._heuristic_classification(email)
+
+        self.assertIn("promotion_cta", assessment["families"])
+        self.assertFalse(assessment["editorial_like"])
+        self.assertEqual(result["category"], "junk")
+        self.assertEqual(result["email_type"], "junk-uncertain")
+
     def test_transactional_receipt_stays_read_only(self):
         email = _email(
             "Billing <billing@service.example>",
@@ -100,6 +118,7 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertEqual(result["category"], "junk")
         self.assertIn("main purpose is advertising, promotion, sales conversion", system_prompt)
         self.assertIn("If the email is mainly a commercial promotion", system_prompt)
+        self.assertIn("still use category=junk and lower confidence", system_prompt)
         self.assertIn("commercial_promotion_pattern", user_prompt)
 
 

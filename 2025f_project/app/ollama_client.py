@@ -11,9 +11,25 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
-from .db import fetch_email_by_id, update_draft, update_email_ai_fields
+from .db import (
+    fetch_email_by_id,
+    get_user_display_name,
+    update_draft,
+    update_email_ai_fields,
+)
 from .debug_logger import log_event
-from .email_content import repair_body_text, repair_header_text
+from .email_content import contains_common_mojibake, repair_body_text, repair_header_text
+from .email_image_context import (
+    body_suggests_image_context,
+    build_basic_image_context,
+    email_text_for_image_gating,
+    extract_attachment_image_payloads,
+    extract_html_image_candidates,
+    extract_inline_image_payloads,
+    filter_image_attachment_metadata,
+    should_enrich_with_vision,
+    should_fetch_attachment_image_metadata,
+)
 
 # This module now contains both model-calling code and async AI task orchestration.
 # Core runtime defaults and normalized label sets shared across classify/summarize flows.
@@ -21,10 +37,18 @@ OLLAMA_API_URL_DEFAULT = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL_DEFAULT = "qwen2.5:14b"
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 45
 OLLAMA_LONG_TASK_TIMEOUT_SECONDS_DEFAULT = 180
+OLLAMA_KEEP_ALIVE_DEFAULT = "15m"
 SUMMARY_MIN_CHARS_DEFAULT = 200
 VALID_CATEGORIES = {"urgent", "informational", "junk"}
 VALID_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
-LONG_OLLAMA_TASKS = {"draft", "revise", "draft_rewrite", "summarize", "summarize_rewrite"}
+LONG_OLLAMA_TASKS = {
+    "draft",
+    "revise",
+    "draft_rewrite",
+    "summarize",
+    "summarize_rewrite",
+    "vision",
+}
 TASK_MODEL_ENV_MAP = {
     "classify": "OLLAMA_CLASSIFY_MODEL",
     "draft": "OLLAMA_DRAFT_MODEL",
@@ -32,12 +56,19 @@ TASK_MODEL_ENV_MAP = {
     "draft_rewrite": "OLLAMA_DRAFT_MODEL",
     "summarize": "OLLAMA_SUMMARY_MODEL",
     "summarize_rewrite": "OLLAMA_SUMMARY_MODEL",
+    "vision": "OLLAMA_VISION_MODEL",
 }
 LOCALHOST_NAMES = {"localhost"}
-OLLAMA_TAGS_CACHE_TTL_SECONDS = 30.0
+OLLAMA_TAGS_CACHE_TTL_SECONDS = 300.0
 OLLAMA_TAGS_CACHE = {"fetched_at": 0.0, "models": ()}
 OLLAMA_TAGS_LOCK = threading.Lock()
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
+LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
+MAILBOX_OWNER_NAME_ENV = "LOCAL_USER_NAME"
+SUMMARY_COMPRESSION_TARGET_RATIO = 0.28
+IMAGE_CONTEXT_MAX_CHARS_DEFAULT = 1600
+IMAGE_CONTEXT_MAX_IMAGES_DEFAULT = 2
+IMAGE_CONTEXT_MAX_IMAGE_BYTES_DEFAULT = 800_000
 # Sender/domain heuristics used to separate person-to-person mail from automated mail.
 PERSONAL_EMAIL_DOMAINS = (
     "gmail.com",
@@ -368,12 +399,28 @@ JUNK_PROMOTION_MARKERS = (
     "deal of the day",
     "member exclusive",
     "members only",
+    "recommended for you",
     "new arrivals",
+    "new collection",
+    "latest collection",
+    "fresh styles",
+    "featured picks",
+    "featured products",
     "best sellers",
     "gift guide",
     "buy one get one",
     "bogo",
     "bundle and save",
+    "save up to",
+    "save big",
+    "discover",
+    "shop the collection",
+    "shop the sale",
+    "shop our",
+    "presale access",
+    "pre-sale access",
+    "premium upgrade",
+    "upgrade today",
     "buy now",
     "shop now",
     "order now",
@@ -385,6 +432,7 @@ JUNK_PROMOTION_MARKERS = (
     "no obligation",
     "lowest price",
     "clearance",
+    "price drop",
 )
 JUNK_EDITORIAL_MARKERS = (
     "top stories",
@@ -409,6 +457,7 @@ JUNK_PRESSURE_MARKERS = (
     "act now",
     "last chance",
     "don't miss out",
+    "ends soon",
     "ends tonight",
     "expires soon",
     "today only",
@@ -614,10 +663,11 @@ def _available_ollama_models(api_urls=None, force_refresh=False):
             return cached_models
 
     models = ()
+    tags_timeout = _tags_timeout_seconds()
     for tags_url in _tags_url_candidates(api_urls=api_urls):
         request_obj = urllib.request.Request(tags_url, method="GET")
         try:
-            with urllib.request.urlopen(request_obj, timeout=10) as response:
+            with urllib.request.urlopen(request_obj, timeout=tags_timeout) as response:
                 parsed = json.loads(response.read().decode("utf-8"))
             models = tuple(
                 model.get("name")
@@ -650,6 +700,8 @@ def _resolved_model_name(task=None, api_urls=None):
     ]
     if family_matches:
         return family_matches[0]
+    if str(task or "").strip().lower() == "vision":
+        return requested_model
     return available_models[0]
 
 
@@ -689,6 +741,30 @@ def _timeout_seconds(task=None):
     return max(5.0, min(300.0, parsed))
 
 
+def _keep_alive_value(task=None):
+    """Return Ollama keep-alive hint to reduce model cold starts."""
+    task_name = str(task or "").strip().lower()
+    env_names = []
+    if task_name:
+        env_names.append(f"OLLAMA_{task_name.upper()}_KEEP_ALIVE")
+    env_names.append("OLLAMA_KEEP_ALIVE")
+    for env_name in env_names:
+        value = (os.getenv(env_name) or "").strip()
+        if value:
+            return value
+    return OLLAMA_KEEP_ALIVE_DEFAULT
+
+
+def _tags_timeout_seconds():
+    """Return timeout for lightweight `/api/tags` lookups."""
+    raw = (os.getenv("OLLAMA_TAGS_TIMEOUT_SECONDS") or "").strip()
+    try:
+        parsed = float(raw) if raw else 3.0
+    except ValueError:
+        parsed = 3.0
+    return max(1.0, min(10.0, parsed))
+
+
 def _summary_min_chars():
     """Summary min chars.
     """
@@ -699,6 +775,252 @@ def _summary_min_chars():
     except ValueError:
         parsed = SUMMARY_MIN_CHARS_DEFAULT
     return max(50, min(5000, parsed))
+
+
+def _image_context_max_chars():
+    raw = (os.getenv("AI_IMAGE_CONTEXT_MAX_CHARS") or "").strip()
+    try:
+        parsed = int(raw) if raw else IMAGE_CONTEXT_MAX_CHARS_DEFAULT
+    except ValueError:
+        parsed = IMAGE_CONTEXT_MAX_CHARS_DEFAULT
+    return max(200, min(4000, parsed))
+
+
+def _image_context_max_images():
+    raw = (os.getenv("AI_IMAGE_CONTEXT_MAX_IMAGES") or "").strip()
+    try:
+        parsed = int(raw) if raw else IMAGE_CONTEXT_MAX_IMAGES_DEFAULT
+    except ValueError:
+        parsed = IMAGE_CONTEXT_MAX_IMAGES_DEFAULT
+    return max(1, min(4, parsed))
+
+
+def _image_context_max_image_bytes():
+    raw = (os.getenv("AI_IMAGE_CONTEXT_MAX_IMAGE_BYTES") or "").strip()
+    try:
+        parsed = int(raw) if raw else IMAGE_CONTEXT_MAX_IMAGE_BYTES_DEFAULT
+    except ValueError:
+        parsed = IMAGE_CONTEXT_MAX_IMAGE_BYTES_DEFAULT
+    return max(40_000, min(4_000_000, parsed))
+
+
+def _vision_model_requested():
+    return (os.getenv("OLLAMA_VISION_MODEL") or "").strip()
+
+
+def _normalized_ai_image_context_text(value):
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    max_chars = _image_context_max_chars()
+    if len(text) > max_chars:
+        return f"{text[: max_chars - 3].rstrip()}..."
+    return text
+
+
+def _email_has_possible_image_context(email_data):
+    if not isinstance(email_data, dict):
+        return False
+    if _normalized_ai_image_context_text(email_data.get("ai_image_context")):
+        return True
+    body_html = str(email_data.get("body_html") or "")
+    if "<img" in body_html.lower():
+        return True
+    body_text = email_text_for_image_gating(email_data)
+    title = str(email_data.get("title") or "")
+    return body_suggests_image_context(title, body_text)
+
+
+def _describe_images_with_vision(image_payloads, email_data, email_id=None):
+    """Use a multimodal Ollama model to extract concise grounded image context."""
+    requested_model = _vision_model_requested()
+    if not requested_model or not image_payloads:
+        return ""
+
+    ordered_payloads = sorted(
+        image_payloads,
+        key=lambda item: (
+            -int(item.get("priority") or 0),
+            str(item.get("filename") or ""),
+        ),
+    )[: _image_context_max_images()]
+    if not ordered_payloads:
+        return ""
+
+    image_labels = []
+    image_blobs = []
+    for index, item in enumerate(ordered_payloads, start=1):
+        label = _compact_text(item.get("label") or "")
+        filename = item.get("filename") or f"image-{index}"
+        label_text = f" hint={label}" if label else ""
+        image_labels.append(f"{index}. {filename}{label_text}")
+        image_blobs.append(item["content_base64"])
+
+    system_prompt = (
+        "You extract grounded context from images embedded in emails. "
+        "Use only what is visibly present in the image. "
+        "Ignore decorative branding, logos, and tiny interface icons unless they change the meaning. "
+        "Capture short visible text, document type, key dates, amounts, names, and any requested action. "
+        "If an image is unreadable or decorative, say so briefly. "
+        "Return concise plain-text bullet points only."
+    )
+    user_prompt = (
+        "Describe the useful content in these email images.\n\n"
+        f"Subject: {_normalized_header_text(email_data.get('title') or '(No subject)')}\n"
+        f"From: {_normalized_header_text(email_data.get('sender') or '')}\n"
+        "Images in order:\n"
+        + "\n".join(image_labels)
+    )
+    response_text = _call_ollama(
+        task="vision",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt, "images": image_blobs},
+        ],
+        email_id=email_id,
+        temperature=0.0,
+        num_predict=320,
+    )
+    if not response_text:
+        return ""
+    cleaned = _normalized_ai_image_context_text(response_text)
+    cleaned_lower = cleaned.lower()
+    if any(
+        marker in cleaned_lower
+        for marker in (
+            "can't determine",
+            "cannot determine",
+            "unable to determine",
+            "unable to read",
+            "no useful information",
+        )
+    ):
+        return ""
+    return cleaned
+
+
+def _build_ai_image_context(email_data, email_id=None):
+    title = _normalized_header_text(email_data.get("title") or "(No subject)")
+    body_text = email_text_for_image_gating(email_data)
+    html_candidates = extract_html_image_candidates(email_data.get("body_html"))
+    attachment_images = []
+    external_id = str(email_data.get("external_id") or "").strip()
+
+    if external_id and should_fetch_attachment_image_metadata(title, body_text, html_candidates):
+        try:
+            from .gmail_service import fetch_message_attachment_metadata
+
+            attachment_images = filter_image_attachment_metadata(
+                fetch_message_attachment_metadata(external_id)
+            )
+        except Exception as exc:
+            _log_action(
+                task="vision",
+                status="error",
+                email_id=email_id,
+                detail=f"attachment_metadata_fetch_failed: {exc}",
+            )
+            attachment_images = []
+
+    vision_notes = ""
+    if _vision_model_requested() and should_enrich_with_vision(
+        title,
+        body_text,
+        html_candidates,
+        attachment_images,
+    ):
+        image_payloads = []
+        image_payloads.extend(
+            extract_inline_image_payloads(
+                html_candidates,
+                max_images=_image_context_max_images(),
+                max_bytes=_image_context_max_image_bytes(),
+            )
+        )
+        if external_id:
+            try:
+                from .gmail_service import fetch_message_attachments
+
+                image_payloads.extend(
+                    extract_attachment_image_payloads(
+                        fetch_message_attachments(external_id),
+                        max_images=_image_context_max_images(),
+                        max_bytes=_image_context_max_image_bytes(),
+                    )
+                )
+            except Exception as exc:
+                _log_action(
+                    task="vision",
+                    status="error",
+                    email_id=email_id,
+                    detail=f"attachment_image_fetch_failed: {exc}",
+                )
+        deduped_payloads = {}
+        for item in image_payloads:
+            key = (
+                str(item.get("filename") or ""),
+                str(item.get("content_type") or ""),
+                str(item.get("content_base64") or "")[:64],
+            )
+            existing = deduped_payloads.get(key)
+            if existing is None or int(item.get("priority") or 0) > int(existing.get("priority") or 0):
+                deduped_payloads[key] = item
+        vision_notes = _describe_images_with_vision(
+            list(deduped_payloads.values()),
+            email_data=email_data,
+            email_id=email_id,
+        )
+
+    image_context = _normalized_ai_image_context_text(
+        build_basic_image_context(
+            html_candidates,
+            attachment_images,
+            vision_notes=vision_notes,
+            max_chars=_image_context_max_chars(),
+        )
+    )
+    if image_context:
+        return image_context, "ready"
+    return "", "skipped"
+
+
+def _ensure_email_image_context(email_data, force=False):
+    """Populate cached AI image context when useful and available."""
+    if not isinstance(email_data, dict):
+        return email_data
+
+    cached_status = str(email_data.get("ai_image_context_status") or "").strip().lower()
+    cached_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
+    if not force and cached_status in {"ready", "skipped"}:
+        if cached_context:
+            email_data["ai_image_context"] = cached_context
+        return email_data
+    if not force and not _email_has_possible_image_context(email_data):
+        return email_data
+
+    email_id = email_data.get("id")
+    try:
+        image_context, image_status = _build_ai_image_context(email_data, email_id=email_id)
+    except Exception as exc:
+        image_context = ""
+        image_status = "error"
+        _log_action(
+            task="vision",
+            status="error",
+            email_id=email_id,
+            detail=f"image_context_build_failed: {exc}",
+        )
+
+    email_data["ai_image_context"] = image_context or None
+    email_data["ai_image_context_status"] = image_status
+    if email_id:
+        update_email_ai_fields(
+            email_id=email_id,
+            ai_image_context=image_context if image_status == "ready" else "",
+            ai_image_context_status=image_status,
+        )
+    return email_data
 
 
 def _email_body_text(email_data):
@@ -748,7 +1070,14 @@ def should_summarize_email(email_data):
     """
     # Return whether summarize email should run based on current message/context state.
     body = _email_body_text(email_data).strip()
-    return len(body) >= _summary_min_chars()
+    if len(body) >= _summary_min_chars():
+        return True
+    image_context = ""
+    if isinstance(email_data, dict):
+        image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
+    if image_context:
+        return True
+    return not body and _email_has_possible_image_context(email_data)
 
 
 def classification_to_email_type(classification):
@@ -1160,8 +1489,10 @@ def _clean_body_for_prompt(body, max_chars=8000):
     """Clean body for prompt.
     """
     # Clean this value so the rest of the code gets predictable input.
+    image_context = ""
     if isinstance(body, dict):
         text = _email_body_text(body)
+        image_context = _normalized_ai_image_context_text(body.get("ai_image_context"))
     else:
         text = repair_body_text(body or "", None)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -1183,6 +1514,13 @@ def _clean_body_for_prompt(body, max_chars=8000):
         normalized_line = re.sub(r"^question:\s*", "", normalized_line, flags=re.IGNORECASE)
         normalized_line = re.sub(r"^answer from\s+[^:]+:?[\s-]*", "", normalized_line, flags=re.IGNORECASE)
         normalized_line = _strip_read_time_prefix(normalized_line)
+        normalized_line = re.sub(
+            r"\b(?:star border|checkerboard(?:\s+artist)?(?:\s+image)?\s*\d*|"
+            r"artist image\s*\d+|image\s+\d+)\b",
+            " ",
+            normalized_line,
+            flags=re.IGNORECASE,
+        )
         normalized_line = _strip_footer_noise_text(normalized_line)
         normalized_line = _compact_text(normalized_line)
         if not normalized_line:
@@ -1190,7 +1528,8 @@ def _clean_body_for_prompt(body, max_chars=8000):
             continue
         lowered = normalized_line.lower()
         if re.match(
-            r"^(?:read more|get tickets|try premium button|follow us|preferences|feedback|alerts center|"
+            r"^(?:read more|get the details|get tickets|learn more|listen now|watch now|"
+            r"try premium button|follow us|preferences|feedback|alerts center|"
             r"contact us|other\s*\(|top stories for|answer from|view in browser|open in browser|"
             r"or,\s*see\b|click here\b|click to\b)\b",
             lowered,
@@ -1217,7 +1556,13 @@ def _clean_body_for_prompt(body, max_chars=8000):
     cleaned = _strip_footer_noise_text(cleaned)
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()[:max_chars]
+    cleaned = cleaned.strip()
+    if image_context:
+        if not cleaned:
+            cleaned = f"Image context:\n{image_context}"
+        elif len(_compact_text(cleaned)) < 240:
+            cleaned = f"{cleaned}\n\nImage context:\n{image_context}"
+    return cleaned[:max_chars]
 
 
 def _extract_key_sentences(body_text, max_sentences=8):
@@ -1278,40 +1623,53 @@ def _summary_profile(email_data):
     body = _clean_body_for_prompt(email_data, max_chars=20000)
     body_length = len(body)
     if body_length >= 4000:
-        return {
+        profile = {
             "char_limit": 3000,
             "output_sentences": 10,
             "context_sentences": 44,
             "context_chars": 15000,
-            "prompt_target": "8-10 sentences",
+            "prompt_target": "8-10 concise sentences",
             "num_predict": 1200,
         }
-    if body_length >= 1800:
-        return {
+    elif body_length >= 1800:
+        profile = {
             "char_limit": 2400,
             "output_sentences": 8,
             "context_sentences": 34,
             "context_chars": 13000,
-            "prompt_target": "6-8 sentences",
+            "prompt_target": "6-8 concise sentences",
             "num_predict": 950,
         }
-    if body_length >= 900:
-        return {
+    elif body_length >= 900:
+        profile = {
             "char_limit": 1600,
             "output_sentences": 6,
             "context_sentences": 26,
             "context_chars": 11000,
-            "prompt_target": "4-6 sentences",
+            "prompt_target": "4-6 concise sentences",
             "num_predict": 720,
         }
-    return {
-        "char_limit": 900,
-        "output_sentences": 4,
-        "context_sentences": 16,
-        "context_chars": 8000,
-        "prompt_target": "3-4 sentences",
-        "num_predict": 460,
-    }
+    else:
+        profile = {
+            "char_limit": 900,
+            "output_sentences": 4,
+            "context_sentences": 16,
+            "context_chars": 8000,
+            "prompt_target": "3-4 concise sentences",
+            "num_predict": 460,
+        }
+
+    compression_char_limit = max(260, int(body_length * SUMMARY_COMPRESSION_TARGET_RATIO))
+    profile["char_limit"] = min(profile["char_limit"], compression_char_limit)
+    profile["output_sentences"] = min(
+        profile["output_sentences"],
+        max(3, profile["char_limit"] // 120),
+    )
+    profile["prompt_target"] = (
+        f"about {profile['output_sentences']} concise sentences and no more than roughly "
+        "one quarter of the source length"
+    )
+    return profile
 
 
 def _body_for_context(email_data, max_chars=8000, max_sentences=14):
@@ -1421,6 +1779,81 @@ def _prompt_summary_sentence(prompt_text):
     return f"It includes a prompt about {prompt}"
 
 
+def _looks_marketing_alert_teaser(teaser_text):
+    """Return True for promo-style alert copy that should never be reused verbatim."""
+    normalized = _compact_text(repair_body_text(teaser_text or "", None)).lower()
+    if not normalized:
+        return False
+    if re.search(r"\byou'?re one of\b|\byou are one of\b", normalized):
+        return True
+    markers = (
+        "get the details",
+        "top fan",
+        "top fans",
+        "top listener",
+        "top listeners",
+        "just had to let you know",
+        "headed your way",
+        "dropped tour dates",
+        "artist image",
+        "checkerboard",
+        "star border",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _paraphrase_marketing_alert_teaser(teaser_text):
+    """Convert clicky entertainment-alert copy into a short neutral summary sentence."""
+    teaser = _compact_text(teaser_text)
+    if not teaser or not _looks_marketing_alert_teaser(teaser):
+        return ""
+
+    cleaned = re.sub(
+        r"\b(?:star border|checkerboard(?:\s+artist)?(?:\s+image)?\s*\d*|"
+        r"artist image\s*\d+|image\s+\d+)\b",
+        " ",
+        teaser,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(?:get the details|get tickets|learn more|listen now|watch now)\b[\s:!,-]*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    artist_match = re.search(
+        r"\bone of\s+([A-Z][A-Za-z0-9'&.-]*(?:\s+[A-Z][A-Za-z0-9'&.-]*)*)'s\s+"
+        r"(?:top\s+)?(?:fans?|listeners?)\b",
+        cleaned,
+    )
+    artist_name = _compact_text(artist_match.group(1)) if artist_match else ""
+    cleaned = re.sub(
+        r"^.*?\b(?:we|i)\s+just\s+had\s+to\s+let\s+you\s+know:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\byep,\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _compact_text(cleaned).strip(" -:;,.")
+    lowered = cleaned.lower()
+
+    if "tour dates" in lowered:
+        if artist_name:
+            detail = f"{artist_name} has new tour dates"
+        else:
+            detail = "New tour dates are available"
+        if re.search(r"\b(?:headed your way|near you|in your area|coming to your area)\b", lowered):
+            detail += " near you"
+        return detail
+    if "presale" in lowered:
+        if artist_name:
+            return f"{artist_name} has a presale update"
+        return "There is a presale update"
+    if artist_name and re.search(r"\b(?:concert|show|live date|tickets?)\b", lowered):
+        return f"{artist_name} has a live-event update"
+    return ""
+
+
 def _topic_phrase_from_sentence(sentence_text):
     """Compress a sentence into a shorter topic phrase for digest overviews."""
     text = _strip_read_time_prefix(sentence_text)
@@ -1471,8 +1904,157 @@ def _digest_overview_summary(email_data, sender_name, title_topic, key_sentences
     return summary[:SUMMARY_MAX_CHARS] if summary else None
 
 
+def _extract_digest_questions(raw_body, max_questions=3):
+    """Extract distinct featured questions from inline or multiline digest bodies."""
+    question_source = str(raw_body or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not question_source:
+        return []
+
+    questions = []
+    for match in re.finditer(
+        r"Question:\s*(.*?)(?=(?:\s+Question:\s*)|(?:\s+Answer from\s+[^:]+:?[\s-]*)|$)",
+        question_source,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        question = repair_header_text(match.group(1))
+        question = _strip_footer_noise_text(question)
+        question = _compact_text(question).strip(" -:;,.")
+        if not question or len(question) < 18:
+            continue
+        if not question.endswith("?"):
+            question = f"{question}?"
+        if any(_token_overlap_ratio(question, existing) > 0.9 for existing in questions):
+            continue
+        questions.append(question)
+        if len(questions) >= max_questions:
+            break
+    return questions
+
+
+def _digest_question_summary(sender_name, title_topic, digest_questions):
+    """Return a structured summary for question-heavy digests."""
+    if not digest_questions:
+        return None
+
+    intro = f"You received a question digest from {sender_name}"
+    if title_topic and not _is_near_subject_copy(title_topic, digest_questions[0]):
+        intro += f" about {title_topic}"
+
+    if len(digest_questions) == 1:
+        summary = _compact_text(
+            f"{_ensure_sentence_ending(intro)} "
+            f"{_ensure_sentence_ending(f'It highlights a featured question: {digest_questions[0]}')}"
+        )
+        return summary[:SUMMARY_MAX_CHARS] if summary else None
+
+    labels = ("One featured question asks", "Another asks", "A third asks")
+    items = [_ensure_sentence_ending(intro)]
+    for index, question in enumerate(digest_questions[:3]):
+        label = labels[min(index, len(labels) - 1)]
+        items.append(f"{label}: {question}")
+    return _format_summary_list(items, SUMMARY_MAX_CHARS)
+
+
+def _is_digest_call_to_action_line(line_text):
+    """Return True for short CTA lines commonly repeated beneath digest items."""
+    normalized = _compact_text(line_text)
+    if not normalized:
+        return False
+    return bool(
+        re.match(
+            r"^(?:read(?:\s+(?:more|transcript))?|watch now|listen now|get the details|"
+            r"get tickets|learn more|view article|read now|play now(?:\s+\S+)?|see more)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _extract_digest_item_titles(body_text, max_items=4):
+    """Extract repeated card/list item titles from newsletter-style bodies."""
+    raw_text = _email_body_text(body_text) if isinstance(body_text, dict) else repair_body_text(body_text or "", None)
+    raw_text = str(raw_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw_text:
+        return []
+
+    non_empty_lines = [
+        _compact_text(line)
+        for line in raw_text.split("\n")
+        if _compact_text(line)
+    ]
+    if not non_empty_lines:
+        return []
+
+    titles = []
+    skip_markers = (
+        "newsletter",
+        "digest",
+        "briefing",
+        "copyright",
+        "unsubscribe",
+        "preferences",
+        "view in browser",
+        "mailing address",
+        "all rights reserved",
+        "subscribed",
+        "support our mission",
+    )
+    for index, line in enumerate(non_empty_lines):
+        if _is_digest_call_to_action_line(line):
+            continue
+        cleaned_line = _compact_text(_strip_footer_noise_text(line))
+        candidate = cleaned_line.strip(" -:;,.")
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if any(marker in lowered for marker in skip_markers):
+            continue
+        if _looks_utility_sentence(candidate) or _is_noise_fragment(candidate):
+            continue
+        if len(candidate) < 18 or len(candidate) > 120:
+            continue
+        if cleaned_line.endswith("."):
+            continue
+        tokens = _text_tokens(candidate)
+        if len(tokens) < 3 or len(tokens) > 16:
+            continue
+        if sum(character.isalpha() for character in candidate) < 12:
+            continue
+        lookahead = non_empty_lines[index + 1 : index + 4]
+        if not any(_is_digest_call_to_action_line(next_line) for next_line in lookahead):
+            continue
+        if any(_token_overlap_ratio(candidate, existing) > 0.9 for existing in titles):
+            continue
+        titles.append(candidate)
+        if len(titles) >= max_items:
+            break
+    return titles
+
+
+def _digest_item_titles_summary(sender_name, title_topic, item_titles):
+    """Return a compact summary for card-style newsletters with repeated featured items."""
+    if len(item_titles or []) < 2:
+        return None
+
+    featured_titles = list(item_titles[:3])
+    intro = f"You received a newsletter from {sender_name}"
+    if title_topic and not _is_near_subject_copy(title_topic, featured_titles[0]):
+        intro += f" about {title_topic}"
+
+    featured_line = f"It features {_natural_join(featured_titles)}"
+    if len(item_titles) > len(featured_titles):
+        featured_line += ", plus more"
+    summary = _compact_text(
+        f"{_ensure_sentence_ending(intro)} {_ensure_sentence_ending(featured_line)}"
+    )
+    return summary[:SUMMARY_MAX_CHARS] if summary else None
+
+
 def _looks_multi_item_digest(body_text, key_sentences):
     """Return True when a bulk message is clearly a multi-story digest."""
+    digest_item_titles = _extract_digest_item_titles(body_text, max_items=6)
+    if len(digest_item_titles) >= 2:
+        return True
     cleaned = _clean_body_for_prompt(body_text or "", max_chars=5000)
     if not cleaned:
         return False
@@ -1524,6 +2106,19 @@ def _looks_multi_item_digest(body_text, key_sentences):
     return len(key_sentences or []) >= 5 and bool(marker_hits or read_time_hits or heading_like_lines >= 2)
 
 
+def _looks_single_article_alert(email_data):
+    """Return True for short bulk/editorial alerts that cover one main article."""
+    if not _looks_bulk_or_newsletter(email_data):
+        return False
+    title = _normalized_header_text(email_data.get("title") or "")
+    if not title or title.lower() == "(no subject)":
+        return False
+    key_sentences = _extract_key_sentences(email_data, max_sentences=4)
+    if not key_sentences or len(key_sentences) > 2:
+        return False
+    return not _looks_multi_item_digest(_email_body_text(email_data), key_sentences)
+
+
 def _should_use_structured_summary(email_data):
     """Return True when the email is better summarized as separate bullet items."""
     key_sentences = _extract_key_sentences(
@@ -1568,7 +2163,7 @@ def _format_summary_list(items, char_limit):
 
 def _normalize_summary_layout(summary_text):
     """Normalize inline bullet-like output into properly separated lines."""
-    value = str(summary_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    value = repair_body_text(summary_text or "", None).replace("\r\n", "\n").replace("\r", "\n").strip()
     if not value:
         return ""
     marker_matches = re.findall(
@@ -1602,38 +2197,25 @@ def _bulk_newsletter_summary(email_data):
     multi_item_digest = _looks_multi_item_digest(raw_body, key_sentences)
 
     # Quora/news digests are better summarized by the featured topics than by model paraphrase.
-    digest_questions = [
-        _compact_text(match).strip(" -:?!")
-        for match in re.findall(r"Question:\s*(.+)", raw_body, flags=re.IGNORECASE)
-    ]
-    digest_questions = [
-        question for question in digest_questions if question and len(question) >= 18
-    ]
+    digest_questions = _extract_digest_questions(raw_body, max_questions=3)
     if digest_questions:
-        featured = title if title and not _is_near_subject_copy(title, digest_questions[0]) else ""
-        topic_list = digest_questions[:3]
-        sentences = []
-        if featured:
-            sentences.append(_ensure_sentence_ending(f"This digest highlights {featured}"))
-        if topic_list:
-            lead = topic_list[0]
-            if len(topic_list) == 1:
-                sentences.append(_ensure_sentence_ending(f"It also includes a question about {lead}"))
-            elif len(topic_list) == 2:
-                sentences.append(
-                    _ensure_sentence_ending(
-                        f"It includes questions about {topic_list[0]} and {topic_list[1]}"
-                    )
-                )
-            else:
-                sentences.append(
-                    _ensure_sentence_ending(
-                        f"It includes questions about {topic_list[0]}, {topic_list[1]}, and {topic_list[2]}"
-                    )
-                )
-        summary = _compact_text(" ".join(sentences))
-        if summary:
-            return summary[:SUMMARY_MAX_CHARS]
+        digest_summary = _digest_question_summary(
+            sender_name=sender_name,
+            title_topic=title_topic,
+            digest_questions=digest_questions,
+        )
+        if digest_summary:
+            return digest_summary
+
+    digest_item_titles = _extract_digest_item_titles(raw_body, max_items=4)
+    if len(digest_item_titles) >= 2:
+        digest_summary = _digest_item_titles_summary(
+            sender_name=sender_name,
+            title_topic=title_topic,
+            item_titles=digest_item_titles,
+        )
+        if digest_summary:
+            return digest_summary
 
     prompt_text = _extract_labeled_prompt_text(raw_body)
     if prompt_text:
@@ -1795,17 +2377,20 @@ def _bulk_newsletter_summary(email_data):
         teaser = _strip_footer_noise_text(teaser)
         teaser = _compact_text(teaser)
         if teaser and len(teaser) >= 30 and len(body) < 1800:
-            title_basis = title_topic or title
-            teaser_overlap = _token_overlap_ratio(teaser, title_basis)
-            if teaser_overlap >= 0.72 or _is_near_subject_copy(teaser, title_basis):
-                summary = _compact_text(
-                    f"You received an article alert from {sender_name} about {title_basis}."
-                )
-            else:
+            marketing_teaser = _paraphrase_marketing_alert_teaser(teaser)
+            if marketing_teaser:
                 summary = _compact_text(
                     f"You received an article alert from {sender_name}. "
-                    f"{_ensure_sentence_ending(teaser)}"
+                    f"{_ensure_sentence_ending(marketing_teaser)}"
                 )
+            else:
+                title_basis = title_topic or title
+                if title_basis:
+                    summary = _compact_text(
+                        f"You received an article alert from {sender_name} about {title_basis}."
+                    )
+                else:
+                    summary = _compact_text(f"You received an article alert from {sender_name}.")
             if summary and len(summary) <= SUMMARY_MAX_CHARS:
                 return summary
 
@@ -1927,7 +2512,7 @@ def _bulk_newsletter_summary(email_data):
     return summary
 
 
-def _looks_summary_failure(summary_text):
+def _looks_summary_failure_legacy(summary_text):
     """Looks summary failure.
     """
     # Keep this rule in one place so behavior stays consistent.
@@ -1939,6 +2524,24 @@ def _looks_summary_failure(summary_text):
     if normalized.startswith("{") or normalized.startswith("["):
         return True
     if re.search(r"(?:â€™|â€œ|â€“|â€”|â€¦|Ã|Â)", str(summary_text or "")):
+        return True
+    if _is_noise_fragment(normalized):
+        return True
+    return any(marker in normalized for marker in SUMMARY_FAILURE_MARKERS)
+
+
+def _looks_summary_failure(summary_text):
+    """Looks summary failure.
+    """
+    # Override the earlier brittle mojibake regex with the shared detector.
+    normalized = _compact_text(summary_text).lower()
+    if not normalized:
+        return True
+    if normalized in {"n/a", "none", "unknown", "summary unavailable"}:
+        return True
+    if normalized.startswith("{") or normalized.startswith("["):
+        return True
+    if contains_common_mojibake(summary_text):
         return True
     if _is_noise_fragment(normalized):
         return True
@@ -2010,7 +2613,8 @@ def _summary_candidate_fragments(summary_text, structured=False):
         if _compact_text(fragment).strip(" -:")
     ]
     if (structured or saw_list_marker) and len(line_fragments) >= 1:
-        return line_fragments
+        if not (structured and not saw_list_marker and len(line_fragments) == 1):
+            return line_fragments
 
     normalized = _compact_text(raw)
     normalized = re.sub(r"\bkey details\s*:\s*", "", normalized, flags=re.IGNORECASE)
@@ -2024,6 +2628,54 @@ def _summary_candidate_fragments(summary_text, structured=False):
     parts = [_compact_text(fragment).strip(" -:") for fragment in parts]
     parts = [fragment for fragment in parts if fragment]
     return parts or [normalized]
+
+
+def _summary_sentence_is_copied(
+    sentence_text,
+    source_text,
+    source_sentences=None,
+    *,
+    list_like=False,
+):
+    """Return True when a summary sentence is too close to source wording."""
+    sentence = _compact_text(sentence_text).strip(" -:")
+    if len(sentence) < 24:
+        return False
+
+    source = _compact_text(source_text)
+    if not source:
+        return False
+
+    sentence_lower = sentence.lower()
+    source_lower = source.lower()
+    if sentence_lower in source_lower:
+        return True
+
+    reference_sentences = source_sentences or _extract_key_sentences(source, max_sentences=20)
+    if not reference_sentences:
+        reference_sentences = [
+            _compact_text(part).strip(" -:")
+            for part in re.split(r"(?<=[.!?])\s+", source)
+            if _compact_text(part)
+        ]
+
+    sentence_tokens = set(_content_tokens(sentence))
+    if not sentence_tokens:
+        return False
+
+    for source_sentence in reference_sentences:
+        source_candidate = _compact_text(source_sentence).strip(" -:")
+        if len(source_candidate) < 24:
+            continue
+        overlap = _token_overlap_ratio(sentence, source_candidate)
+        threshold = 0.66 if list_like else 0.72
+        length_window = 90 if list_like else 70
+        if overlap < threshold or abs(len(sentence) - len(source_candidate)) > length_window:
+            continue
+        novel_tokens = sentence_tokens - set(_content_tokens(source_candidate))
+        if len(novel_tokens) <= 2:
+            return True
+    return False
 
 
 def _sanitize_model_summary(summary_text, email_data, structured=False):
@@ -2050,6 +2702,7 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
         )
     )
     source_tokens = set(_content_tokens(source))
+    source_sentences = _extract_key_sentences(source, max_sentences=20)
 
     # Split generated text into candidate sentences and filter for grounded facts only.
     kept = []
@@ -2060,12 +2713,22 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
             continue
         cleaned = _strip_read_time_prefix(sentence)
         cleaned = _compact_text(_strip_footer_noise_text(cleaned))
+        marketing_alert = _paraphrase_marketing_alert_teaser(cleaned)
+        if marketing_alert:
+            cleaned = marketing_alert
         if len(cleaned) < 22:
             continue
         lowered = cleaned.lower()
         if any(marker in lowered for marker in SUMMARY_HALLUCINATION_MARKERS):
             continue
         if _is_noise_fragment(cleaned):
+            continue
+        if _summary_sentence_is_copied(
+            cleaned,
+            source,
+            source_sentences,
+            list_like=structured,
+        ):
             continue
         if any(_token_overlap_ratio(cleaned, existing) > 0.93 for existing in kept):
             continue
@@ -2115,7 +2778,7 @@ def _looks_summary_parrot(summary_text, email_data):
     profile = _summary_profile(email_data)
     normalized_summary_text = _normalize_summary_layout(summary_text)
     summary = _compact_text(normalized_summary_text)
-    if len(summary) < 60:
+    if len(summary) < 24:
         return False
     list_like = "\n" in normalized_summary_text or bool(
         SUMMARY_LIST_MARKER_PATTERN.match(normalized_summary_text.lstrip())
@@ -2136,7 +2799,6 @@ def _looks_summary_parrot(summary_text, email_data):
     if len(summary) >= 80 and summary_lower in source_lower:
         return True
 
-    # Compare sentence-level overlap so paraphrase-light outputs are treated as copied.
     summary_sentences = [
         _compact_text(part).strip(" -:")
         for part in re.split(r"(?<=[.!?])\s+", summary)
@@ -2153,22 +2815,15 @@ def _looks_summary_parrot(summary_text, email_data):
             if _compact_text(part)
         ]
 
-    copied_sentences = 0
-    for sentence in summary_sentences:
-        sentence_lower = sentence.lower()
-        if len(sentence) >= (28 if list_like else 36) and sentence_lower in source_lower:
-            copied_sentences += 1
-            continue
-        if any(
-            len(sentence) >= (40 if list_like else 55)
-            and _token_overlap_ratio(sentence, source_sentence) >= (0.68 if list_like else 0.75)
-            and abs(len(sentence) - len(source_sentence)) <= (80 if list_like else 60)
-            for source_sentence in source_sentences
-        ):
-            copied_sentences += 1
-
-    required_copied = max(1, (len(summary_sentences) + 1) // 2)
-    return copied_sentences >= required_copied
+    return any(
+        _summary_sentence_is_copied(
+            sentence,
+            source,
+            source_sentences,
+            list_like=list_like,
+        )
+        for sentence in summary_sentences
+    )
 
 
 def _rewrite_parroted_summary(summary_text, email_data, email_id=None, structured=False):
@@ -2184,6 +2839,7 @@ def _rewrite_parroted_summary(summary_text, email_data, email_id=None, structure
         "Address the mailbox owner directly using you/your. "
         "Use only explicit facts present in the email context. "
         "Do not copy or quote source sentences. "
+        "No sentence in your rewrite may closely match a sentence from the email. "
         "Do not repeat article headlines, teaser bullets, or newsletter list items verbatim. "
         "Do not add subscription/sign-up suggestions unless explicitly requested in the email. "
         "Use declarative statements only (no questions). "
@@ -2283,6 +2939,30 @@ def _has_temporal_summary_hint(sentence_text):
     )
 
 
+def _force_summary_sentence_paraphrase(sentence_text, email_data):
+    """Force a fallback summary sentence away from source wording when needed."""
+    text = _compact_text(sentence_text).strip(" -:")
+    if not text:
+        return ""
+    if not _looks_actionable(email_data) and _looks_single_article_alert(email_data):
+        title_topic = _summary_title_topic(email_data.get("title") or "")
+        if title_topic:
+            return _ensure_sentence_ending(f"It covers {title_topic}")
+    if re.match(
+        r"^(?:you should|make sure|the sender asks|the email reminds you|it includes|"
+        r"it highlights|it covers|the email notes that|the sender notes that)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return _ensure_sentence_ending(text)
+
+    prefix = "The sender notes that"
+    if not _looks_actionable(email_data):
+        prefix = "It highlights that" if _looks_bulk_or_newsletter(email_data) else "The email notes that"
+    text = text[0].lower() + text[1:] if len(text) > 1 and text[0].isupper() else text
+    return _ensure_sentence_ending(f"{prefix} {text}")
+
+
 def _rewrite_fallback_summary_sentence(sentence_text, email_data):
     """Rewrite an extracted body sentence into concise summary wording."""
     text = _strip_read_time_prefix(sentence_text)
@@ -2373,6 +3053,9 @@ def _rewrite_fallback_summary_sentence(sentence_text, email_data):
     text = _compact_text(text).strip(" -:")
     if not text or _looks_low_information_sentence(text):
         return ""
+    marketing_alert = _paraphrase_marketing_alert_teaser(text)
+    if marketing_alert:
+        return _ensure_sentence_ending(marketing_alert)
 
     sender_name = _sender_display_name(email_data.get("sender")) or "The sender"
 
@@ -2454,6 +3137,9 @@ def _rewrite_fallback_summary_sentence(sentence_text, email_data):
         return ""
     if text:
         text = text[0].upper() + text[1:]
+    source_context = _body_for_context(email_data, max_chars=1800, max_sentences=12)
+    if _summary_sentence_is_copied(text, source_context, [sentence_text]):
+        text = _force_summary_sentence_paraphrase(text, email_data)
     return _ensure_sentence_ending(text)
 
 
@@ -2693,6 +3379,56 @@ def _uses_second_person(text):
     return bool(re.search(r"\b(you|your)\b", str(text or "").lower()))
 
 
+def _mailbox_owner_display_name():
+    """Return the mailbox owner's preferred display name when available."""
+    stored_name = _normalized_header_text(get_user_display_name() or "")
+    if stored_name:
+        return stored_name
+    return _normalized_header_text((os.getenv(MAILBOX_OWNER_NAME_ENV) or "").strip())
+
+
+def _mailbox_owner_context_block():
+    """Return prompt context for the mailbox owner's saved display name."""
+    display_name = _mailbox_owner_display_name()
+    if not display_name:
+        return ""
+    return (
+        "Mailbox owner profile:\n"
+        f"- display_name: {display_name}\n"
+        f"- email_address: {LOCAL_USER_EMAIL}\n"
+        "- If you include a personal sign-off, use the display_name exactly and never "
+        "use the email address as the owner's name.\n"
+    )
+
+
+def _reply_closing_text():
+    """Return the preferred reply sign-off using the saved display name when available."""
+    display_name = _mailbox_owner_display_name()
+    if display_name:
+        return f"Best regards,\n{display_name}"
+    return "Best regards,"
+
+
+def _normalize_owner_signature_in_draft(draft_text):
+    """Replace a trailing owner email-address signature with the saved display name."""
+    text = str(draft_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    display_name = _mailbox_owner_display_name()
+    if not text or not display_name:
+        return text
+    owner_email = LOCAL_USER_EMAIL.lower()
+    if not owner_email:
+        return text
+    lines = text.split("\n")
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].strip()
+        if not line:
+            continue
+        if line.lower() == owner_email:
+            lines[index] = display_name
+        break
+    return "\n".join(lines).strip()
+
+
 def _normalized_email_for_classification(email_data):
     """Normalized email for classification.
     """
@@ -2703,6 +3439,9 @@ def _normalized_email_for_classification(email_data):
         "recipients": _normalized_header_text(email_data.get("recipients")),
         "cc": _normalized_header_text(email_data.get("cc")),
         "body": _clean_body_for_prompt(email_data),
+        "ai_image_context": _normalized_ai_image_context_text(
+            email_data.get("ai_image_context")
+        ),
     }
 
 
@@ -2710,6 +3449,7 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
     """Email context block.
     """
     # Build email context block text that is passed into model prompts.
+    owner_context = _mailbox_owner_context_block()
     title = _normalized_header_text(email_data.get("title") or "(No subject)")
     sender = _normalized_header_text(email_data.get("sender"))
     recipients = _normalized_header_text(email_data.get("recipients"))
@@ -2719,6 +3459,7 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
         max_chars=body_max_chars,
         max_sentences=body_max_sentences,
     )
+    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
     ai_category = _compact_text(email_data.get("ai_category"))
     ai_type = _compact_text(email_data.get("type"))
     ai_hint = ""
@@ -2728,12 +3469,15 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
             f"- category: {ai_category or '(unknown)'}\n"
             f"- mailbox type: {ai_type or '(unknown)'}"
         )
+    image_hint = f"\nImage context:\n{image_context}" if image_context else ""
     return (
+        (f"{owner_context}\n" if owner_context else "")
+        +
         f"Subject: {title}\n"
         f"From: {sender}\n"
         f"To: {recipients}\n"
         f"Cc: {cc}\n"
-        f"Body:\n{body}{ai_hint}"
+        f"Body:\n{body}{image_hint}{ai_hint}"
     )
 
 
@@ -2880,7 +3624,11 @@ def _classification_few_shot_block():
         "7) From: deals@brand-mail.example\n"
         "Subject: 30% off today plus free shipping\n"
         "Body: Use code SPRING30 at checkout. Shop now. Manage preferences or unsubscribe.\n"
-        'Output: {"category":"junk","needs_response":false,"priority":1,"confidence":0.93}'
+        'Output: {"category":"junk","needs_response":false,"priority":1,"confidence":0.93}\n\n'
+        "8) From: hello@fashion-brand.example\n"
+        "Subject: New arrivals for spring\n"
+        "Body: Discover fresh styles and featured picks from the new collection. Shop the collection online.\n"
+        'Output: {"category":"junk","needs_response":false,"priority":1,"confidence":0.64}'
     )
 
 
@@ -2929,10 +3677,15 @@ def _looks_bulk_or_newsletter(email_data):
         "promo",
         "discount",
         "offer",
+        "discover",
         "save up to",
         "maximum savings",
         "limited time",
         "special offer",
+        "new arrivals",
+        "new collection",
+        "shop the collection",
+        "shop our",
         "take a trip",
         "shop now",
         "book now",
@@ -2973,6 +3726,9 @@ def _commercial_promotion_assessment(
     if free_shipping:
         matched_terms.append("free_shipping")
 
+    bulkish_promotion = len(promotion_hits) >= 1 and (
+        bulk_signal or bool(footer_hits) or sender_automated
+    )
     editorial_like = (
         len(editorial_hits) >= 2
         and len(promotion_hits) < 2
@@ -2990,6 +3746,7 @@ def _commercial_promotion_assessment(
             or promo_code
             or free_shipping
             or len(promotion_hits) >= 2
+            or bulkish_promotion
         )
         and (bulk_signal or bool(footer_hits) or sender_automated)
     )
@@ -2997,7 +3754,8 @@ def _commercial_promotion_assessment(
         percent_off
         or dollar_off
         or promo_code
-        or (len(promotion_hits) >= 2 and (footer_hits or bulk_signal))
+        or (len(promotion_hits) >= 2 and (footer_hits or sender_automated))
+        or (len(promotion_hits) >= 1 and bool(footer_hits) and sender_automated)
     )
     return {
         "commercial": commercial,
@@ -3218,6 +3976,7 @@ def _heuristic_classification(email_data):
     bulk_signal = _looks_bulk_or_newsletter(email_data)
     junk_assessment = _junk_signal_assessment(email_data)
     junk_signal = junk_assessment.get("level")
+    junk_families = set(junk_assessment.get("families") or [])
     if junk_signal == "strong":
         return {
             "category": "junk",
@@ -3233,6 +3992,21 @@ def _heuristic_classification(email_data):
             "needs_response": False,
             "priority": 1,
             "confidence": 0.68,
+            "email_type": "junk-uncertain",
+        }
+
+    if (
+        bulk_signal
+        and not actionable
+        and "promotion_cta" in junk_families
+        and not junk_assessment.get("editorial_like")
+        and not junk_assessment.get("transactional_like")
+    ):
+        return {
+            "category": "junk",
+            "needs_response": False,
+            "priority": 1,
+            "confidence": 0.61,
             "email_type": "junk-uncertain",
         }
 
@@ -3398,6 +4172,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
     requested_model_name = _model_name(task=task)
     model_name = _resolved_model_name(task=task, api_urls=api_urls)
     request_timeout = _timeout_seconds(task=task)
+    keep_alive = _keep_alive_value(task=task)
     if model_name != requested_model_name:
         _log_action(
             task=task,
@@ -3411,7 +4186,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
         email_id=email_id,
         detail=(
             f"ollama_chat model={model_name} timeout={int(request_timeout)}s "
-            f"url={api_urls[0]}"
+            f"keep_alive={keep_alive or '-'} url={api_urls[0]}"
         ),
     )
 
@@ -3433,6 +4208,8 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
             "num_predict": num_predict,
         },
     }
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
     body = json.dumps(payload).encode("utf-8")
     raw = None
     last_error = None
@@ -3486,6 +4263,7 @@ def classify_email(email_data, email_id=None):
     """Classify email.
     """
     # Normalize to the fixed labels used by mailbox triage.
+    email_data = _ensure_email_image_context(email_data)
     normalized_email = _normalized_email_for_classification(email_data)
     body = (normalized_email.get("body") or "").strip()
     title = (normalized_email.get("title") or "").strip()
@@ -3505,6 +4283,7 @@ def classify_email(email_data, email_id=None):
         "confidence must be a float 0 to 1. "
         "Weighted evidence order: body intent is highest, sender identity/domain is second highest, "
         "subject is third. "
+        "If image context is present, treat it as part of the email evidence, but do not invent details beyond it. "
         "If body and sender conflict weakly, give sender extra weight unless body has a direct response request. "
         "Infer whether the sender appears to be a brand/company/news source or an individual from sender "
         "name/domain using your general knowledge and context in this email. "
@@ -3518,6 +4297,8 @@ def classify_email(email_data, email_id=None):
         "Do not keep a message informational merely because it comes from a legitimate company or recognizable "
         "brand. If the email is mainly a commercial promotion, coupon, sale, upsell, marketing blast, or cold "
         "lead-generation pitch, classify it as junk. "
+        "If the message is borderline promotional rather than fully obvious spam, still use category=junk and "
+        "lower confidence instead of informational so the app can route it to junk confirmation. "
         "Lean strongly toward junk when the email shows common spam or junk patterns such as aggressive sales "
         "CTAs, discount or promo-code language, free-shipping or limited-time offers, urgency/scarcity bait, "
         "prize/refund/investment promises, account-verification fear bait from automated senders, bulk footer "
@@ -3569,6 +4350,7 @@ def summarize_email(email_data, email_id=None):
     """Summarize email.
     """
     # Translate between API payloads and our local mailbox shape.
+    email_data = _ensure_email_image_context(email_data)
     if not should_summarize_email(email_data):
         return None
     deterministic_bulk_summary = _bulk_newsletter_summary(email_data)
@@ -3576,7 +4358,12 @@ def summarize_email(email_data, email_id=None):
         return _rewrite_summary_for_second_person(deterministic_bulk_summary)
     profile = _summary_profile(email_data)
     title = _normalized_header_text(email_data.get("title") or "")
-    fallback_source = _extractive_summary_fallback(email_data)
+    structured_summary = _should_use_structured_summary(email_data)
+    fallback_source = (
+        _structured_summary_fallback(email_data)
+        if structured_summary
+        else _extractive_summary_fallback(email_data)
+    )
     fallback_summary = _rewrite_summary_for_second_person(fallback_source) or None
 
     # Keep prompts tightly constrained, then post-filter for grounding/paraphrase quality.
@@ -3586,28 +4373,47 @@ def summarize_email(email_data, email_id=None):
         "Never refer to the mailbox owner as 'the user' or 'the recipient'. "
         "Use only facts explicitly present in the email context; do not infer new details. "
         "Write in your own words: paraphrase and compress instead of copying source sentences. "
+        "No sentence in your output may closely match a sentence from the email body. "
         "Do not quote long spans from the email body; only keep exact wording for short facts "
         "like names, dates, times, and amounts when necessary. "
         "Do not copy article headlines, newsletter teaser lines, or list items verbatim. "
+        "Do not spend the opening sentence merely naming the sender if the body contains more important substance. "
+        "Do not mimic the subject line and then paste the first paragraph. "
         "Do not add subscription/sign-up suggestions unless explicitly requested in the email. "
         "Use declarative statements only (no questions). "
         "Synthesize themes instead of retelling sentences in source order. "
         "Capture: main topic, concrete details, and any requested action or deadline. "
+        "If image context is present, use it as supporting evidence from the email visuals. "
         "When the email contains multiple sections, features, or story items, mention each major section explicitly. "
-        "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
-        "privacy/cookie/legal notices, and utility links unless they are the main request. "
-        "Ignore subscription prompts like sign-up or subscribe CTAs unless the email is explicitly about subscribing. "
-        "Return plain text only as one compact paragraph (no markdown or bullet points). "
+        + (
+            "If the email is a newsletter or digest with several distinct items, summarize each item briefly as its own bullet. "
+            if structured_summary
+            else ""
+        )
+        + "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
+        + "privacy/cookie/legal notices, and utility links unless they are the main request. "
+        + "Ignore subscription prompts like sign-up or subscribe CTAs unless the email is explicitly about subscribing. "
+        + (
+            "Return a plain-text bullet list using '- ' for each separate section, with a blank line between bullets. "
+            if structured_summary
+            else "Return plain text only as one compact paragraph (no markdown or bullet points). "
+        )
         + f"Target {profile['prompt_target']} for long emails; keep shorter emails concise. "
-        "Treat plain person names as names, not email addresses."
+        + "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
         "Generate an original condensed summary in your own words. "
         "Do not copy or closely quote the email body. "
+        "Rewrite every sentence instead of reusing the sender's wording. "
         "Only include claims that are explicitly supported by the email content. "
         "Rewrite headlines and teaser copy into fresh wording instead of repeating them. "
         "For long emails, cover all major sections instead of summarizing only the opening lines. "
-        "If the email has several distinct updates, features, or sections, include each one at least briefly. "
+        "Aim for no more than roughly one quarter of the source length. "
+        + (
+            "If the email has several distinct updates, features, or sections, include each one briefly as a separate bullet item. "
+            if structured_summary
+            else "If the email has several distinct updates, features, or sections, include each one at least briefly. "
+        )
         + "Focus on what happened, key facts, and what you need to do next.\n\n"
         f"{_email_context_block(
             email_data,
@@ -3637,7 +4443,7 @@ def summarize_email(email_data, email_id=None):
         return fallback_summary
 
     summary = _rewrite_summary_for_second_person(
-        _sanitize_model_summary(response_text, email_data, structured=False) or ""
+        _sanitize_model_summary(response_text, email_data, structured=structured_summary) or ""
     )
     if _looks_summary_failure(summary):
         if fallback_summary:
@@ -3671,7 +4477,7 @@ def summarize_email(email_data, email_id=None):
             summary,
             email_data,
             email_id=email_id,
-            structured=False,
+            structured=structured_summary,
         )
         if rewritten and not _is_near_subject_copy(rewritten, title):
             return rewritten
@@ -3683,7 +4489,8 @@ def summarize_email(email_data, email_id=None):
                 detail="using_extractive_fallback_model_body_parrot",
             )
         return fallback_summary
-    summary = _merge_summary_with_fallback_coverage(summary, email_data)
+    if not structured_summary:
+        summary = _merge_summary_with_fallback_coverage(summary, email_data)
     if len(summary) > profile["char_limit"]:
         summary = f"{summary[: profile['char_limit'] - 3]}..."
     return summary or fallback_summary
@@ -3782,7 +4589,7 @@ def _draft_reply_fallback(email_data):
         body_parts.append("Let me know if you want any follow-up action from my side.")
         body_text = " ".join(body_parts)
 
-    return f"{greeting}\n\n{body_text}\n\nBest regards,"
+    return f"{greeting}\n\n{body_text}\n\n{_reply_closing_text()}"
 
 
 def _sanitize_reply_output(draft_text):
@@ -3807,7 +4614,7 @@ def _sanitize_reply_output(draft_text):
             lines.pop()
     cleaned = "\n".join(lines)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    return _normalize_owner_signature_in_draft(cleaned.strip())
 
 
 def _looks_draft_failure(draft_text, email_data):
@@ -3944,6 +4751,8 @@ def _rewrite_generic_draft(
         "If exact facts needed for a full answer are missing, give the most plausible professional next step and ask "
         "at most one focused clarifying question. "
         "Do not invent the mailbox owner's name, title, or signature. "
+        "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
+        "and never use the mailbox owner's email address as a person name. "
         "Return only the email body text with greeting and closing, no markdown and no subject."
     )
     user_prompt = (
@@ -4144,7 +4953,7 @@ def _expand_brief_reply_instruction(email_data, current_draft_text):
     )
     if not body:
         return None
-    return f"{greeting}\n\n{body}\n\nBest regards,"
+    return f"{greeting}\n\n{body}\n\n{_reply_closing_text()}"
 
 
 def _looks_like_reply_greeting(line_text):
@@ -4270,7 +5079,7 @@ def _revise_reply_fallback(email_data, current_draft_text):
     body_text = "\n\n".join(body_parts).strip()
     if not body_text:
         return None
-    return f"{greeting}\n\n{body_text}\n\nBest regards,"
+    return f"{greeting}\n\n{body_text}\n\n{_reply_closing_text()}"
 
 
 def _draft_preserves_user_context(original_text, revised_text):
@@ -4320,9 +5129,11 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     """Draft reply.
     """
     # Generate, revise, or validate draft reply used by reply and draft workflows.
+    email_data = _ensure_email_image_context(email_data)
     body = _email_body_text(email_data).strip()
+    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
     title = _compact_text(email_data.get("title") or "(No subject)")
-    if not body and not title:
+    if not body and not title and not image_context:
         return None
 
     # Generate a complete send-ready draft; fallback template keeps UX functional on failure.
@@ -4335,6 +5146,7 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         "'the sender is asking', or 'here is a draft'. "
         "Start directly with the email greeting and body as if it will be sent. "
         "Do not copy long spans from the original email. "
+        "If image context from screenshots, scans, or attached images is present, use it as part of the source email context. "
         "If the message is actionable, address the sender's request directly when possible. "
         "Use at least one concrete detail from the subject or body in the reply body, not only in the greeting. "
         "Avoid vague filler like 'thanks for the update' or 'I'll get back to you later' unless there is no better "
@@ -4343,6 +5155,8 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         "at most one focused clarifying question. "
         "If the message is informational/newsletter with no explicit ask, write a concise acknowledgment. "
         "Do not invent the mailbox owner's name, title, or signature. "
+        "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
+        "and never use the mailbox owner's email address as a person name. "
         "If no name is provided, end with a generic closing such as Best regards, without a personal name. "
         "Default to a complete response with greeting, substantive body, and closing sign-off. "
         "Return only the email body text, no markdown and no subject. "
@@ -4409,6 +5223,7 @@ def revise_reply(
     """Revise reply.
     """
     # Generate, revise, or validate revise reply used by reply and draft workflows.
+    email_data = _ensure_email_image_context(email_data)
     current_draft_text = str(current_draft_text or "").strip()
     if not current_draft_text:
         return None
@@ -4423,6 +5238,7 @@ def revise_reply(
         "Do not add analysis phrases like 'the main points I found were', 'here are the key points', "
         "'the sender is asking', or 'here is a revised draft'. "
         "Treat the current draft as required user context: preserve its concrete points and intent. "
+        "If image context from screenshots, scans, or attached images is present, use it as part of the source email context. "
         "If the current draft is only a short instruction like 'nope', 'sounds good', 'thanks', or "
         "'wrong email', treat it as the user's intended stance and expand it into a complete reply. "
         "Do not discard user-provided constraints, commitments, or questions. "
@@ -4433,6 +5249,8 @@ def revise_reply(
         "grounded response. "
         "Do not copy long spans from the original email. "
         "Do not invent the mailbox owner's name, title, or signature. "
+        "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
+        "and never use the mailbox owner's email address as a person name. "
         "If no name is provided, use a generic closing without adding a personal name. "
         "Return only the revised email body text with greeting and closing, no markdown and no subject. "
         "Treat plain person names as names, not email addresses."
@@ -4592,7 +5410,7 @@ def generate_reply_draft(
     )
 
 
-def summary_looks_unusable(email_data):
+def summary_looks_unusable_legacy(email_data):
     """Check if current summary is likely placeholder/noise text."""
     raw_summary = str(email_data.get("summary") or "")
     summary = " ".join(raw_summary.split()).lower().strip()
@@ -4620,6 +5438,34 @@ def summary_looks_unusable(email_data):
     return False
 
 
+def summary_looks_unusable(email_data):
+    """Check if current summary is likely placeholder/noise text."""
+    raw_summary = str(email_data.get("summary") or "")
+    summary = " ".join(raw_summary.split()).lower().strip()
+    if not summary:
+        return False
+    bad_phrases = (
+        "summary unavailable",
+        "summary generation failed",
+        "unable to summarize",
+        "view in browser",
+    )
+    for phrase in bad_phrases:
+        if phrase in summary:
+            return True
+    if _looks_utility_sentence(raw_summary):
+        return True
+    if _is_noise_fragment(raw_summary):
+        return True
+    if contains_common_mojibake(raw_summary):
+        return True
+    if _looks_summary_call_to_action(raw_summary, email_data):
+        return True
+    if _looks_summary_parrot(raw_summary, email_data):
+        return True
+    return False
+
+
 def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "draft"})):
     """Return True when classify/summary work should run automatically."""
     if not ai_enabled() or not email_data:
@@ -4628,7 +5474,7 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
         return False
     if bool(email_data.get("is_archived")):
         return False
-    if not _email_body_text(email_data).strip():
+    if not _email_body_text(email_data).strip() and not _email_has_possible_image_context(email_data):
         return False
 
     # Trigger when either triage fields or long-email summary is missing.
@@ -4646,6 +5492,7 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
 
 def run_ai_analysis(email_data, force=False):
     """Run classification + summary, then save updated fields."""
+    email_data = _ensure_email_image_context(email_data, force=force)
     changed = False
     missing_classification = (
         not str(email_data.get("ai_category") or "").strip()
@@ -4700,15 +5547,15 @@ def _cleanup_tasks_locked():
     while len(AI_TASKS) > AI_TASK_MAX_ITEMS and done_tasks:
         task = done_tasks.pop(0)
         task_id = task["id"]
-        key = (task["type"], task["email_id"])
+        key = (task["type"], task["email_id"], bool(task.get("force")))
         if AI_TASK_INDEX.get(key) == task_id:
             AI_TASK_INDEX.pop(key, None)
         AI_TASKS.pop(task_id, None)
 
 
-def _create_or_get_ai_task(task_type, email_id):
+def _create_or_get_ai_task(task_type, email_id, force=False):
     """Create task unless active task already exists for same type+email."""
-    key = (task_type, int(email_id))
+    key = (task_type, int(email_id), bool(force))
     with AI_TASK_LOCK:
         existing_id = AI_TASK_INDEX.get(key)
         existing_task = AI_TASKS.get(existing_id) if existing_id else None
@@ -4724,6 +5571,7 @@ def _create_or_get_ai_task(task_type, email_id):
             "status": "queued",
             "result": None,
             "error": None,
+            "force": bool(force),
             "created_at": now,
             "updated_at": now,
         }
@@ -4747,7 +5595,7 @@ def _set_ai_task_status(task_id, status, result=None, error=None):
             task["error"] = error
         if status not in AI_TASK_ACTIVE_STATUSES:
             # Release dedupe slot so a new task of the same type/email can be scheduled.
-            key = (task["type"], task["email_id"])
+            key = (task["type"], task["email_id"], bool(task.get("force")))
             if AI_TASK_INDEX.get(key) == task_id:
                 AI_TASK_INDEX.pop(key, None)
 
@@ -4774,7 +5622,7 @@ def serialize_ai_task(task):
     return payload
 
 
-def _analysis_task_worker(task_id, email_id):
+def _analysis_task_worker(task_id, email_id, force=False):
     """Background worker: run analysis and write task result."""
     _set_ai_task_status(task_id, "running")
     try:
@@ -4783,7 +5631,7 @@ def _analysis_task_worker(task_id, email_id):
             raise ValueError("Email not found.")
 
         # Force mode guarantees a fresh pass for explicit user-triggered analysis.
-        run_ai_analysis(email_data, force=True)
+        run_ai_analysis(email_data, force=bool(force))
         refreshed = fetch_email_by_id(email_id) or email_data
         _set_ai_task_status(
             task_id,
@@ -4838,13 +5686,13 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
         _set_ai_task_status(task_id, "error", error=str(exc))
 
 
-def start_analysis_task(email_id):
+def start_analysis_task(email_id, force=False):
     """Create/start analysis task and return its metadata."""
-    task, created = _create_or_get_ai_task("analyze", email_id)
+    task, created = _create_or_get_ai_task("analyze", email_id, force=force)
     if created:
         threading.Thread(
             target=_analysis_task_worker,
-            args=(task["id"], int(email_id)),
+            args=(task["id"], int(email_id), bool(force)),
             daemon=True,
         ).start()
     return task

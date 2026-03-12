@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from app import ollama_client
 
@@ -36,6 +37,33 @@ class OllamaDraftFallbackTests(unittest.TestCase):
         self.assertIn("Yep let me buy it!", draft)
         self.assertNotIn("&#847;", draft)
         self.assertNotIn("I appreciate the note about", draft)
+
+    @mock.patch("app.ollama_client.get_user_display_name", return_value="Casey Nguyen")
+    @mock.patch("app.ollama_client._call_ollama", return_value=None)
+    def test_draft_reply_uses_saved_display_name_in_context_and_fallback(
+        self,
+        mock_call,
+        _mock_name,
+    ):
+        email = {
+            "sender": "Manager <manager@example.com>",
+            "title": "Please confirm the staffing plan",
+            "body": (
+                "Can you confirm whether you can cover the client meeting tomorrow afternoon? "
+                "Let me know by noon so we can lock the roster."
+            ),
+            "recipients": "you@example.com",
+            "cc": "",
+            "type": "response-needed",
+        }
+
+        draft = ollama_client.draft_reply(email, to_value="manager@example.com", email_id="reply-1")
+        messages = mock_call.call_args.kwargs["messages"]
+
+        self.assertIn("Mailbox owner profile:", messages[1]["content"])
+        self.assertIn("Casey Nguyen", messages[1]["content"])
+        self.assertIn("use that exact name in any personal sign-off", messages[0]["content"])
+        self.assertTrue(draft.endswith("Best regards,\nCasey Nguyen"))
 
 
 if __name__ == "__main__":

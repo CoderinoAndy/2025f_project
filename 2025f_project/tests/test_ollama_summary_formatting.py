@@ -96,6 +96,23 @@ def _wsj_alert_email():
     }
 
 
+def _wsj_split_teaser_email():
+    return {
+        "sender": "The Wall Street Journal <alerts@wsj.example>",
+        "title": "Latest in Artificial Intelligence: Musk Says xAI Must Be Rebuilt as Co-Founders Exit",
+        "body": (
+            "LATEST IN ARTIFICIAL INTELLIGENCE\n\n"
+            "Musk Says xAI Must Be Rebuilt as Co-Founders Exit\n\n"
+            "Weeks\n"
+            "after merger with SpaceX, Elon Musk says xAI is being rebuilt from the foundations up.\n\n"
+            "The alert says the company is resetting its strategy after the leadership shake-up.\n\n"
+            "Read More"
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
 def _ted_digest_email():
     return {
         "sender": "TED Recommends <recommends@ted.example>",
@@ -462,6 +479,42 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             summary,
         )
 
+    def test_topic_phrase_from_sentence_keeps_detail_for_temporal_leadins(self):
+        phrase = ollama_client._topic_phrase_from_sentence(
+            "Weeks after merger with SpaceX, Elon Musk says xAI is being rebuilt from the foundations up."
+        )
+
+        self.assertNotEqual(phrase, "Weeks")
+        self.assertIn("xAI", phrase)
+
+    @mock.patch(
+        "app.ollama_client._vision_user_message",
+        side_effect=AssertionError("single article fast path should not build a model prompt"),
+    )
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        side_effect=AssertionError("single article fast path should not call the model"),
+    )
+    def test_summarize_email_uses_fast_article_path_for_split_teaser_alert(
+        self,
+        _mock_call,
+        _mock_vision,
+    ):
+        summary = ollama_client.summarize_email(
+            _wsj_split_teaser_email(),
+            email_id="wsj-split-teaser-1",
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertIn("The Wall Street Journal", summary)
+        self.assertIn("xAI", summary)
+        self.assertIn("SpaceX", summary)
+        self.assertNotIn("The article focuses on Weeks", summary)
+        self.assertNotEqual(
+            summary,
+            "An article alert from The Wall Street Journal. The article focuses on Weeks.",
+        )
+
     @mock.patch(
         "app.ollama_client._call_ollama",
         return_value=(
@@ -541,7 +594,20 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertIsNotNone(user_message)
         self.assertEqual(user_message["images"], ["fake-vision-image"])
-        self.assertIn("Attached images preserve layout cues", user_message["content"])
+        self.assertIn("Rendered screenshots of the original HTML email are attached.", user_message["content"])
+        mock_render.assert_called_once()
+
+    @mock.patch("app.ollama_client._render_email_image_pages", return_value=[])
+    def test_vision_user_message_falls_back_to_text_when_real_render_is_unavailable(self, mock_render):
+        user_message = ollama_client._vision_user_message(
+            _html_layout_email(),
+            "Summarize this email.",
+            task="summarize",
+        )
+
+        self.assertIsNotNone(user_message)
+        self.assertNotIn("images", user_message)
+        self.assertNotIn("Rendered screenshots of the original HTML email are attached.", user_message["content"])
         mock_render.assert_called_once()
 
     def test_summary_looks_unusable_flags_placeholder_summary(self):
@@ -625,6 +691,41 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "and a low price guarantee from March 6 to 12, 2026.",
         )
 
+    @mock.patch("app.ollama_client._extractive_summary_fallback", return_value=None)
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value="Summary: also, the client meeting still needs coverage by noon.",
+    )
+    @mock.patch(
+        "app.ollama_client._sanitize_model_summary",
+        return_value="also, the client meeting still needs coverage by noon.",
+    )
+    @mock.patch(
+        "app.ollama_client._finalize_summary_text",
+        return_value="The client meeting still needs coverage by noon.",
+    )
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_summarize_email_uses_sanitize_and_finalize_pipeline(
+        self,
+        _mock_vision,
+        mock_finalize,
+        mock_sanitize,
+        _mock_call,
+        _mock_fallback,
+    ):
+        email = _long_action_email()
+
+        summary = ollama_client.summarize_email(email, email_id="cleanup-1")
+
+        self.assertEqual(summary, "The client meeting still needs coverage by noon.")
+        mock_sanitize.assert_called_once()
+        self.assertTrue(
+            any(
+                call.args[0] == "also, the client meeting still needs coverage by noon."
+                for call in mock_finalize.call_args_list
+            )
+        )
+
     @mock.patch(
         "app.ollama_client._call_ollama",
         return_value=(
@@ -647,6 +748,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         )
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
+    @mock.patch("app.ollama_client._single_article_alert_summary", return_value=None)
     @mock.patch(
         "app.ollama_client._call_ollama",
         return_value="Summary unavailable.",
@@ -661,6 +763,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         _mock_fallback,
         _mock_vision,
         _mock_call,
+        _mock_single_article,
         _mock_bulk,
     ):
         email = _wsj_alert_email()

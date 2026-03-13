@@ -22,7 +22,6 @@ def _mock_vision_message(*_args, **_kwargs):
             "- From: Deals Team <deals@brand-mail.example>\n"
             "- Subject: 30% off today plus free shipping"
         ),
-        "images": ["fake-vision-image"],
     }
 
 
@@ -214,7 +213,34 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertIn("routine retail promotions and brand advertising", system_prompt)
         self.assertIn("Sender and subject metadata", user_prompt)
         self.assertIn("commercial_promotion_pattern", user_prompt)
-        self.assertEqual(messages[1]["images"], ["fake-vision-image"])
+        self.assertNotIn("images", messages[1])
+
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value='{"category":"junk","needs_response":false,"priority":1,"confidence":0.84}',
+    )
+    @mock.patch(
+        "app.ollama_client._render_email_image_pages",
+        side_effect=AssertionError("classification should stay text-only"),
+    )
+    def test_classify_email_stays_text_only_for_html_promotional_email(self, mock_render, mock_call):
+        email = _email(
+            "Retail Brand <offers@retail.example>",
+            "Weekend offers",
+            "Tap to shop the weekend offers.",
+        )
+        email["body_html"] = (
+            "<html><body><table><tr><td><img src='https://cdn.example.com/hero.png'></td></tr>"
+            "<tr><td><div style='display:grid'>Tap to shop the weekend offers.</div></td></tr>"
+            "</table></body></html>"
+        )
+
+        result = ollama_client.classify_email(email, email_id="promo-html-1")
+        user_message = mock_call.call_args.kwargs["messages"][1]
+
+        self.assertEqual(result["category"], "junk")
+        self.assertNotIn("images", user_message)
+        mock_render.assert_not_called()
 
 
 if __name__ == "__main__":

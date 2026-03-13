@@ -21,6 +21,14 @@ except ImportError:  # Optional dependency until requirements are installed.
     Image = None
     ImageDraw = None
     ImageFont = None
+try:
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except ImportError:  # Optional dependency for true HTML screenshots.
+    PlaywrightError = RuntimeError
+    PlaywrightTimeoutError = RuntimeError
+    sync_playwright = None
 from .db import (
     fetch_email_by_id,
     get_user_display_name,
@@ -42,6 +50,10 @@ VISION_RENDER_MAX_CHARS_DEFAULT = 6000
 VISION_RENDER_MAX_PAGES_DEFAULT = 2
 VISION_RENDER_WRAP_WIDTH_DEFAULT = 92
 VISION_RENDER_MAX_LINES_DEFAULT = 44
+VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT = 12.0
+VISION_BROWSER_WAIT_MS_DEFAULT = 750
+VISION_RENDER_VIEWPORT_WIDTH_DEFAULT = 1365
+VISION_RENDER_PAGE_HEIGHT_DEFAULT = 1800
 VISION_RENDER_CACHE_MAX_ITEMS = 128
 VALID_CATEGORIES = {"urgent", "informational", "junk"}
 VALID_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
@@ -67,6 +79,7 @@ OLLAMA_TAGS_CACHE = {"fetched_at": 0.0, "models": ()}
 OLLAMA_TAGS_LOCK = threading.Lock()
 VISION_RENDER_CACHE = {}
 VISION_RENDER_CACHE_LOCK = threading.Lock()
+VISION_BROWSER_CHANNEL_CANDIDATES = ("msedge", "chrome")
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 MAILBOX_OWNER_NAME_ENV = "LOCAL_USER_NAME"
@@ -703,6 +716,21 @@ def _api_url():
     return value or OLLAMA_API_URL_DEFAULT
 
 
+def _env_flag(env_names, default=False):
+    """Return the first boolean-like env var value from the provided names."""
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+    for env_name in env_names:
+        raw = (os.getenv(env_name) or "").strip().lower()
+        if not raw:
+            continue
+        if raw in truthy:
+            return True
+        if raw in falsy:
+            return False
+    return bool(default)
+
+
 def _api_url_candidates():
     """Return loopback-safe Ollama endpoint candidates."""
     primary = _api_url()
@@ -770,12 +798,31 @@ def _available_ollama_models(api_urls=None, force_refresh=False):
     return models
 
 
-def _resolved_model_name(task=None, api_urls=None):
-    """Resolve a requested Ollama model to an installed local model when needed."""
+def _strict_model_resolution(task=None):
+    """Return True when missing requested models should fail instead of silently substituting."""
+    task_name = str(task or "").strip().lower()
+    env_names = []
+    if task_name:
+        env_names.append(f"OLLAMA_{task_name.upper()}_STRICT_MODEL_RESOLUTION")
+    env_names.append("OLLAMA_STRICT_MODEL_RESOLUTION")
+    return _env_flag(env_names, default=False)
+
+
+def _resolve_model_selection(task=None, api_urls=None):
+    """Resolve the requested model and describe any substitution decision."""
     requested_model = _model_name(task=task)
     available_models = _available_ollama_models(api_urls=api_urls)
+    strict_resolution = _strict_model_resolution(task=task)
+    selection = {
+        "requested_model": requested_model,
+        "resolved_model": requested_model,
+        "available_models": tuple(available_models or ()),
+        "substituted": False,
+        "reason": "",
+        "strict": strict_resolution,
+    }
     if not available_models or requested_model in available_models:
-        return requested_model
+        return selection
 
     requested_family = requested_model.split(":", 1)[0].strip().lower()
     family_matches = [
@@ -783,9 +830,22 @@ def _resolved_model_name(task=None, api_urls=None):
         for candidate in available_models
         if candidate.split(":", 1)[0].strip().lower() == requested_family
     ]
-    if family_matches:
-        return family_matches[0]
-    return available_models[0]
+    fallback_model = family_matches[0] if family_matches else available_models[0]
+    reason = "family_match" if family_matches else "first_available"
+    if strict_resolution:
+        selection["resolved_model"] = None
+        selection["reason"] = f"missing_requested_model_{reason}"
+        return selection
+
+    selection["resolved_model"] = fallback_model
+    selection["substituted"] = True
+    selection["reason"] = reason
+    return selection
+
+
+def _resolved_model_name(task=None, api_urls=None):
+    """Resolve a requested Ollama model to an installed local model when needed."""
+    return _resolve_model_selection(task=task, api_urls=api_urls).get("resolved_model")
 
 
 def _model_name(task=None):
@@ -793,15 +853,14 @@ def _model_name(task=None):
     """
     # Prefer task-specific model overrides for latency-sensitive workflows.
     task_name = str(task or "").strip().lower()
-    env_names = []
     task_env = TASK_MODEL_ENV_MAP.get(task_name)
     if task_env:
-        env_names.append(task_env)
-    env_names.append("OLLAMA_MODEL")
-    for env_name in env_names:
-        value = (os.getenv(env_name) or "").strip()
+        value = (os.getenv(task_env) or "").strip()
         if value:
             return value
+    global_override = (os.getenv("OLLAMA_MODEL") or "").strip()
+    if global_override:
+        return global_override
     return OLLAMA_MODEL_DEFAULT
 
 
@@ -901,13 +960,68 @@ def _vision_render_max_lines():
 
 
 def _vision_render_available():
-    """Return True when local image rendering dependencies are available."""
-    return Image is not None and ImageDraw is not None and ImageFont is not None
+    """Return True when true HTML screenshot dependencies are available."""
+    return Image is not None and sync_playwright is not None
+
+
+def _vision_browser_timeout_seconds():
+    """Return timeout for headless-browser HTML rendering."""
+    raw = (os.getenv("OLLAMA_VISION_BROWSER_TIMEOUT_SECONDS") or "").strip()
+    try:
+        parsed = float(raw) if raw else VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT
+    except ValueError:
+        parsed = VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT
+    return max(3.0, min(30.0, parsed))
+
+
+def _vision_browser_wait_ms():
+    """Return the post-load settle delay for HTML screenshot rendering."""
+    raw = (os.getenv("OLLAMA_VISION_BROWSER_WAIT_MS") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_BROWSER_WAIT_MS_DEFAULT
+    except ValueError:
+        parsed = VISION_BROWSER_WAIT_MS_DEFAULT
+    return max(0, min(5000, parsed))
+
+
+def _vision_render_viewport_width():
+    """Return viewport width used for HTML email screenshots."""
+    raw = (os.getenv("OLLAMA_VISION_VIEWPORT_WIDTH") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_RENDER_VIEWPORT_WIDTH_DEFAULT
+    except ValueError:
+        parsed = VISION_RENDER_VIEWPORT_WIDTH_DEFAULT
+    return max(640, min(2200, parsed))
+
+
+def _vision_render_page_height():
+    """Return max pixel height for each attached screenshot page."""
+    raw = (os.getenv("OLLAMA_VISION_PAGE_HEIGHT") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_RENDER_PAGE_HEIGHT_DEFAULT
+    except ValueError:
+        parsed = VISION_RENDER_PAGE_HEIGHT_DEFAULT
+    return max(600, min(3000, parsed))
+
+
+def _vision_browser_channel():
+    """Return an optional browser channel for Playwright launch."""
+    return (os.getenv("OLLAMA_VISION_BROWSER_CHANNEL") or "").strip()
+
+
+def _vision_browser_executable_path():
+    """Return an optional browser executable path for Playwright launch."""
+    return (os.getenv("OLLAMA_VISION_BROWSER_EXECUTABLE_PATH") or "").strip()
+
+
+def _visual_context_allowed(task=None):
+    """Return True when a task should pay the cost of real visual context."""
+    return str(task or "").strip().lower() != "classify"
 
 
 def _vision_render_cache_key(email_data):
     """Return a stable cache key for rendered email page images."""
-    body_text = _vision_render_body_text(email_data)
+    raw_html = str(email_data.get("body_html") or "").strip()
     payload = {
         "sender": _normalized_header_text(email_data.get("sender") or ""),
         "title": _normalized_header_text(email_data.get("title") or ""),
@@ -916,7 +1030,10 @@ def _vision_render_cache_key(email_data):
         "type": _compact_text(email_data.get("type") or ""),
         "priority": int(email_data.get("priority") or 1),
         "received_at": _compact_text(email_data.get("received_at") or email_data.get("date") or ""),
-        "body": body_text,
+        "body_html": raw_html,
+        "viewport_width": _vision_render_viewport_width(),
+        "page_height": _vision_render_page_height(),
+        "max_pages": _vision_render_max_pages(),
     }
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -996,6 +1113,197 @@ def _vision_render_body_text(email_data):
     return title or "(No usable email body text was available.)"
 
 
+def _html_document_for_visual_render(email_data):
+    """Return a browser-renderable HTML document for true screenshot capture."""
+    raw_html = str(email_data.get("body_html") or "").strip()
+    if not raw_html:
+        return ""
+    sanitized = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        "",
+        raw_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    visual_reset = (
+        "<style>"
+        "html,body{margin:0;padding:0;background:#ffffff !important;}"
+        "body{min-height:100vh;}"
+        "img{max-width:100%;height:auto;}"
+        "table{border-collapse:collapse;}"
+        "</style>"
+    )
+    if re.search(r"<html\b", sanitized, flags=re.IGNORECASE):
+        if re.search(r"</head>", sanitized, flags=re.IGNORECASE):
+            return re.sub(
+                r"</head>",
+                f"{visual_reset}</head>",
+                sanitized,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        return re.sub(
+            r"<html\b[^>]*>",
+            lambda match: f"{match.group(0)}<head>{visual_reset}</head>",
+            sanitized,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return (
+        "<!doctype html><html><head>"
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"{visual_reset}"
+        "</head><body>"
+        f"{sanitized}"
+        "</body></html>"
+    )
+
+
+def _vision_browser_launch_options():
+    """Return browser launch options to try for Playwright-based screenshots."""
+    executable_path = _vision_browser_executable_path()
+    explicit_channel = _vision_browser_channel()
+    options = []
+    if executable_path:
+        options.append({"executable_path": executable_path})
+    elif explicit_channel:
+        options.append({"channel": explicit_channel})
+    options.append({})
+    if not executable_path and not explicit_channel:
+        options.extend({"channel": channel} for channel in VISION_BROWSER_CHANNEL_CANDIDATES)
+
+    deduped = []
+    seen = set()
+    for option in options:
+        key = tuple(sorted(option.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(option)
+    return deduped
+
+
+def _encode_png_bytes(image_bytes):
+    """Encode raw PNG bytes as base64 for Ollama image payloads."""
+    return base64.b64encode(image_bytes).decode("ascii")
+
+
+def _split_rendered_email_pages(image_bytes):
+    """Split a tall HTML screenshot into multiple page images."""
+    if not image_bytes:
+        return []
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            screenshot = image.convert("RGB")
+            width, height = screenshot.size
+            page_height = _vision_render_page_height()
+            max_pages = _vision_render_max_pages()
+            if height <= page_height:
+                return [_encode_png_bytes(image_bytes)]
+
+            pages = []
+            for index in range(max_pages):
+                top = index * page_height
+                if top >= height:
+                    break
+                bottom = min(height, top + page_height)
+                cropped = screenshot.crop((0, top, width, bottom))
+                buffer = io.BytesIO()
+                cropped.save(buffer, format="PNG", optimize=True, compress_level=9)
+                pages.append(_encode_png_bytes(buffer.getvalue()))
+                if bottom >= height:
+                    break
+            return pages
+    except OSError:
+        return [_encode_png_bytes(image_bytes)]
+
+
+def _render_html_email_pages(email_data, email_id=None):
+    """Render true screenshots from the email's HTML with a headless browser."""
+    if not _vision_render_available():
+        detail = (
+            "visual_render_unavailable_playwright_missing"
+            if sync_playwright is None
+            else "visual_render_unavailable_pillow_missing"
+        )
+        _log_action(task="vision", status="fallback", email_id=email_id, detail=detail)
+        return []
+
+    document_html = _html_document_for_visual_render(email_data)
+    if not document_html:
+        return []
+
+    timeout_ms = int(_vision_browser_timeout_seconds() * 1000)
+    viewport_width = _vision_render_viewport_width()
+    viewport_height = min(_vision_render_page_height(), 1400)
+    wait_ms = _vision_browser_wait_ms()
+    launch_errors = []
+    screenshot_bytes = None
+
+    try:
+        with sync_playwright() as playwright:
+            browser = None
+            for launch_options in _vision_browser_launch_options():
+                try:
+                    browser = playwright.chromium.launch(headless=True, **launch_options)
+                    break
+                except Exception as exc:  # pragma: no cover - exercised through fallback logging tests.
+                    launch_errors.append(f"{launch_options or {'default': True}}:{exc}")
+            if browser is None:
+                _log_action(
+                    task="vision",
+                    status="fallback",
+                    email_id=email_id,
+                    detail="visual_render_browser_launch_failed",
+                )
+                if launch_errors:
+                    _log_action(
+                        task="vision",
+                        status="error",
+                        email_id=email_id,
+                        detail=" | ".join(launch_errors[:3]),
+                    )
+                return []
+
+            try:
+                context = browser.new_context(
+                    viewport={
+                        "width": viewport_width,
+                        "height": viewport_height,
+                    }
+                )
+                page = context.new_page()
+                page.set_content(
+                    document_html,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                if wait_ms:
+                    page.wait_for_timeout(wait_ms)
+                screenshot_bytes = page.screenshot(full_page=True, type="png")
+                context.close()
+            finally:
+                browser.close()
+    except (PlaywrightTimeoutError, PlaywrightError, OSError) as exc:
+        _log_action(
+            task="vision",
+            status="fallback",
+            email_id=email_id,
+            detail=f"visual_render_failed: {exc}",
+        )
+        return []
+
+    rendered_pages = _split_rendered_email_pages(screenshot_bytes)
+    if rendered_pages:
+        _log_action(
+            task="vision",
+            status="call_success",
+            email_id=email_id,
+            detail=f"rendered_html_pages={len(rendered_pages)}",
+        )
+    return rendered_pages
+
+
 def _vision_wrap_lines(text, width=None):
     """Wrap multiline email text into deterministic image-friendly lines."""
     wrap_width = width or _vision_render_wrap_width()
@@ -1068,16 +1376,10 @@ def _render_text_page_png(page_lines, page_number, page_count, email_data):
 
 
 def _render_email_image_pages(email_data, email_id=None):
-    """Render the entire email into screenshot-like PNG pages for vision-first Ollama calls."""
+    """Render true HTML screenshots for visually complex emails when available."""
     if not isinstance(email_data, dict):
         return []
-    if not _vision_render_available():
-        _log_action(
-            task="vision",
-            status="error",
-            email_id=email_id,
-            detail="pillow_not_installed_for_email_page_rendering",
-        )
+    if not _html_requires_visual_context(email_data):
         return []
 
     cache_key = _vision_render_cache_key(email_data)
@@ -1088,36 +1390,9 @@ def _render_email_image_pages(email_data, email_id=None):
             VISION_RENDER_CACHE[cache_key] = cached
             return list(cached)
 
-    intro_lines = [
-        "Supporting metadata",
-        f"To: {_normalized_header_text(email_data.get('recipients') or '(unknown)')}",
-        f"Cc: {_normalized_header_text(email_data.get('cc') or '(none)')}",
-        f"Mailbox type: {_compact_text(email_data.get('type') or '(unknown)')}",
-        f"Priority: {int(email_data.get('priority') or 1)}",
-        f"Received: {_compact_text(email_data.get('received_at') or email_data.get('date') or '(unknown)')}",
-        "",
-        "Email body",
-        "",
-    ]
-    content_lines = intro_lines + _vision_wrap_lines(_vision_render_body_text(email_data))
-    page_chunks = _vision_render_page_chunks(content_lines)
-    max_pages = _vision_render_max_pages()
-    total_pages = len(page_chunks)
-    if total_pages > max_pages:
-        omitted_pages = total_pages - max_pages
-        page_chunks = page_chunks[:max_pages]
-        page_chunks[-1] = (
-            page_chunks[-1]
-            + [
-                "",
-                f"[Rendered email truncated after {max_pages} pages. {omitted_pages} later page(s) were omitted.]",
-            ]
-        )
-    page_count = len(page_chunks)
-    rendered_pages = [
-        _render_text_page_png(page_lines, index + 1, page_count, email_data)
-        for index, page_lines in enumerate(page_chunks)
-    ]
+    rendered_pages = _render_html_email_pages(email_data, email_id=email_id)
+    if not rendered_pages:
+        return []
 
     with VISION_RENDER_CACHE_LOCK:
         VISION_RENDER_CACHE.pop(cache_key, None)
@@ -1125,18 +1400,11 @@ def _render_email_image_pages(email_data, email_id=None):
         while len(VISION_RENDER_CACHE) > VISION_RENDER_CACHE_MAX_ITEMS:
             oldest_key = next(iter(VISION_RENDER_CACHE))
             VISION_RENDER_CACHE.pop(oldest_key, None)
-
-    _log_action(
-        task="vision",
-        status="call_success",
-        email_id=email_id,
-        detail=f"rendered_email_pages={len(rendered_pages)}",
-    )
     return rendered_pages
 
 
 def _vision_user_message(email_data, instruction_text, email_id=None, task=None, text_max_chars=None):
-    """Build the shared AI user message, preferring direct text over rendered images."""
+    """Build the shared AI user message, attaching real screenshots only when available."""
     source_text = _source_text_for_user_message(
         email_data,
         task=task,
@@ -1151,13 +1419,15 @@ def _vision_user_message(email_data, instruction_text, email_id=None, task=None,
         "---BEGIN EMAIL TEXT---\n"
         f"{source_text}\n"
         "---END EMAIL TEXT---\n\n"
-        "Use the cleaned email text as the primary source of truth for the email contents. "
+        "Use the cleaned email text for grounded wording and direct facts from the message body. "
         "Use the sender and subject metadata only as supporting context."
     )
     user_message = {
         "role": "user",
         "content": content,
     }
+    if not _visual_context_allowed(task=task):
+        return user_message
     if not _html_requires_visual_context(email_data):
         return user_message
 
@@ -1165,8 +1435,10 @@ def _vision_user_message(email_data, instruction_text, email_id=None, task=None,
     if not rendered_pages:
         return user_message
     user_message["content"] += (
-        "\n\nAttached images preserve layout cues and image-only details from the original email. "
-        "Consult them only when the cleaned text omits something layout-dependent."
+        "\n\nRendered screenshots of the original HTML email are attached. "
+        "Use those screenshots as the source of truth for layout-dependent details such as banners, "
+        "buttons, cards, offer hierarchy, and image-only text. "
+        "Use the cleaned email text to cross-check readable wording when the layout is not important."
     )
     user_message["images"] = rendered_pages
     return user_message
@@ -2409,6 +2681,12 @@ def _topic_phrase_from_sentence(sentence_text):
     text = _compact_text(_strip_footer_noise_text(text)).strip(" -:;,.")
     if not text:
         return ""
+
+    def _has_topic_detail(fragment_text):
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'&./-]*", _compact_text(fragment_text))
+        if len(tokens) >= 3:
+            return True
+        return len(tokens) >= 2 and sum(len(token) for token in tokens) >= 12
     text = re.sub(
         r"^(?:it|this (?:story|article|digest|newsletter)|the email|the sender)\s+"
         r"(?:covers|focuses on|highlights|includes|notes that|mentions|recommends|asks(?: whether)?|"
@@ -2424,13 +2702,18 @@ def _topic_phrase_from_sentence(sentence_text):
         text,
     )
     if len(text) > 96:
-        parts = re.split(
+        split_match = re.search(
             r",\s+(?:with|while|after|before|including)\b|\s+(?:while|after|before|because)\b",
             text,
-            maxsplit=1,
             flags=re.IGNORECASE,
         )
-        text = _compact_text(parts[0] if parts else text).strip(" -:;,.")
+        if split_match:
+            lead = _compact_text(text[: split_match.start()]).strip(" -:;,.")
+            tail = _compact_text(text[split_match.end() :]).strip(" -:;,.")
+            if _has_topic_detail(lead):
+                text = lead
+            elif _has_topic_detail(tail):
+                text = tail
     if not text:
         return ""
     return text
@@ -3104,6 +3387,13 @@ def _article_teaser_phrase(sentence_text):
         return marketing_teaser
     patterns = (
         (
+            r"^(?P<lead>.+?)\s+after\s+(?P<context>.+?),\s+(?P<speaker>[A-Z][A-Za-z0-9'&.\- ]+?)\s+says\s+(?P<lemma>.+)$",
+            lambda match: (
+                f"{match.group('speaker')} says {match.group('lemma')} "
+                f"after {match.group('context')}"
+            ),
+        ),
+        (
             r"^(?P<entity>.+?)\s+will\s+invest\s+(?P<amount>.+?)\s+in\s+(?P<target>.+?)\s+to\s+expand\s+(?P<goal>.+)$",
             lambda match: (
                 f"{match.group('entity')}'s {match.group('amount')} investment in "
@@ -3116,7 +3406,11 @@ def _article_teaser_phrase(sentence_text):
         ),
         (
             r"^(?:A|An)\s+judge\s+ruled\s+that\s+(?P<lemma>.+?),\s+but\s+(?P<tail>.+)$",
-            lambda match: f"a ruling let {match.group('lemma')}, while {match.group('tail')}",
+            lambda match: (
+                f"a ruling allowed "
+                f"{re.sub(r'\\s+can\\s+', ' to ', match.group('lemma'), count=1, flags=re.IGNORECASE)}, "
+                f"while {match.group('tail')}"
+            ),
         ),
         (
             r"^(?P<entity>.+?)\s+has\s+.+?\s+to\s+compete\s+with\s+(?P<rivals>.+?)\s+by\s+offering\s+(?P<offer>.+)$",
@@ -3146,33 +3440,104 @@ def _single_article_alert_summary(email_data):
         return None
     sender_name = _summary_sender_name(email_data)
     title = _normalized_header_text(email_data.get("title") or "")
-    teaser_lines = [
+    base_teaser_lines = [
         _compact_text(_strip_title_prefix(line, title))
         for line in _clean_body_for_prompt(email_data, max_chars=2400).split("\n")
         if _compact_text(line)
     ]
-    phrase = ""
-    for line in teaser_lines:
-        if len(line) < 28:
+    teaser_candidates = []
+
+    def _add_teaser_candidate(candidate_text):
+        candidate = _compact_text(candidate_text).strip(" -:;,.")
+        if not candidate:
+            return
+        candidate_sentences = _extract_key_sentences(candidate, max_sentences=1)
+        if candidate_sentences:
+            candidate = _compact_text(candidate_sentences[0]).strip(" -:;,.")
+        if not candidate:
+            return
+        if any(
+            candidate == existing
+            or (
+                _token_overlap_ratio(candidate, existing) > 0.96
+                and abs(len(candidate) - len(existing)) < 24
+            )
+            for existing in teaser_candidates
+        ):
+            return
+        teaser_candidates.append(candidate)
+
+    def _article_phrase_sentence(phrase_text):
+        phrase = _compact_text(phrase_text).strip(" -:;,.")
+        if not phrase:
+            return ""
+        if (
+            re.match(r"^(?:a|an|the)\b", phrase, flags=re.IGNORECASE)
+            or (
+                phrase[:1].isupper()
+                and re.search(
+                    r"\b(?:is|are|was|were|says|say|plans?|warns?|gets?|keeps?|faces?|becomes?|let|allowed)\b",
+                    phrase,
+                    flags=re.IGNORECASE,
+                )
+            )
+        ):
+            phrase = phrase[0].upper() + phrase[1:] if phrase else phrase
+            return _ensure_sentence_ending(phrase)
+        return _ensure_sentence_ending(f"It reports on {phrase}")
+
+    for index, line in enumerate(base_teaser_lines):
+        _add_teaser_candidate(line)
+        if index + 1 >= len(base_teaser_lines):
+            continue
+        next_line = base_teaser_lines[index + 1]
+        if not line or not next_line:
+            continue
+        if _looks_utility_sentence(line) or _looks_utility_sentence(next_line):
+            continue
+        if _is_noise_fragment(line) or _is_noise_fragment(next_line):
+            continue
+        should_merge = (
+            len(line) < 48
+            or len(_text_tokens(line)) <= 8
+            or not re.search(r"[.!?]$", line)
+            or next_line[:1].islower()
+        )
+        if should_merge:
+            _add_teaser_candidate(f"{line} {next_line}")
+
+    detail_sentence = ""
+    for line in teaser_candidates:
+        if len(line) < 24:
             continue
         if _looks_utility_sentence(line) or _is_noise_fragment(line):
             continue
         phrase = _article_teaser_phrase(line)
-        if phrase:
+        if phrase and phrase != line and len(_text_tokens(phrase)) >= 2:
+            detail_sentence = _article_phrase_sentence(phrase)
             break
-    if not phrase:
+        rewritten = _rewrite_fallback_summary_sentence(line, email_data)
+        if rewritten and not _summary_uses_subject_content(rewritten, email_data):
+            detail_sentence = rewritten
+            break
+    if not detail_sentence:
         for sentence in _extract_key_sentences(email_data, max_sentences=4):
             candidate = _compact_text(_strip_title_prefix(sentence, title))
             if not candidate:
                 continue
             phrase = _article_teaser_phrase(candidate)
-            if phrase:
+            if phrase and phrase != candidate and len(_text_tokens(phrase)) >= 2:
+                detail_sentence = _article_phrase_sentence(phrase)
                 break
-    if not phrase:
+            rewritten = _rewrite_fallback_summary_sentence(candidate, email_data)
+            if rewritten and not _summary_uses_subject_content(rewritten, email_data):
+                detail_sentence = rewritten
+                break
+    if not detail_sentence:
         return _ensure_sentence_ending(f"An article alert from {sender_name}")
     summary = _compact_text(
         f"{_ensure_sentence_ending(f'An article alert from {sender_name}')} "
-        f"{_ensure_sentence_ending(f'It covers {phrase}')}"
+        f"{detail_sentence}"
     )
     return summary[:SUMMARY_MAX_CHARS] if summary else None
 
@@ -4971,12 +5336,6 @@ def _naturalize_summary_scaffolding(summary_text):
                 (r"^It includes (.+)$", r"Featured items include \1"),
             ):
                 sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
-        elif summary_kind == "article_alert":
-            for pattern, replacement in (
-                (r"^It covers (.+)$", r"The article focuses on \1"),
-                (r"^It mentions (.+)$", r"The article focuses on \1"),
-            ):
-                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
         elif summary_kind == "job_alert":
             for pattern, replacement in (
                 (r"^It mentions (.+)$", r"It lists \1"),
@@ -5959,25 +6318,42 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
     # Send one non-streaming chat request to Ollama and return the model text payload.
     started_at = time.perf_counter()
     api_urls = _api_url_candidates()
-    requested_model_name = _model_name(task=task)
-    model_name = _resolved_model_name(task=task, api_urls=api_urls)
+    model_selection = _resolve_model_selection(task=task, api_urls=api_urls)
+    requested_model_name = model_selection["requested_model"]
+    model_name = model_selection["resolved_model"]
     request_timeout = _timeout_seconds(task=task)
     keep_alive = _keep_alive_value(task=task)
     image_count = sum(len(message.get("images") or ()) for message in messages or ())
     prompt_chars = sum(len(str(message.get("content") or "")) for message in messages or ())
-    if model_name != requested_model_name:
+    if not model_name:
+        available_models = ",".join(model_selection["available_models"]) or "(none)"
+        _log_action(
+            task=task,
+            status="error",
+            email_id=email_id,
+            detail=(
+                "requested_ollama_model_unavailable "
+                f"requested={requested_model_name} strict={int(model_selection['strict'])} "
+                f"available={available_models}"
+            ),
+        )
+        return None
+    if model_selection["substituted"]:
         _log_action(
             task=task,
             status="fallback",
             email_id=email_id,
-            detail=f"ollama_model_fallback requested={requested_model_name} using={model_name}",
+            detail=(
+                "ollama_model_substitution "
+                f"requested={requested_model_name} resolved={model_name} reason={model_selection['reason']}"
+            ),
         )
     _log_action(
         task=task,
         status="call_start",
         email_id=email_id,
         detail=(
-            f"ollama_chat model={model_name} timeout={int(request_timeout)}s "
+            f"ollama_chat requested_model={requested_model_name} model={model_name} timeout={int(request_timeout)}s "
             f"keep_alive={keep_alive or '-'} url={api_urls[0]} images={image_count} prompt_chars={prompt_chars}"
         ),
     )
@@ -6157,12 +6533,69 @@ def classify_email(email_data, email_id=None):
     return _normalize_classification(merged)
 
 
+def _postprocess_model_summary(summary_text, email_data, email_id=None, structured=False):
+    """Sanitize and finalize model output before returning it to the UI."""
+    profile = _summary_profile(email_data)
+    prepared = _prepare_model_summary(summary_text, profile["char_limit"])
+    if not prepared:
+        return None
+
+    sanitized = _sanitize_model_summary(prepared, email_data, structured=structured)
+    candidate = sanitized or prepared
+    finalized = _finalize_summary_text(candidate, email_data)
+    if (
+        finalized
+        and _looks_actionable(email_data)
+        and not _looks_bulk_or_newsletter(email_data)
+        and _uses_second_person(candidate)
+        and finalized.lower().startswith(
+            (
+                "the email asks ",
+                "the email asks for ",
+                "the email recommends ",
+                "the recipient needs to ",
+            )
+        )
+    ):
+        finalized = candidate
+    if not finalized:
+        return None
+    if _looks_summary_failure(finalized):
+        return None
+    if _looks_generic_posture_summary(finalized):
+        return None
+    if _looks_summary_call_to_action(finalized, email_data):
+        return None
+    if _looks_bulk_summary_boilerplate_heavy(finalized, email_data):
+        return None
+    if _summary_uses_subject_content(finalized, email_data):
+        allowed_subject_led = (
+            _looks_digest_title_summary(finalized)
+            or finalized.lower().startswith("a promotional update from ")
+        )
+        if not allowed_subject_led:
+            return None
+    if _looks_summary_parrot(finalized, email_data):
+        return None
+    if len(finalized) > profile["char_limit"]:
+        finalized = f"{finalized[: profile['char_limit'] - 3].rstrip()}..."
+    return finalized or None
+
+
 def summarize_email(email_data, email_id=None):
     """Summarize email.
     """
     # Translate between API payloads and our local mailbox shape.
     if not should_summarize_email(email_data):
         return None
+    raw_body = _email_body_text(email_data)
+    if re.search(r"\b(?:read more|view in browser|open in browser)\b", raw_body, flags=re.IGNORECASE):
+        fast_article_summary = _usable_summary_candidate(
+            _single_article_alert_summary(email_data),
+            email_data,
+        )
+        if fast_article_summary:
+            return fast_article_summary
     profile = _summary_profile(email_data)
     structured_summary = _should_use_structured_summary(email_data)
     extractive_fallback = _extractive_summary_fallback(email_data)
@@ -6230,8 +6663,13 @@ def summarize_email(email_data, email_id=None):
             )
         return fallback_summary
 
-    summary = _prepare_model_summary(response_text, profile["char_limit"])
-    if _looks_summary_failure(summary):
+    summary = _postprocess_model_summary(
+        response_text,
+        email_data,
+        email_id=email_id,
+        structured=structured_summary,
+    )
+    if not summary:
         if fallback_summary:
             _log_action(
                 task="summarize",

@@ -1,3 +1,4 @@
+import os
 import json
 import unittest
 from unittest import mock
@@ -77,9 +78,16 @@ class OllamaLatencyControlTests(unittest.TestCase):
         with mock.patch("app.ollama_client._api_url_candidates", return_value=["http://127.0.0.1:11434/api/chat"]), mock.patch(
             "app.ollama_client._endpoint_allowed",
             return_value=True,
-        ), mock.patch("app.ollama_client._model_name", return_value="mistral-small3.2:24b"), mock.patch(
-            "app.ollama_client._resolved_model_name",
-            return_value="mistral-small3.2:24b",
+        ), mock.patch(
+            "app.ollama_client._resolve_model_selection",
+            return_value={
+                "requested_model": "mistral-small3.2:24b",
+                "resolved_model": "mistral-small3.2:24b",
+                "available_models": ("mistral-small3.2:24b",),
+                "substituted": False,
+                "reason": "",
+                "strict": False,
+            },
         ), mock.patch("app.ollama_client._timeout_seconds", return_value=12.0), mock.patch(
             "app.ollama_client._keep_alive_value",
             return_value="15m",
@@ -98,6 +106,136 @@ class OllamaLatencyControlTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 12.0)
         self.assertEqual(captured["payload"]["keep_alive"], "15m")
         self.assertEqual(captured["payload"]["options"]["num_predict"], 320)
+        self.assertEqual(captured["payload"]["model"], "mistral-small3.2:24b")
+
+    def test_classify_model_defaults_to_global_model_when_no_override_is_set(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OLLAMA_MODEL": "mistral-small3.2:24b",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                ollama_client._model_name(task="classify"),
+                "mistral-small3.2:24b",
+            )
+            self.assertEqual(
+                ollama_client._model_name(task="summarize"),
+                "mistral-small3.2:24b",
+            )
+
+    def test_classify_model_uses_explicit_override_when_configured(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OLLAMA_MODEL": "mistral-small3.2:24b",
+                "OLLAMA_CLASSIFY_MODEL": "phi4-mini:latest",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                ollama_client._model_name(task="classify"),
+                "phi4-mini:latest",
+            )
+            self.assertEqual(
+                ollama_client._model_name(task="summarize"),
+                "mistral-small3.2:24b",
+            )
+
+    def test_call_ollama_logs_model_substitution_when_requested_model_missing(self):
+        captured = {}
+
+        def _fake_urlopen(request_obj, timeout=0):
+            captured["payload"] = json.loads(request_obj.data.decode("utf-8"))
+            return _FakeResponse({"message": {"content": "ok"}})
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OLLAMA_CLASSIFY_MODEL": "missing-model:latest",
+            },
+            clear=True,
+        ), mock.patch(
+            "app.ollama_client._api_url_candidates",
+            return_value=["http://127.0.0.1:11434/api/chat"],
+        ), mock.patch(
+            "app.ollama_client._available_ollama_models",
+            return_value=("llama3.2:3b", "mistral-small3.2:24b"),
+        ), mock.patch(
+            "app.ollama_client._endpoint_allowed",
+            return_value=True,
+        ), mock.patch(
+            "app.ollama_client._timeout_seconds",
+            return_value=12.0,
+        ), mock.patch(
+            "app.ollama_client._keep_alive_value",
+            return_value="15m",
+        ), mock.patch(
+            "app.ollama_client.urllib.request.urlopen",
+            side_effect=_fake_urlopen,
+        ), mock.patch(
+            "app.ollama_client._log_action",
+        ) as mock_log:
+            result = ollama_client._call_ollama(
+                task="classify",
+                messages=[{"role": "user", "content": "Classify this."}],
+                email_id="latency-substitution-1",
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured["payload"]["model"], "llama3.2:3b")
+        substitution_logs = [
+            call.kwargs["detail"]
+            for call in mock_log.call_args_list
+            if call.kwargs.get("status") == "fallback"
+        ]
+        self.assertTrue(
+            any(
+                "ollama_model_substitution requested=missing-model:latest resolved=llama3.2:3b"
+                in detail
+                for detail in substitution_logs
+            )
+        )
+
+    def test_call_ollama_returns_none_when_requested_model_missing_in_strict_mode(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OLLAMA_CLASSIFY_MODEL": "missing-model:latest",
+                "OLLAMA_STRICT_MODEL_RESOLUTION": "1",
+            },
+            clear=True,
+        ), mock.patch(
+            "app.ollama_client._api_url_candidates",
+            return_value=["http://127.0.0.1:11434/api/chat"],
+        ), mock.patch(
+            "app.ollama_client._available_ollama_models",
+            return_value=("llama3.2:3b",),
+        ), mock.patch(
+            "app.ollama_client._endpoint_allowed",
+            return_value=True,
+        ), mock.patch(
+            "app.ollama_client._log_action",
+        ) as mock_log, mock.patch(
+            "app.ollama_client.urllib.request.urlopen",
+        ) as mock_urlopen:
+            result = ollama_client._call_ollama(
+                task="classify",
+                messages=[{"role": "user", "content": "Classify this."}],
+                email_id="latency-strict-1",
+            )
+
+        self.assertIsNone(result)
+        mock_urlopen.assert_not_called()
+        error_logs = [
+            call.kwargs["detail"]
+            for call in mock_log.call_args_list
+            if call.kwargs.get("status") == "error"
+        ]
+        self.assertTrue(
+            any("requested_ollama_model_unavailable requested=missing-model:latest" in detail for detail in error_logs)
+        )
 
     def test_force_analysis_uses_separate_task_slot(self):
         task_auto, created_auto = ollama_client._create_or_get_ai_task("analyze", 7, force=False)

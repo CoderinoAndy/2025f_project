@@ -50,14 +50,19 @@ Manual fallback without `make` (Windows):
 - `OLLAMA_CLASSIFY_MODEL`: optional override for classification requests
 - `OLLAMA_DRAFT_MODEL`: optional override for draft/revise requests
 - `OLLAMA_SUMMARY_MODEL`: optional override for summary requests
+- `OLLAMA_STRICT_MODEL_RESOLUTION`: when truthy, missing requested models fail instead of silently substituting
 - `OLLAMA_API_URL`: defaults to `http://127.0.0.1:11434/api/chat`
 - `OLLAMA_TIMEOUT_SECONDS`: base AI request timeout in seconds (default `45`)
 - `OLLAMA_LONG_TASK_TIMEOUT_SECONDS`: timeout for draft/revise/summarize requests (default `180`)
 - `OLLAMA_SUMMARY_MIN_CHARS`: summary threshold (default `200`)
-- `OLLAMA_VISION_MAX_CHARS`: max full-email chars rendered into screenshot pages (default `12000`)
-- `OLLAMA_VISION_MAX_PAGES`: max screenshot pages attached to a model call (default `6`)
-- `OLLAMA_VISION_WRAP_WIDTH`: wrap width for rendered screenshot pages (default `92`)
-- `OLLAMA_VISION_MAX_LINES`: content lines per screenshot page (default `38`)
+- `OLLAMA_VISION_MAX_CHARS`: max cleaned body chars included in the text prompt (default `6000`)
+- `OLLAMA_VISION_MAX_PAGES`: max real HTML screenshot pages attached to a model call (default `2`)
+- `OLLAMA_VISION_PAGE_HEIGHT`: max pixel height per attached screenshot page (default `1800`)
+- `OLLAMA_VISION_VIEWPORT_WIDTH`: browser viewport width for rendered HTML screenshots (default `1365`)
+- `OLLAMA_VISION_BROWSER_TIMEOUT_SECONDS`: timeout for HTML screenshot rendering (default `12`)
+- `OLLAMA_VISION_BROWSER_WAIT_MS`: post-load settle delay before screenshot capture (default `750`)
+- `OLLAMA_VISION_BROWSER_CHANNEL`: optional Playwright browser channel such as `msedge` or `chrome`
+- `OLLAMA_VISION_BROWSER_EXECUTABLE_PATH`: optional explicit browser executable path for Playwright
 - `AI_ACTION_LOG_PATH`: path to `.txt` AI action log (default `instance/ai_actions.txt`)
 - `APP_DEBUG_LOG_PATH`: path to structured debug log (default `instance/debug_log.txt`)
 
@@ -69,7 +74,10 @@ AI calls are local-only and go to Ollama chat API (`http://127.0.0.1:11434/api/c
    - `ollama serve`
 2. Confirm model is available:
    - `ollama pull mistral-small3.2:24b`
-3. Start Flask app:
+3. Optional: enable real HTML screenshots for visually complex emails:
+   - `pip install -r requirements.txt`
+   - `playwright install chromium`
+4. Start Flask app:
    - `make run`
 
 ## Local frontend assets

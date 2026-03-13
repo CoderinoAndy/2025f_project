@@ -27,11 +27,7 @@ CREATE TABLE IF NOT EXISTS email_messages ( -- Primary message table (one row pe
     CHECK (ai_category IN ('urgent','informational','junk')),
   ai_needs_response INTEGER
     CHECK (ai_needs_response IN (0,1)),
-  ai_confidence REAL,
-  ai_image_context TEXT,
-  ai_image_context_status TEXT
-    CHECK (ai_image_context_status IN ('ready','skipped','error')),
-  ai_image_context_updated_at TEXT
+  ai_confidence REAL
 );
 
 -- Recipient rows (one row per address per email), instead of comma-separated columns

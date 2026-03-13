@@ -69,6 +69,44 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertEqual(result["category"], "junk")
         self.assertEqual(result["email_type"], "junk-uncertain")
 
+    def test_promo_title_uses_shared_promo_guardrails(self):
+        email = _email(
+            "Uber Eats <uber@uber.com>",
+            "Score big with Lonzo's Kitchen today.",
+            "GAME CHANGING DEALS",
+        )
+
+        assessment = ollama_client._junk_signal_assessment(email)
+        result = ollama_client._heuristic_classification(email)
+
+        self.assertTrue(assessment["bulk_signal"])
+        self.assertTrue(assessment["commercial_promotion"])
+        self.assertIn("promotion_title", assessment["families"])
+        self.assertEqual(result["category"], "junk")
+        self.assertEqual(result["email_type"], "junk-uncertain")
+
+    def test_campaign_newsletter_with_footer_noise_stays_promotional_junk(self):
+        email = _email(
+            "Sobeys <sobeys@em.sobeys.com>",
+            "The excitement of the Paralympic Games continues!",
+            (
+                "Cheer on Team Canada at the Paralympic Games! "
+                "Discover member exclusive grocery offers and inspiration from Sobeys through the Feed The Dream campaign. "
+                "Team Canada's Paralympic athletes are currently competing, backed by communities and supporters "
+                "who help Feed The Dream. Let's celebrate their dedication and cheer them on at the "
+                "Milano-Cortina 2026 Paralympic Games. "
+                "My Grocery Offers Flyer Inspiration Preferences Terms & Conditions Privacy Policy Unsubscribe."
+            ),
+        )
+
+        assessment = ollama_client._junk_signal_assessment(email)
+        result = ollama_client._heuristic_classification(email)
+
+        self.assertTrue(assessment["commercial_promotion"])
+        self.assertFalse(assessment["editorial_like"])
+        self.assertEqual(result["category"], "junk")
+        self.assertEqual(result["email_type"], "junk-uncertain")
+
     def test_transactional_receipt_stays_read_only(self):
         email = _email(
             "Billing <billing@service.example>",
@@ -118,6 +156,23 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertEqual(result["category"], "junk")
         self.assertEqual(result["email_type"], "junk-uncertain")
         self.assertLess(result["confidence"], ollama_client.JUNK_LOW_CONFIDENCE_THRESHOLD)
+        self.assertEqual(mock_call.call_count, 1)
+
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value='{"category":"informational","needs_response":false,"priority":1,"confidence":0.99}',
+    )
+    def test_promotional_guardrail_overrides_high_confidence_read_only_model_output(self, mock_call):
+        email = _email(
+            "Uber Eats <uber@uber.com>",
+            "Score big with Lonzo's Kitchen today.",
+            "GAME CHANGING DEALS",
+        )
+
+        result = ollama_client.classify_email(email, email_id="promo-title-guardrail-1")
+
+        self.assertEqual(result["category"], "junk")
+        self.assertEqual(result["email_type"], "junk-uncertain")
         self.assertEqual(mock_call.call_count, 1)
 
     @mock.patch("app.ollama_client._call_ollama", return_value=None)

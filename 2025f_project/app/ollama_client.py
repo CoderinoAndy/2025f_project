@@ -19,17 +19,6 @@ from .db import (
 )
 from .debug_logger import log_event
 from .email_content import contains_common_mojibake, repair_body_text, repair_header_text
-from .email_image_context import (
-    body_suggests_image_context,
-    build_basic_image_context,
-    email_text_for_image_gating,
-    extract_attachment_image_payloads,
-    extract_html_image_candidates,
-    extract_inline_image_payloads,
-    filter_image_attachment_metadata,
-    should_enrich_with_vision,
-    should_fetch_attachment_image_metadata,
-)
 
 # This module now contains both model-calling code and async AI task orchestration.
 # Core runtime defaults and normalized label sets shared across classify/summarize flows.
@@ -47,7 +36,6 @@ LONG_OLLAMA_TASKS = {
     "draft_rewrite",
     "summarize",
     "summarize_rewrite",
-    "vision",
 }
 TASK_MODEL_ENV_MAP = {
     "classify": "OLLAMA_CLASSIFY_MODEL",
@@ -57,7 +45,6 @@ TASK_MODEL_ENV_MAP = {
     "draft_rewrite": "OLLAMA_DRAFT_MODEL",
     "summarize": "OLLAMA_SUMMARY_MODEL",
     "summarize_rewrite": "OLLAMA_SUMMARY_MODEL",
-    "vision": "OLLAMA_VISION_MODEL",
 }
 LOCALHOST_NAMES = {"localhost"}
 OLLAMA_TAGS_CACHE_TTL_SECONDS = 300.0
@@ -67,9 +54,6 @@ JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 MAILBOX_OWNER_NAME_ENV = "LOCAL_USER_NAME"
 SUMMARY_COMPRESSION_TARGET_RATIO = 0.28
-IMAGE_CONTEXT_MAX_CHARS_DEFAULT = 1600
-IMAGE_CONTEXT_MAX_IMAGES_DEFAULT = 2
-IMAGE_CONTEXT_MAX_IMAGE_BYTES_DEFAULT = 800_000
 # Sender/domain heuristics used to separate person-to-person mail from automated mail.
 PERSONAL_EMAIL_DOMAINS = (
     "gmail.com",
@@ -145,6 +129,17 @@ SUMMARY_NOISE_MARKERS = (
     "you are receiving this email",
     "this email was sent to",
     "add us to your address book",
+    "view online",
+    "presented by",
+    "together with",
+    "notification emails",
+    "remove your email",
+    "intended for",
+    "want to keep receiving",
+    "clicking on newsletter links",
+    "stop receiving this newsletter",
+    "here's what these numbers mean",
+    "data is provided by",
 )
 SUMMARY_UTILITY_MARKERS = (
     "read more",
@@ -165,6 +160,20 @@ SUMMARY_UTILITY_MARKERS = (
     "monmouth junction",
     "sponsored by",
     "is this email difficult to read",
+    "view online",
+    "presented by",
+    "together with",
+    "notification emails",
+    "remove your email",
+    "intended for",
+    "view job",
+    "see jobs",
+    "top applicant",
+    "try premium",
+    "here's what these numbers mean",
+    "data is provided by",
+    "want to keep receiving",
+    "clicking on newsletter links",
 )
 # Common model-inserted lines that are not grounded in the source email.
 SUMMARY_HALLUCINATION_MARKERS = (
@@ -248,6 +257,17 @@ FOOTER_NOISE_REGEX_PATTERNS = (
     r"\byou\s+are\s+receiving\s+this\s+email\b",
     r"\bthis\s+email\s+was\s+sent\s+to\b",
     r"\badd\s+us\s+to\s+your\s+address\s+book\b",
+    r"\bview\s+online\b",
+    r"\bpresented\s+by\b",
+    r"\btogether\s+with\b",
+    r"\bnotification\s+emails\b",
+    r"\bremove\s+your\s+email\b",
+    r"\bintended\s+for\b",
+    r"\bwant\s+to\s+keep\s+receiving\b",
+    r"\bclicking\s+on\s+newsletter\s+links\b",
+    r"\bstop\s+receiving\s+this\s+newsletter\b",
+    r"\bhere'?s\s+what\s+these\s+numbers\s+mean\b",
+    r"\bdata\s+is\s+provided\s+by\b",
     r"\ball\s+rights\s+reserved\b",
     r"\b(?:subscriber|subscription|member|customer)\s*id\s*[:#]?\s*[a-z0-9\-]{5,}\b",
     r"\bis\s+this\s+email\s+difficult\s+to\s+read\??\b",
@@ -437,10 +457,14 @@ JUNK_PROMOTION_MARKERS = (
     "bundle and save",
     "save up to",
     "save big",
+    "earn up to",
     "discover",
     "shop the collection",
     "shop the sale",
     "shop our",
+    "refer friends",
+    "trending products",
+    "top products",
     "presale access",
     "pre-sale access",
     "premium upgrade",
@@ -735,8 +759,6 @@ def _resolved_model_name(task=None, api_urls=None):
     ]
     if family_matches:
         return family_matches[0]
-    if str(task or "").strip().lower() == "vision":
-        return requested_model
     return available_models[0]
 
 
@@ -812,252 +834,6 @@ def _summary_min_chars():
     return max(50, min(5000, parsed))
 
 
-def _image_context_max_chars():
-    raw = (os.getenv("AI_IMAGE_CONTEXT_MAX_CHARS") or "").strip()
-    try:
-        parsed = int(raw) if raw else IMAGE_CONTEXT_MAX_CHARS_DEFAULT
-    except ValueError:
-        parsed = IMAGE_CONTEXT_MAX_CHARS_DEFAULT
-    return max(200, min(4000, parsed))
-
-
-def _image_context_max_images():
-    raw = (os.getenv("AI_IMAGE_CONTEXT_MAX_IMAGES") or "").strip()
-    try:
-        parsed = int(raw) if raw else IMAGE_CONTEXT_MAX_IMAGES_DEFAULT
-    except ValueError:
-        parsed = IMAGE_CONTEXT_MAX_IMAGES_DEFAULT
-    return max(1, min(4, parsed))
-
-
-def _image_context_max_image_bytes():
-    raw = (os.getenv("AI_IMAGE_CONTEXT_MAX_IMAGE_BYTES") or "").strip()
-    try:
-        parsed = int(raw) if raw else IMAGE_CONTEXT_MAX_IMAGE_BYTES_DEFAULT
-    except ValueError:
-        parsed = IMAGE_CONTEXT_MAX_IMAGE_BYTES_DEFAULT
-    return max(40_000, min(4_000_000, parsed))
-
-
-def _vision_model_requested():
-    return (os.getenv("OLLAMA_VISION_MODEL") or "").strip()
-
-
-def _normalized_ai_image_context_text(value):
-    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not text:
-        return ""
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    max_chars = _image_context_max_chars()
-    if len(text) > max_chars:
-        return f"{text[: max_chars - 3].rstrip()}..."
-    return text
-
-
-def _email_has_possible_image_context(email_data):
-    if not isinstance(email_data, dict):
-        return False
-    if _normalized_ai_image_context_text(email_data.get("ai_image_context")):
-        return True
-    body_html = str(email_data.get("body_html") or "")
-    if "<img" in body_html.lower():
-        return True
-    body_text = email_text_for_image_gating(email_data)
-    title = str(email_data.get("title") or "")
-    return body_suggests_image_context(title, body_text)
-
-
-def _describe_images_with_vision(image_payloads, email_data, email_id=None):
-    """Use a multimodal Ollama model to extract concise grounded image context."""
-    requested_model = _vision_model_requested()
-    if not requested_model or not image_payloads:
-        return ""
-
-    ordered_payloads = sorted(
-        image_payloads,
-        key=lambda item: (
-            -int(item.get("priority") or 0),
-            str(item.get("filename") or ""),
-        ),
-    )[: _image_context_max_images()]
-    if not ordered_payloads:
-        return ""
-
-    image_labels = []
-    image_blobs = []
-    for index, item in enumerate(ordered_payloads, start=1):
-        label = _compact_text(item.get("label") or "")
-        filename = item.get("filename") or f"image-{index}"
-        label_text = f" hint={label}" if label else ""
-        image_labels.append(f"{index}. {filename}{label_text}")
-        image_blobs.append(item["content_base64"])
-
-    system_prompt = (
-        "You extract grounded context from images embedded in emails. "
-        "Use only what is visibly present in the image. "
-        "Ignore decorative branding, logos, and tiny interface icons unless they change the meaning. "
-        "Capture short visible text, document type, key dates, amounts, names, and any requested action. "
-        "If an image is unreadable or decorative, say so briefly. "
-        "Return concise plain-text bullet points only."
-    )
-    user_prompt = (
-        "Describe the useful content in these email images.\n\n"
-        f"Subject: {_normalized_header_text(email_data.get('title') or '(No subject)')}\n"
-        f"From: {_normalized_header_text(email_data.get('sender') or '')}\n"
-        "Images in order:\n"
-        + "\n".join(image_labels)
-    )
-    response_text = _call_ollama(
-        task="vision",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt, "images": image_blobs},
-        ],
-        email_id=email_id,
-        temperature=0.0,
-        num_predict=320,
-    )
-    if not response_text:
-        return ""
-    cleaned = _normalized_ai_image_context_text(response_text)
-    cleaned_lower = cleaned.lower()
-    if any(
-        marker in cleaned_lower
-        for marker in (
-            "can't determine",
-            "cannot determine",
-            "unable to determine",
-            "unable to read",
-            "no useful information",
-        )
-    ):
-        return ""
-    return cleaned
-
-
-def _build_ai_image_context(email_data, email_id=None):
-    title = _normalized_header_text(email_data.get("title") or "(No subject)")
-    body_text = email_text_for_image_gating(email_data)
-    html_candidates = extract_html_image_candidates(email_data.get("body_html"))
-    attachment_images = []
-    external_id = str(email_data.get("external_id") or "").strip()
-
-    if external_id and should_fetch_attachment_image_metadata(title, body_text, html_candidates):
-        try:
-            from .gmail_service import fetch_message_attachment_metadata
-
-            attachment_images = filter_image_attachment_metadata(
-                fetch_message_attachment_metadata(external_id)
-            )
-        except Exception as exc:
-            _log_action(
-                task="vision",
-                status="error",
-                email_id=email_id,
-                detail=f"attachment_metadata_fetch_failed: {exc}",
-            )
-            attachment_images = []
-
-    vision_notes = ""
-    if _vision_model_requested() and should_enrich_with_vision(
-        title,
-        body_text,
-        html_candidates,
-        attachment_images,
-    ):
-        image_payloads = []
-        image_payloads.extend(
-            extract_inline_image_payloads(
-                html_candidates,
-                max_images=_image_context_max_images(),
-                max_bytes=_image_context_max_image_bytes(),
-            )
-        )
-        if external_id:
-            try:
-                from .gmail_service import fetch_message_attachments
-
-                image_payloads.extend(
-                    extract_attachment_image_payloads(
-                        fetch_message_attachments(external_id),
-                        max_images=_image_context_max_images(),
-                        max_bytes=_image_context_max_image_bytes(),
-                    )
-                )
-            except Exception as exc:
-                _log_action(
-                    task="vision",
-                    status="error",
-                    email_id=email_id,
-                    detail=f"attachment_image_fetch_failed: {exc}",
-                )
-        deduped_payloads = {}
-        for item in image_payloads:
-            key = (
-                str(item.get("filename") or ""),
-                str(item.get("content_type") or ""),
-                str(item.get("content_base64") or "")[:64],
-            )
-            existing = deduped_payloads.get(key)
-            if existing is None or int(item.get("priority") or 0) > int(existing.get("priority") or 0):
-                deduped_payloads[key] = item
-        vision_notes = _describe_images_with_vision(
-            list(deduped_payloads.values()),
-            email_data=email_data,
-            email_id=email_id,
-        )
-
-    image_context = _normalized_ai_image_context_text(
-        build_basic_image_context(
-            html_candidates,
-            attachment_images,
-            vision_notes=vision_notes,
-            max_chars=_image_context_max_chars(),
-        )
-    )
-    if image_context:
-        return image_context, "ready"
-    return "", "skipped"
-
-
-def _ensure_email_image_context(email_data, force=False):
-    """Populate cached AI image context when useful and available."""
-    if not isinstance(email_data, dict):
-        return email_data
-
-    cached_status = str(email_data.get("ai_image_context_status") or "").strip().lower()
-    cached_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
-    if not force and cached_status in {"ready", "skipped"}:
-        if cached_context:
-            email_data["ai_image_context"] = cached_context
-        return email_data
-    if not force and not _email_has_possible_image_context(email_data):
-        return email_data
-
-    email_id = email_data.get("id")
-    try:
-        image_context, image_status = _build_ai_image_context(email_data, email_id=email_id)
-    except Exception as exc:
-        image_context = ""
-        image_status = "error"
-        _log_action(
-            task="vision",
-            status="error",
-            email_id=email_id,
-            detail=f"image_context_build_failed: {exc}",
-        )
-
-    email_data["ai_image_context"] = image_context or None
-    email_data["ai_image_context_status"] = image_status
-    if email_id:
-        update_email_ai_fields(
-            email_id=email_id,
-            ai_image_context=image_context if image_status == "ready" else "",
-            ai_image_context_status=image_status,
-        )
-    return email_data
-
-
 def _email_body_text(email_data):
     """Return the best available plain-text body for AI analysis."""
     if not isinstance(email_data, dict):
@@ -1105,14 +881,7 @@ def should_summarize_email(email_data):
     """
     # Return whether summarize email should run based on current message/context state.
     body = _email_body_text(email_data).strip()
-    if len(body) >= _summary_min_chars():
-        return True
-    image_context = ""
-    if isinstance(email_data, dict):
-        image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
-    if image_context:
-        return True
-    return not body and _email_has_possible_image_context(email_data)
+    return len(body) >= _summary_min_chars()
 
 
 def classification_to_email_type(classification):
@@ -1484,7 +1253,19 @@ def _summary_uses_subject_content(summary_text, email_data):
         return False
     if (
         summary.lower().startswith("a promotional update from ")
-        and len(_clean_body_for_prompt(email_data, max_chars=240)) < 120
+        and (
+            len(_clean_body_for_prompt(email_data, max_chars=240)) < 120
+            or _extract_offer_phrases(
+                " ".join(
+                    [
+                        title,
+                        _clean_body_for_prompt(email_data, max_chars=1600),
+                    ]
+                ),
+                max_items=1,
+            )
+            or _extract_bullet_item_names(_email_body_text(email_data), max_items=1)
+        )
     ):
         return False
 
@@ -1689,18 +1470,77 @@ def _looks_markup_noise_line(line_text):
     return False
 
 
+def _looks_newsletter_intro_line(line_text):
+    """Return True for breezy newsletter intros that should not dominate summaries."""
+    lowered = _compact_text(line_text).lower().strip(" -:;,.!?")
+    if not lowered:
+        return True
+    starters = (
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "happy monday",
+        "happy tuesday",
+        "happy wednesday",
+        "happy thursday",
+        "happy friday",
+        "happy saturday",
+        "happy sunday",
+        "presented by",
+        "together with",
+    )
+    return lowered.startswith(starters)
+
+
+def _looks_credit_or_byline_line(line_text):
+    """Return True for author-credit or quote-credit lines that are not summary-worthy."""
+    normalized = _compact_text(line_text).strip()
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    if lowered.startswith(("quote:", "-")) and len(_text_tokens(normalized)) <= 24:
+        return True
+    if re.fullmatch(
+        r"-?[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,6}(?:,\s*[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,6})+",
+        normalized,
+    ):
+        return True
+    return False
+
+
+def _looks_numeric_scoreboard_line(line_text):
+    """Return True for ticker/scoreboard lines dominated by numeric market data."""
+    normalized = _compact_text(line_text)
+    if not normalized:
+        return False
+    digit_count = sum(character.isdigit() for character in normalized)
+    alpha_count = sum(character.isalpha() for character in normalized)
+    symbol_hits = sum(normalized.count(symbol) for symbol in ("%", "$", ",", "+"))
+    if digit_count >= 4 and digit_count >= alpha_count and symbol_hits >= 1:
+        return True
+    return bool(
+        re.fullmatch(r"(?:[A-Za-z][A-Za-z .'-]{0,20}\s+)?[+\-$0-9.,% ]{6,}", normalized)
+    )
+
+
 def _clean_body_for_prompt(body, max_chars=8000):
     """Clean body for prompt.
     """
     # Clean this value so the rest of the code gets predictable input.
-    image_context = ""
     title_text = ""
     if isinstance(body, dict):
         text = _email_body_text(body)
-        image_context = _normalized_ai_image_context_text(body.get("ai_image_context"))
         title_text = _normalized_header_text(body.get("title") or "")
     else:
         text = repair_body_text(body or "", None)
+    text = re.sub(r"(\d{4})View Online\b", r"\1\nView Online", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*https?://[^>\n]+>", " [link] ", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"<[^>\n]*(?:href=|src=|alt=|border=|https?://|/\s*a\b|img\b)[^>\n]*>",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _strip_reply_chain(text)
     cleaned_lines = []
@@ -1749,6 +1589,10 @@ def _clean_body_for_prompt(body, max_chars=8000):
             # Drop lines that collapse to empty after noise stripping.
             continue
         lowered = normalized_line.lower()
+        if _looks_credit_or_byline_line(normalized_line):
+            continue
+        if _looks_numeric_scoreboard_line(normalized_line):
+            continue
         if (
             title_text
             and _is_near_subject_copy(normalized_line, title_text)
@@ -1761,7 +1605,7 @@ def _clean_body_for_prompt(body, max_chars=8000):
         if re.match(
             r"^(?:read more|get the details|get tickets|learn more|listen now|watch now|"
             r"try premium button|follow us|preferences|feedback|alerts center|"
-            r"contact us|other\s*\(|top stories for|answer from|view in browser|view this email|open in browser|"
+            r"contact us|other\s*\(|top stories for|answer from|view in browser|view this email|open in browser|view online|"
             r"or,\s*see\b|click here\b|click to\b|save now\b|see deals\b|order now\b|"
             r"shop now\b|top deals\b|view web version\b|unsubscribe\b)\b",
             lowered,
@@ -1803,9 +1647,6 @@ def _clean_body_for_prompt(body, max_chars=8000):
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = cleaned.strip()
-    if image_context:
-        if not cleaned:
-            cleaned = f"Image context:\n{image_context}"
     return cleaned[:max_chars]
 
 
@@ -2029,6 +1870,136 @@ def _prompt_summary_sentence(prompt_text):
     return f"It includes a prompt about {prompt}"
 
 
+def _prompt_reminder_summary(email_data):
+    """Return a compact summary for reminder-style prompt emails."""
+    if not _looks_bulk_or_newsletter(email_data):
+        return None
+    raw_body = _email_body_text(email_data)
+    prompt_text = _extract_labeled_prompt_text(raw_body)
+    if not prompt_text:
+        return None
+    title = _normalized_header_text(email_data.get("title") or "")
+    combined = _compact_text(" ".join([title, raw_body])).lower()
+    if not (
+        re.search(r"\breminder\b", title, flags=re.IGNORECASE)
+        or "continue writing" in combined
+        or "writing reminder" in combined
+        or "life story" in combined
+    ):
+        return None
+
+    sender_name = _summary_sender_name(email_data)
+    sentences = [_ensure_sentence_ending(f"{sender_name} sent a reminder")]
+    prompt_sentence = _prompt_summary_sentence(prompt_text)
+    if prompt_sentence:
+        sentences.append(_ensure_sentence_ending(prompt_sentence))
+    if re.search(r"\b(?:answer|complete)\s+a\s+(?:\d+|one)[-\s]?question survey\b", raw_body, flags=re.IGNORECASE):
+        sentences.append(_ensure_sentence_ending("It also mentions a 1-question survey"))
+    if re.search(r"\b(?:log in|sign in)\b", raw_body, flags=re.IGNORECASE):
+        sentences.append(_ensure_sentence_ending("It includes a login link to save the response"))
+    summary = _compact_text(" ".join(sentences))
+    return summary[:SUMMARY_MAX_CHARS] if summary else None
+
+
+def _activity_notification_summary(email_data):
+    """Return a compact summary for app/activity notification emails."""
+    if not _looks_bulk_or_newsletter(email_data):
+        return None
+    title = _normalized_header_text(email_data.get("title") or "")
+    body = _clean_body_for_prompt(email_data, max_chars=1800)
+    combined = _compact_text(" ".join([title, body])).lower()
+    unread_match = re.search(
+        r"\b(?:(\d+)\s+unread messages?|unread messages?\s+from\s+(\d+)\s+person)\b",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    activity_markers = (
+        "likes",
+        "comments",
+        "follows",
+        "mentions",
+        "replies",
+        "new activity",
+    )
+    explicit_notification_markers = (
+        "unread message",
+        "unread messages",
+        "liked your",
+        "commented on",
+        "followed you",
+        "mentioned you",
+        "new activity",
+        "new like",
+        "new comment",
+        "new reply",
+    )
+    if not unread_match and not any(marker in combined for marker in explicit_notification_markers):
+        return None
+
+    unread_count = next((value for value in unread_match.groups() if value), "") if unread_match else ""
+    sender_name = _summary_sender_name(email_data)
+    sentences = [_ensure_sentence_ending(f"An activity update from {sender_name}")]
+    if unread_count:
+        noun = "message" if unread_count == "1" else "messages"
+        sentences.append(_ensure_sentence_ending(f"It says there {'is' if unread_count == '1' else 'are'} {unread_count} unread {noun}"))
+    if any(marker in combined for marker in ("likes", "comments", "follows", "mentions", "replies")):
+        sentences.append(_ensure_sentence_ending("It also mentions recent likes, comments, or follows"))
+    summary = _compact_text(" ".join(sentences))
+    return summary[:SUMMARY_MAX_CHARS] if summary else None
+
+
+def _job_alert_summary(email_data):
+    """Return a compact summary for generic job-alert emails."""
+    if not _looks_bulk_or_newsletter(email_data):
+        return None
+    title = _normalized_header_text(email_data.get("title") or "")
+    raw_body = _email_body_text(email_data)
+    combined = _compact_text(" ".join([title, raw_body]))
+    if not re.search(r"\bjob alert\b|\b\d+\s+new jobs?\b", combined, flags=re.IGNORECASE):
+        return None
+
+    sender_name = _summary_sender_name(email_data)
+    focus_match = re.search(
+        r"\bjob alert\s+for\s+(.+?)\s+in\s+([A-Z][A-Za-z .'-]+(?:,\s*[A-Z][A-Za-z .'-]+)+)",
+        raw_body,
+        flags=re.IGNORECASE,
+    )
+    title_match = re.search(r"\b(\d+)\s+new jobs?\s+for\s+'?([^'\n]+)'?", title, flags=re.IGNORECASE)
+    raw_lines = [
+        _compact_text(line).strip(" -:;,.")
+        for line in str(raw_body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if _compact_text(line).strip(" -:;,.")
+    ]
+    first_role = ""
+    for index, line in enumerate(raw_lines):
+        lowered = line.lower()
+        if "job matches your preferences" in lowered or "job match your preferences" in lowered:
+            for candidate in raw_lines[index + 1 : index + 4]:
+                candidate_lower = candidate.lower()
+                if _looks_utility_sentence(candidate) or _is_noise_fragment(candidate):
+                    continue
+                if any(marker in candidate_lower for marker in ("view job", "see jobs", "top applicant", "try premium")):
+                    continue
+                if len(candidate) >= 8:
+                    first_role = candidate
+                    break
+            break
+
+    sentences = [_ensure_sentence_ending(f"A job alert from {sender_name}")]
+    if title_match:
+        sentences.append(
+            _ensure_sentence_ending(f"It mentions {title_match.group(1)} new job for {title_match.group(2)}")
+        )
+    elif focus_match:
+        sentences.append(
+            _ensure_sentence_ending(f"It covers jobs for {focus_match.group(1)} in {focus_match.group(2)}")
+        )
+    if first_role:
+        sentences.append(_ensure_sentence_ending(f"It includes {first_role}"))
+    summary = _compact_text(" ".join(sentences))
+    return summary[:SUMMARY_MAX_CHARS] if summary else None
+
+
 def _looks_marketing_alert_teaser(teaser_text):
     """Return True for promo-style alert copy that should never be reused verbatim."""
     normalized = _compact_text(repair_body_text(teaser_text or "", None)).lower()
@@ -2107,6 +2078,7 @@ def _paraphrase_marketing_alert_teaser(teaser_text):
 def _topic_phrase_from_sentence(sentence_text):
     """Compress a sentence into a shorter topic phrase for digest overviews."""
     text = _strip_read_time_prefix(sentence_text)
+    text = re.sub(r"<[^>\n]*(?:href=|src=|alt=|border=|https?://|/\s*a\b|img\b)[^>\n]*>", " ", text, flags=re.IGNORECASE)
     text = _compact_text(_strip_footer_noise_text(text)).strip(" -:;,.")
     if not text:
         return ""
@@ -2119,9 +2091,14 @@ def _topic_phrase_from_sentence(sentence_text):
         flags=re.IGNORECASE,
     )
     text = re.sub(r"^(?:enjoy|discover|get|shop)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\s*[—-]\s*[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3}(?:,\s*[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3})+$",
+        "",
+        text,
+    )
     if len(text) > 96:
         parts = re.split(
-            r",\s+(?:with|while|as|after|before|including)\b|\s+(?:while|as|after|before|because)\b",
+            r",\s+(?:with|while|after|before|including)\b|\s+(?:while|after|before|because)\b",
             text,
             maxsplit=1,
             flags=re.IGNORECASE,
@@ -2137,6 +2114,8 @@ def _digest_overview_summary(email_data, sender_name, key_sentences):
     title = _normalized_header_text(email_data.get("title") or "")
     topics = []
     for sentence in key_sentences or []:
+        if _looks_newsletter_intro_line(sentence) or _looks_credit_or_byline_line(sentence):
+            continue
         topic = _topic_phrase_from_sentence(_strip_title_prefix(sentence, title))
         if not topic:
             continue
@@ -2156,6 +2135,20 @@ def _digest_overview_summary(email_data, sender_name, key_sentences):
     return summary[:SUMMARY_MAX_CHARS] if summary else None
 
 
+def _filtered_digest_questions(email_data, digest_questions):
+    """Drop subject-copy or low-value questions when better digest questions exist."""
+    title = _normalized_header_text(email_data.get("title") or "")
+    filtered = []
+    for question in digest_questions or []:
+        candidate = _compact_text(question)
+        if not candidate:
+            continue
+        if title and _is_near_subject_copy(candidate, title) and len(digest_questions or []) > 1:
+            continue
+        filtered.append(candidate)
+    return filtered or list(digest_questions or [])
+
+
 def _extract_digest_questions(raw_body, max_questions=3):
     """Extract distinct featured questions from inline or multiline digest bodies."""
     question_source = repair_body_text(raw_body or "", None).replace("\r\n", "\n").replace("\r", "\n")
@@ -2163,7 +2156,11 @@ def _extract_digest_questions(raw_body, max_questions=3):
         return []
 
     questions = []
-    for match in re.finditer(r"Question:\s*(.+?)(?=(?:\r?\n|$))", question_source, flags=re.IGNORECASE):
+    for match in re.finditer(
+        r"Question:\s*(.+?)(?=(?:Question:|\r?\n|$))",
+        question_source,
+        flags=re.IGNORECASE,
+    ):
         question = repair_header_text(match.group(1))
         question = _strip_footer_noise_text(question)
         question = _compact_text(question).strip(" -:;,.")
@@ -2185,6 +2182,19 @@ def _extract_digest_questions(raw_body, max_questions=3):
         for line in question_source.split("\n")
         if _compact_text(_strip_footer_noise_text(line)).strip(" -:;,.")
     ]
+    lowered_source = question_source.lower()
+    question_digest_context = any(
+        marker in lowered_source
+        for marker in ("question:", "answered", "asked in", "read more", "followers", " digest")
+    )
+    standalone_question_count = sum(
+        1
+        for line in lines
+        if line.endswith("?")
+        and 18 <= len(line) <= 220
+        and not _looks_utility_sentence(line)
+        and not _looks_newsletter_intro_line(line)
+    )
     for index, line in enumerate(lines):
         lowered = line.lower()
         if len(line) < 18 or len(line) > 220:
@@ -2193,10 +2203,14 @@ def _extract_digest_questions(raw_body, max_questions=3):
             continue
         if _is_digest_call_to_action_line(line) or _looks_utility_sentence(line):
             continue
+        if _looks_newsletter_intro_line(line) or _looks_credit_or_byline_line(line):
+            continue
         if lowered.startswith(("asked in ", "answer from ", "read more", "top stories")):
             continue
         lookahead = " ".join(lines[index + 1 : index + 3]).lower()
-        if not any(marker in lookahead for marker in ("answered", "asked in", "posted")):
+        if (standalone_question_count < 2 or not question_digest_context) and not any(
+            marker in lookahead for marker in ("answered", "asked in", "posted", "read more")
+        ):
             continue
         question = _truncate_compact_text(line, max_chars=200)
         if any(_token_overlap_ratio(question, existing) > 0.9 for existing in questions):
@@ -2238,9 +2252,10 @@ def _digest_question_summary(sender_name, digest_questions):
     if not topic_fragments:
         return None
 
+    lead = "It features a question about" if len(topic_fragments) == 1 else "It features questions about"
     summary = _compact_text(
         f"{_ensure_sentence_ending(intro)} "
-        f"{_ensure_sentence_ending(f'It highlights questions about {_natural_join(topic_fragments)}')}"
+        f"{_ensure_sentence_ending(f'{lead} {_natural_join(topic_fragments)}')}"
     )
     return summary[:SUMMARY_MAX_CHARS] if summary else None
 
@@ -2295,6 +2310,12 @@ def _digest_story_blurbs(body_text, max_items=4):
 
     normalized_lines = []
     for raw_line in raw_text.split("\n"):
+        raw_line = re.sub(
+            r"<[^>\n]*(?:href=|src=|alt=|border=|https?://|/\s*a\b|img\b)[^>\n]*>",
+            " ",
+            raw_line,
+            flags=re.IGNORECASE,
+        )
         candidate = re.sub(r"https?://\S+", " ", raw_line)
         candidate = _compact_text(_strip_footer_noise_text(candidate))
         candidate = _strip_read_time_prefix(candidate)
@@ -2320,6 +2341,8 @@ def _digest_story_blurbs(body_text, max_items=4):
         if email_title and _is_near_subject_copy(candidate, email_title):
             continue
         if _looks_link_heavy_line(candidate) or _looks_digest_scaffold_line(candidate):
+            continue
+        if _looks_newsletter_intro_line(candidate) or _looks_credit_or_byline_line(candidate):
             continue
         if _is_digest_call_to_action_line(candidate) or _looks_utility_sentence(candidate) or _is_noise_fragment(candidate):
             continue
@@ -2399,6 +2422,34 @@ def _title_feature_items(title_text, max_items=3):
     return items
 
 
+def _subject_feature_items(title_text, max_items=3):
+    """Extract comma-separated featured items from promotional subjects without a colon."""
+    title = _normalized_header_text(title_text or "")
+    if not title or ":" in title:
+        return []
+    match = re.search(
+        r"\b(?:these|featuring|includes?|with)\s+([^.?!]{8,140})",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return []
+    raw_parts = re.split(r",|&|\band\b", match.group(1))
+    items = []
+    for part in raw_parts:
+        candidate = _compact_text(part).strip(" -:;,.!?")
+        if len(candidate) < 4 or len(candidate) > 48:
+            continue
+        if candidate.lower() in {"more", "and more"}:
+            continue
+        if any(_token_overlap_ratio(candidate, existing) > 0.9 for existing in items):
+            continue
+        items.append(candidate)
+        if len(items) >= max_items:
+            break
+    return items
+
+
 def _clean_offer_target(target_text):
     """Normalize an offer target phrase so promo summaries stay concise."""
     target = _compact_text(target_text).strip(" -:;,.>")
@@ -2449,6 +2500,10 @@ def _extract_offer_phrases(raw_text, max_items=4):
                 if (match.group(3) or "").lower() == "in"
                 else f"up to {match.group(2)} off {_clean_offer_target(match.group(4))}"
             ),
+        ),
+        (
+            r"\bearn\s+up to\s+(\$\d+(?:,\d{3})*(?:\.\d{2})?)\b",
+            lambda match: f"up to {match.group(1)} in referral rewards",
         ),
         (
             r"\b(save|get)\s+up to\s+(\d{1,3}%)(?:\s+off)?\s+(?:when you buy\s+([^.!\n]{3,80})|(?:on\s+)?([^.!\n]{3,80}))",
@@ -2513,6 +2568,70 @@ def _extract_offer_phrases(raw_text, max_items=4):
     return phrases[:max_items]
 
 
+def _promotion_source_context(email_data, max_chars=5000):
+    """Return shared text inputs used by promo classification and summary logic."""
+    title = _normalized_header_text(email_data.get("title") or "")
+    raw_body = _email_body_text(email_data)
+    cleaned_body = _clean_body_for_prompt(email_data, max_chars=max_chars)
+    combined = _compact_text(
+        " ".join(part for part in [title, cleaned_body or raw_body] if part)
+    )
+    return {
+        "title": title,
+        "raw_body": raw_body,
+        "cleaned_body": cleaned_body or raw_body,
+        "combined": combined,
+    }
+
+
+def _looks_marketing_promo_title(title_text):
+    """Return True for subject lines that look like ad copy instead of editorial topics."""
+    title = _normalized_header_text(title_text or "")
+    if not title or title.lower() == "(no subject)":
+        return False
+    lowered = title.lower()
+    if lowered.startswith("save the date"):
+        return False
+    if re.search(
+        r"\b(?:\d{1,3}%\s+off|\$\d+(?:,\d{3})*(?:\.\d{2})?\s+off|free\s+(?:trial|shipping)|"
+        r"deal(?:s)?|offer(?:s)?|sale|discount|coupon|promo|membership|member week|savings?|"
+        r"bundle|kit|gear)\b",
+        lowered,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.match(
+            r"^(?:score\s+big|save\s+big|save\s+up\s+to|shop\b|unlock(?:\s+savings)?|"
+            r"last chance|claim\b|grab\b|treat yourself)\b",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _promotion_theme_phrase(source_text):
+    """Return a neutral promo theme label without copying marketing wording."""
+    normalized = _compact_text(source_text).lower()
+    if not normalized:
+        return ""
+    if re.search(r"\brefer friends\b|\breferral\b|\bshare your code\b", normalized):
+        return "referral rewards"
+    if re.search(r"\bfree\s+trial\b|\b\d+\s*-\s*week free trial\b|\b\d+\s+weeks?\s+free\b", normalized):
+        return "a free trial"
+    if re.search(r"\bmembership\b|\bmember(?:s| week| exclusive)\b", normalized):
+        return "membership perks"
+    if re.search(r"\bnew arrivals?\b|\bnew collection\b|\bfresh arrivals?\b", normalized):
+        return "new arrivals"
+    if re.search(r"\bdiscount\b|\b\d{1,3}%\s+off\b|\$\d+(?:,\d{3})*(?:\.\d{2})?\s+off\b|\bsavings?\b", normalized):
+        return "discounts"
+    if re.search(r"\bdeals\b", normalized):
+        return "special deals"
+    if re.search(r"\boffers?\b", normalized):
+        return "special offers"
+    return ""
+
+
 def _promotion_item_phrase(item_text):
     """Convert a product/item label into a slightly more natural summary phrase."""
     item = _compact_text(item_text).strip(" -:;,.")
@@ -2520,6 +2639,14 @@ def _promotion_item_phrase(item_text):
         return ""
     if item.lower().startswith("the "):
         item = item[4:]
+    item = re.sub(
+        r"\b(?:today|tonight|now|online|this week|this weekend|this month)\b$",
+        "",
+        item,
+        flags=re.IGNORECASE,
+    ).strip(" -:;,.")
+    if not item:
+        return ""
     lowered = item.lower()
     if re.fullmatch(r"jumper\s+\d{4}", lowered):
         return f"{item} bag"
@@ -2541,34 +2668,33 @@ def _promotion_summary(email_data):
     if not _looks_bulk_or_newsletter(email_data):
         return None
     sender_name = _summary_sender_name(email_data)
-    title = _normalized_header_text(email_data.get("title") or "")
-    raw_body = _email_body_text(email_data)
-    cleaned_body = _clean_body_for_prompt(email_data, max_chars=5000)
-    title_lead = _compact_text(title.split(":", 1)[0] if ":" in title else title).lower()
+    context = _promotion_source_context(email_data, max_chars=5000)
+    title = context["title"]
+    raw_body = context["raw_body"]
     sender_info = _sender_parts(email_data.get("sender"))
-    combined = _compact_text(" ".join(part for part in [title, cleaned_body or raw_body] if part)).lower()
+    combined = context["combined"].lower()
     promotion_assessment = _commercial_promotion_assessment(
         combined,
         bulk_signal=True,
         sender_automated=_sender_looks_automated(sender_info),
         transactional_like=False,
     )
-    title_items = _title_feature_items(title, max_items=3)
+    title_items = _title_feature_items(title, max_items=3) or _subject_feature_items(title, max_items=3)
     bullet_items = _extract_bullet_item_names(raw_body, max_items=3)
-    offer_phrases = _extract_offer_phrases(" ".join([title, cleaned_body or raw_body]), max_items=4)
-    title_promotional = bool(
-        re.search(
-            r"\b(?:sale|deal|offer|bundle|kit|gear|membership|voucher|boxing day|promo)\b",
-            title_lead,
-            flags=re.IGNORECASE,
-        )
-    )
+    offer_phrases = _extract_offer_phrases(context["combined"], max_items=4)
+    title_promotional = _looks_marketing_promo_title(title)
+    promo_theme = _promotion_theme_phrase(context["combined"])
     has_promo_signal = (
         promotion_assessment["commercial"]
         or bool(offer_phrases)
-        or title_promotional
-        or (title_promotional and bool(title_items))
-        or (title_promotional and bool(bullet_items))
+        or (
+            title_promotional
+            and (
+                bool(title_items)
+                or bool(bullet_items)
+                or bool(promo_theme)
+            )
+        )
     )
     if not has_promo_signal:
         return None
@@ -2578,14 +2704,24 @@ def _promotion_summary(email_data):
 
     featured_items = [_promotion_item_phrase(item) for item in (bullet_items or title_items)]
     featured_items = [item for item in featured_items if item]
-    if featured_items:
-        sentences.append(
-            _ensure_sentence_ending(f"It includes {_natural_join(featured_items[:3])}")
+    detail_sentence = ""
+    if featured_items and offer_phrases:
+        detail_sentence = (
+            f"The message promotes {_natural_join(featured_items[:2])} "
+            f"with {_natural_join(offer_phrases[:2])}"
         )
-    if offer_phrases:
-        sentences.append(
-            _ensure_sentence_ending(f"The offer includes {_natural_join(offer_phrases[:4])}")
+    elif offer_phrases:
+        detail_sentence = f"The message advertises {_natural_join(offer_phrases[:3])}"
+    elif featured_items and promo_theme:
+        detail_sentence = (
+            f"The message promotes {_natural_join(featured_items[:3])} with {promo_theme}"
         )
+    elif featured_items:
+        detail_sentence = f"The message promotes {_natural_join(featured_items[:3])}"
+    elif promo_theme:
+        detail_sentence = f"The message focuses on {promo_theme}"
+    if detail_sentence:
+        sentences.append(_ensure_sentence_ending(detail_sentence))
     summary = _compact_text(" ".join(sentences))
     return summary[:SUMMARY_MAX_CHARS] if summary else None
 
@@ -2765,6 +2901,8 @@ def _extract_digest_item_titles(body_text, max_items=4):
             continue
         lowered = candidate.lower()
         if any(marker in lowered for marker in skip_markers):
+            continue
+        if _looks_newsletter_intro_line(candidate) or _looks_credit_or_byline_line(candidate):
             continue
         if _looks_digest_scaffold_line(candidate):
             continue
@@ -2981,7 +3119,10 @@ def _bulk_newsletter_summary(email_data):
     digest_blurbs = _digest_story_blurbs(email_data, max_items=4)
 
     # Quora/news digests are better summarized by the featured topics than by model paraphrase.
-    digest_questions = _extract_digest_questions(raw_body, max_questions=3)
+    digest_questions = _filtered_digest_questions(
+        email_data,
+        _extract_digest_questions(raw_body, max_questions=3),
+    )
     if digest_questions:
         digest_summary = _digest_question_summary(
             sender_name=sender_name,
@@ -2989,6 +3130,18 @@ def _bulk_newsletter_summary(email_data):
         )
         if digest_summary:
             return digest_summary
+
+    prompt_summary = _prompt_reminder_summary(email_data)
+    if prompt_summary:
+        return prompt_summary
+
+    activity_summary = _activity_notification_summary(email_data)
+    if activity_summary:
+        return activity_summary
+
+    job_alert_summary = _job_alert_summary(email_data)
+    if job_alert_summary:
+        return job_alert_summary
 
     promotion_summary = _promotion_summary(email_data)
     if promotion_summary:
@@ -3026,39 +3179,6 @@ def _bulk_newsletter_summary(email_data):
         )
         if digest_summary:
             return digest_summary
-
-    prompt_text = _extract_labeled_prompt_text(raw_body)
-    if prompt_text:
-        survey_present = bool(
-            re.search(
-                r"\b(?:answer|complete)\s+a\s+(?:\d+|one)[-\s]?question survey\b",
-                raw_body,
-                flags=re.IGNORECASE,
-            )
-        )
-        sentences = []
-        if re.search(r"\breminder\b", title, flags=re.IGNORECASE):
-            sentences.append(
-                _ensure_sentence_ending(f"{sender_name} sent a reminder")
-            )
-        else:
-            sentences.append(_ensure_sentence_ending(f"{sender_name} sent an email"))
-        prompt_sentence = _prompt_summary_sentence(prompt_text)
-        if prompt_sentence:
-            sentences.append(_ensure_sentence_ending(prompt_sentence))
-        if survey_present:
-            sentences.append(
-                _ensure_sentence_ending(
-                    "It also mentions a 1-question survey and a login link to save your response"
-                )
-            )
-        elif re.search(r"\b(?:log in|sign in)\b", raw_body, flags=re.IGNORECASE):
-            sentences.append(
-                _ensure_sentence_ending("It includes a login link to save your response")
-            )
-        summary = _compact_text(" ".join(sentences))
-        if summary:
-            return summary[:SUMMARY_MAX_CHARS]
 
     if multi_item_digest:
         digest_summary = _digest_overview_summary(
@@ -3151,7 +3271,7 @@ def _bulk_newsletter_summary(email_data):
         sentences = [_ensure_sentence_ending(f"{sender_name} sent a newsletter")]
         lead = numbered_sections[0]
         if lead and not _is_near_subject_copy(lead, title):
-            sentences.append(_ensure_sentence_ending(f"It highlights {lead}"))
+            sentences.append(_ensure_sentence_ending(f"It covers {lead}"))
         if len(numbered_sections) > 1:
             sentences.append(_ensure_sentence_ending(f"It also covers {numbered_sections[1]}"))
         summary = _compact_text(" ".join(sentences))
@@ -3649,12 +3769,12 @@ def _usable_summary_candidate(summary_text, email_data):
         return None
     digest_like_summary = bool(
         re.match(
-            r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|promotional update)\s+from\b",
+            r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|promotional update|job alert|activity update|reminder)\s+from\b",
             summary,
             flags=re.IGNORECASE,
         )
         or re.match(
-            r"^[a-z0-9 .&'_-]+\s+sent\s+(?:a|an)\s+(?:newsletter|news digest|question digest|article alert)\b",
+            r"^[a-z0-9 .&'_-]+\s+sent\s+(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|reminder)\b",
             summary,
             flags=re.IGNORECASE,
         )
@@ -3716,7 +3836,6 @@ def _summary_evidence_block(email_data, max_points=8):
             max_items=max(3, min(max_points, 8)),
             max_chars=220,
         )
-    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
     lines = [
         f"From: {sender}",
         f"Actionable: {'yes' if actionable else 'no'}",
@@ -3729,8 +3848,6 @@ def _summary_evidence_block(email_data, max_points=8):
         lines.extend(f"- {point}" for point in evidence_points)
     else:
         lines.append("- (none)")
-    if image_context:
-        lines.append(f"Image evidence: {_truncate_compact_text(image_context, max_chars=220)}")
     return "\n".join(lines)
 
 
@@ -4301,6 +4418,8 @@ def _rewrite_summary_for_second_person(summary_text):
     replacements = (
         (r"\byou(?:'re| are)\b", "the recipient is"),
         (r"\byou(?:'ve| have)\b", "the recipient has"),
+        (r"\byou'd\b", "the recipient had"),
+        (r"\byou'll\b", "the recipient will"),
         (r"\bthe user\b", "the recipient"),
         (r"\bthis user\b", "the recipient"),
         (r"\buser's\b", "the recipient's"),
@@ -4359,8 +4478,21 @@ def _summary_source_intro(email_data):
             if part
         )
     ).lower()
+    junk_assessment = _junk_signal_assessment(email_data)
+    if (
+        junk_assessment.get("commercial_promotion")
+        and not junk_assessment.get("editorial_like")
+        and not junk_assessment.get("transactional_like")
+    ):
+        return f"A promotional update from {sender_name}"
     if _extract_digest_questions(raw_body, max_questions=1):
         return f"A question digest from {sender_name}"
+    if _job_alert_summary(email_data):
+        return f"A job alert from {sender_name}"
+    if _activity_notification_summary(email_data):
+        return f"An activity update from {sender_name}"
+    if _prompt_reminder_summary(email_data):
+        return f"A reminder from {sender_name}"
     if _looks_single_article_alert(email_data):
         return f"An article alert from {sender_name}"
     if _looks_multi_item_digest(raw_body, key_sentences) or any(
@@ -4374,22 +4506,203 @@ def _summary_source_intro(email_data):
     return f"A promotional update from {sender_name}"
 
 
-def _finalize_summary_text(summary_text, email_data):
-    """Polish summary wording so the UI lead reads naturally."""
-    summary = _rewrite_summary_for_second_person(summary_text)
+def _summary_sentence_kind(sentence_text):
+    """Return a coarse summary type so generic scaffolds can be rewritten centrally."""
+    lowered = _compact_text(sentence_text).lower()
+    if not lowered:
+        return "generic"
+    checks = (
+        ("promotional", r"^(?:a|an)\s+promotional update from\b"),
+        ("news_digest", r"^(?:a|an)\s+news digest from\b"),
+        ("question_digest", r"^(?:a|an)\s+question digest from\b"),
+        ("newsletter", r"^(?:a|an)\s+newsletter from\b"),
+        ("article_alert", r"^(?:a|an)\s+article alert from\b"),
+        ("job_alert", r"^(?:a|an)\s+job alert from\b"),
+        ("activity_update", r"^(?:a|an)\s+activity update from\b"),
+        ("reminder", r"^(?:a|an)\s+reminder from\b"),
+    )
+    for kind, pattern in checks:
+        if re.match(pattern, lowered):
+            return kind
+    if re.match(r"^[a-z0-9 .&'_-]+\s+sent\s+a\s+news digest\b", lowered):
+        return "news_digest"
+    if re.match(r"^[a-z0-9 .&'_-]+\s+sent\s+a\s+question digest\b", lowered):
+        return "question_digest"
+    if re.match(r"^[a-z0-9 .&'_-]+\s+sent\s+a\s+newsletter\b", lowered):
+        return "newsletter"
+    if re.match(r"^[a-z0-9 .&'_-]+\s+sent\s+a\s+reminder\b", lowered):
+        return "reminder"
+    return "generic"
+
+
+def _summary_sentence_text(sentence_text):
+    """Normalize a sentence fragment into sentence case with trailing punctuation."""
+    text = _compact_text(sentence_text).strip(" -:;,.")
+    if not text:
+        return ""
+    if text[0].islower():
+        text = text[0].upper() + text[1:]
+    return _ensure_sentence_ending(text)
+
+
+def _prompt_sentence_rewrite(detail_text):
+    """Rewrite prompt-style detail lines into neutral phrasing."""
+    detail = _compact_text(detail_text).strip(" -:;,.")
+    if not detail:
+        return ""
+    if re.match(
+        r"^(?:describe|share|write|tell|record|reflect|remember|explain|list|talk about|consider|recount)\b",
+        detail,
+        flags=re.IGNORECASE,
+    ):
+        return f"The prompt asks the recipient to {detail}"
+    return f"The prompt focuses on {detail}"
+
+
+def _naturalize_summary_scaffolding(summary_text):
+    """Rewrite repetitive summary scaffolds into more natural shared phrasing."""
+    summary = _compact_text(summary_text)
     if not summary:
         return ""
 
-    summary = re.sub(r"^It also\b", "It", summary, flags=re.IGNORECASE)
-    summary = re.sub(r"^Also,\s*", "", summary, flags=re.IGNORECASE)
-    summary = re.sub(r"^Also\b\s*", "", summary, flags=re.IGNORECASE)
-    if summary and summary[0].islower():
-        summary = summary[0].upper() + summary[1:]
+    sentences = [
+        _compact_text(part).strip(" -:;,.")
+        for part in re.split(r"(?<=[.!?])\s+", summary)
+        if _compact_text(part)
+    ]
+    if not sentences:
+        return summary
 
+    intro_patterns = (
+        (r"^(.+?)\s+sent\s+a\s+news digest$", "news_digest", lambda sender: f"A news digest from {sender}"),
+        (r"^(.+?)\s+sent\s+a\s+question digest$", "question_digest", lambda sender: f"A question digest from {sender}"),
+        (r"^(.+?)\s+sent\s+a\s+newsletter$", "newsletter", lambda sender: f"A newsletter from {sender}"),
+        (r"^(.+?)\s+sent\s+a\s+reminder$", "reminder", lambda sender: f"A reminder from {sender}"),
+    )
+    summary_kind = _summary_sentence_kind(sentences[0])
+    for pattern, kind, builder in intro_patterns:
+        match = re.match(pattern, sentences[0], flags=re.IGNORECASE)
+        if not match:
+            continue
+        sentences[0] = builder(_compact_text(match.group(1)))
+        summary_kind = kind
+        break
+
+    rewritten = []
+    for index, raw_sentence in enumerate(sentences):
+        sentence = re.sub(r"^It also\b", "It", raw_sentence, flags=re.IGNORECASE)
+        if index == 0:
+            rewritten.append(_summary_sentence_text(sentence))
+            continue
+
+        match = re.match(r"^(?:The email|The sender)\s+notes that\s+(.+)$", sentence, flags=re.IGNORECASE)
+        if match:
+            rewritten.append(_summary_sentence_text(match.group(1)))
+            continue
+
+        sentence = re.sub(r"^The email reminds\b", "It reminds", sentence, flags=re.IGNORECASE)
+        sentence = re.sub(r"^The email asks for\b", "It asks for", sentence, flags=re.IGNORECASE)
+        sentence = re.sub(r"^The email asks whether\b", "It asks whether", sentence, flags=re.IGNORECASE)
+
+        if summary_kind == "news_digest":
+            for pattern, replacement in (
+                (r"^It covers (.+)$", r"Topics include \1"),
+                (r"^It mentions (.+)$", r"Topics include \1"),
+                (r"^It includes (.+)$", r"Topics include \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+        elif summary_kind == "question_digest":
+            for pattern, replacement in (
+                (r"^It features questions? about (.+)$", r"Featured questions include \1"),
+                (r"^It covers (.+)$", r"Featured questions include \1"),
+                (r"^It mentions (.+)$", r"Featured questions include \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+        elif summary_kind == "newsletter":
+            for pattern, replacement in (
+                (r"^It covers (.+)$", r"Featured items include \1"),
+                (r"^It mentions (.+)$", r"Featured items include \1"),
+                (r"^It includes (.+)$", r"Featured items include \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+        elif summary_kind == "article_alert":
+            for pattern, replacement in (
+                (r"^It covers (.+)$", r"The article focuses on \1"),
+                (r"^It mentions (.+)$", r"The article focuses on \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+        elif summary_kind == "job_alert":
+            for pattern, replacement in (
+                (r"^It mentions (.+)$", r"It lists \1"),
+                (r"^It covers jobs for (.+)$", r"It lists jobs for \1"),
+                (r"^It includes (.+)$", r"The first listing is \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+        elif summary_kind == "activity_update":
+            sentence = re.sub(r"^It says there (?:is|are)\s+(.+)$", r"It reports \1", sentence, flags=re.IGNORECASE)
+            sentence = re.sub(
+                r"^It mentions recent likes, comments, or follows$",
+                "It reports recent likes, comments, or follows",
+                sentence,
+                flags=re.IGNORECASE,
+            )
+        elif summary_kind == "reminder":
+            prompt_match = re.match(
+                r"^(?:The email|It)\s+includes a prompt to\s+(.+)$",
+                sentence,
+                flags=re.IGNORECASE,
+            )
+            if prompt_match:
+                sentence = _prompt_sentence_rewrite(prompt_match.group(1))
+            else:
+                prompt_match = re.match(
+                    r"^(?:The email|It)\s+includes a prompt about\s+(.+)$",
+                    sentence,
+                    flags=re.IGNORECASE,
+                )
+                if prompt_match:
+                    sentence = _prompt_sentence_rewrite(prompt_match.group(1))
+            sentence = re.sub(
+                r"^It mentions a (.+survey)$",
+                r"It references a \1",
+                sentence,
+                flags=re.IGNORECASE,
+            )
+            sentence = re.sub(
+                r"^It includes a login link to save the response$",
+                "It provides a login link to save the response",
+                sentence,
+                flags=re.IGNORECASE,
+            )
+        elif summary_kind == "promotional":
+            for pattern, replacement in (
+                (r"^It mentions (.+)$", r"Key details include \1"),
+                (r"^It includes (.+)$", r"Key details include \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+        else:
+            for pattern, replacement in (
+                (r"^It covers (.+)$", r"The message discusses \1"),
+                (r"^It mentions (.+)$", r"Key details include \1"),
+                (r"^It includes (.+)$", r"Key details include \1"),
+                (r"^It notes (.+)$", r"Key details include \1"),
+            ):
+                sentence = re.sub(pattern, replacement, sentence, flags=re.IGNORECASE)
+
+        rewritten.append(_summary_sentence_text(sentence))
+
+    return _compact_text(" ".join(rewritten))
+
+
+def _add_summary_source_intro(summary_text, email_data):
+    """Attach a source intro when a summary would otherwise start too generically."""
+    summary = _compact_text(summary_text)
+    if not summary:
+        return ""
     first_sentence = _compact_text(re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0])
     lowered_first = first_sentence.lower()
     if re.match(
-        r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|promotional update)\s+from\b",
+        r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|promotional update|job alert|activity update|reminder)\s+from\b",
         lowered_first,
     ):
         return summary
@@ -4408,6 +4721,22 @@ def _finalize_summary_text(summary_text, email_data):
         if intro:
             return f"{intro}. {summary}"
     return summary
+
+
+def _finalize_summary_text(summary_text, email_data):
+    """Polish summary wording so the UI lead reads naturally."""
+    summary = _rewrite_summary_for_second_person(summary_text)
+    if not summary:
+        return ""
+
+    summary = re.sub(r"^It also\b", "It", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"^Also,\s*", "", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"^Also\b\s*", "", summary, flags=re.IGNORECASE)
+    if summary and summary[0].islower():
+        summary = summary[0].upper() + summary[1:]
+
+    summary = _add_summary_source_intro(summary, email_data)
+    return _naturalize_summary_scaffolding(summary)
 
 
 def _uses_second_person(text):
@@ -4475,9 +4804,6 @@ def _normalized_email_for_classification(email_data):
         "recipients": _normalized_header_text(email_data.get("recipients")),
         "cc": _normalized_header_text(email_data.get("cc")),
         "body": _clean_body_for_prompt(email_data),
-        "ai_image_context": _normalized_ai_image_context_text(
-            email_data.get("ai_image_context")
-        ),
     }
 
 
@@ -4495,7 +4821,6 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
         max_chars=body_max_chars,
         max_sentences=body_max_sentences,
     )
-    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
     ai_category = _compact_text(email_data.get("ai_category"))
     ai_type = _compact_text(email_data.get("type"))
     ai_hint = ""
@@ -4505,7 +4830,6 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
             f"- category: {ai_category or '(unknown)'}\n"
             f"- mailbox type: {ai_type or '(unknown)'}"
         )
-    image_hint = f"\nImage context:\n{image_context}" if image_context else ""
     return (
         (f"{owner_context}\n" if owner_context else "")
         +
@@ -4513,7 +4837,7 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
         f"From: {sender}\n"
         f"To: {recipients}\n"
         f"Cc: {cc}\n"
-        f"Body excerpts:\n{body}{image_hint}{ai_hint}"
+        f"Body excerpts:\n{body}{ai_hint}"
     )
 
 
@@ -4672,10 +4996,11 @@ def _looks_bulk_or_newsletter(email_data):
     """Looks bulk or newsletter.
     """
     # Keep this rule in one place so behavior stays consistent.
-    sender = _sender_address(email_data.get("sender"))
+    sender_info = _sender_parts(email_data.get("sender"))
+    sender = sender_info.get("email", "")
     body = _email_body_text(email_data).lower()
-    title = str(email_data.get("title") or "").lower()
-    combined = " ".join([sender, title, body])
+    title = _normalized_header_text(email_data.get("title") or "").lower()
+    combined = " ".join(part for part in [sender, title, body] if part)
 
     sender_markers = (
         "no-reply",
@@ -4732,6 +5057,10 @@ def _looks_bulk_or_newsletter(email_data):
         _has_any_pattern(combined, sender_markers)
         or _has_any_pattern(combined, content_markers)
         or len(promotion_hits) >= 2
+        or (
+            _looks_marketing_promo_title(title)
+            and not _sender_uses_personal_domain(sender_info)
+        )
     )
 
 
@@ -4868,12 +5197,17 @@ def _junk_signal_assessment(email_data):
     body_text = _clean_body_for_prompt(email_data)
     combined_text = " ".join(
         part
-        for part in [sender_info.get("identity"), title_text.lower(), body_text.lower()]
+        for part in [
+            sender_info.get("identity"),
+            title_text.lower(),
+            body_text.lower(),
+        ]
         if part
     )
     bulk_signal = _looks_bulk_or_newsletter(email_data)
     sender_automated = _sender_looks_automated(sender_info)
     sender_personal_domain = _sender_uses_personal_domain(sender_info)
+    title_promotion = _looks_marketing_promo_title(title_text)
     transactional_hits = _matching_patterns(combined_text, TRANSACTIONAL_HAM_MARKERS)
     family_hits = {
         "strong_terms": _matching_patterns(combined_text, JUNK_STRONG_MARKERS),
@@ -4883,6 +5217,7 @@ def _junk_signal_assessment(email_data):
         "account_bait": _matching_patterns(combined_text, JUNK_ACCOUNT_BAIT_MARKERS),
         "bulk_footer": _matching_patterns(combined_text, JUNK_BULK_FOOTER_MARKERS),
         "leadgen": _matching_patterns(combined_text, JUNK_LEADGEN_MARKERS),
+        "promotion_title": ["marketing_title"] if title_promotion else [],
     }
     url_count = len(re.findall(r"(?:https?://|www\.)", body_text.lower()))
     exclamation_count = f"{title_text} {body_text}".count("!")
@@ -4902,6 +5237,8 @@ def _junk_signal_assessment(email_data):
     if family_hits["bulk_footer"]:
         score += 1
     if family_hits["leadgen"]:
+        score += 2
+    if family_hits["promotion_title"]:
         score += 2
     if sender_automated:
         score += 1
@@ -4925,16 +5262,28 @@ def _junk_signal_assessment(email_data):
         sender_automated=sender_automated,
         transactional_like=transactional_like,
     )
+    commercial_promotion = promotion_assessment.get("commercial") or (
+        not transactional_like
+        and not promotion_assessment.get("editorial_like")
+        and title_promotion
+        and (bulk_signal or sender_automated)
+    )
     family_hits["commercial_promotion"] = (
         promotion_assessment.get("matched_terms", [])
-        if promotion_assessment.get("commercial")
+        if commercial_promotion
         else []
     )
+    if (
+        commercial_promotion
+        and not family_hits["commercial_promotion"]
+        and family_hits["promotion_title"]
+    ):
+        family_hits["commercial_promotion"] = list(family_hits["promotion_title"])
     if transactional_like:
         score -= 2
     if sender_personal_domain:
         score -= 1
-    if promotion_assessment.get("commercial"):
+    if commercial_promotion:
         score += 2
     score = max(0, score)
 
@@ -4954,7 +5303,7 @@ def _junk_signal_assessment(email_data):
     soft = (
         not strong
         and (
-            promotion_assessment.get("commercial")
+            commercial_promotion
             or (
                 score >= 3
                 and (
@@ -4963,6 +5312,7 @@ def _junk_signal_assessment(email_data):
                     or family_hits["urgency_pressure"]
                     or family_hits["account_bait"]
                     or family_hits["leadgen"]
+                    or family_hits["promotion_title"]
                 )
             )
         )
@@ -4978,7 +5328,7 @@ def _junk_signal_assessment(email_data):
         "sender_automated": sender_automated,
         "sender_personal_domain": sender_personal_domain,
         "transactional_like": transactional_like,
-        "commercial_promotion": promotion_assessment.get("commercial", False),
+        "commercial_promotion": commercial_promotion,
         "editorial_like": promotion_assessment.get("editorial_like", False),
         "url_count": url_count,
     }
@@ -5014,6 +5364,17 @@ def _prefer_junk_uncertain_for_commercial_promotion(junk_assessment):
     return bool(junk_assessment.get("bulk_signal") or "promotion_cta" in families)
 
 
+def _with_commercial_promotion_guardrail(result, junk_assessment):
+    """Attach a merge guardrail when heuristics identify commercial promo mail."""
+    if not junk_assessment.get("commercial_promotion"):
+        return result
+    if junk_assessment.get("editorial_like") or junk_assessment.get("transactional_like"):
+        return result
+    guarded = dict(result)
+    guarded["guardrail_reason"] = "commercial_promotion"
+    return guarded
+
+
 def _heuristic_classification(email_data):
     """Heuristic classification.
     """
@@ -5029,29 +5390,29 @@ def _heuristic_classification(email_data):
     )
     if junk_signal == "strong":
         if promotion_prefers_uncertain:
-            return {
+            return _with_commercial_promotion_guardrail({
                 "category": "junk",
                 "needs_response": False,
                 "priority": 1,
                 "confidence": 0.74,
                 "email_type": "junk-uncertain",
-            }
-        return {
+            }, junk_assessment)
+        return _with_commercial_promotion_guardrail({
             "category": "junk",
             "needs_response": False,
             "priority": 1,
             "confidence": 0.92,
             "email_type": "junk",
-        }
+        }, junk_assessment)
 
     if junk_signal == "soft":
-        return {
+        return _with_commercial_promotion_guardrail({
             "category": "junk",
             "needs_response": False,
             "priority": 1,
             "confidence": 0.68,
             "email_type": "junk-uncertain",
-        }
+        }, junk_assessment)
 
     if (
         bulk_signal
@@ -5060,13 +5421,13 @@ def _heuristic_classification(email_data):
         and not junk_assessment.get("editorial_like")
         and not junk_assessment.get("transactional_like")
     ):
-        return {
+        return _with_commercial_promotion_guardrail({
             "category": "junk",
             "needs_response": False,
             "priority": 1,
             "confidence": 0.61,
             "email_type": "junk-uncertain",
-        }
+        }, junk_assessment)
 
     if bulk_signal and not actionable:
         return {
@@ -5107,6 +5468,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
     except (TypeError, ValueError):
         model_confidence = 0.0
     heuristic_type = heuristic_classification.get("email_type")
+    heuristic_guardrail = heuristic_classification.get("guardrail_reason") == "commercial_promotion"
 
     # Nudge uncertain model outputs toward safer mailbox behavior.
     if heuristic_type == "read-only":
@@ -5115,6 +5477,10 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
             merged["needs_response"] = False
             merged["priority"] = min(int(merged.get("priority") or 1), 1)
             merged["email_type"] = "read-only"
+
+    if heuristic_guardrail and str(merged.get("category") or "").strip().lower() != "junk":
+        merged = dict(heuristic_classification)
+        model_confidence = float(merged.get("confidence") or 0.0)
 
     if heuristic_type == "junk-uncertain":
         model_is_junk = str(merged.get("category") or "").strip().lower() == "junk"
@@ -5340,7 +5706,6 @@ def classify_email(email_data, email_id=None):
     """Classify email.
     """
     # Normalize to the fixed labels used by mailbox triage.
-    email_data = _ensure_email_image_context(email_data)
     normalized_email = _normalized_email_for_classification(email_data)
     body = (normalized_email.get("body") or "").strip()
     title = (normalized_email.get("title") or "").strip()
@@ -5360,7 +5725,6 @@ def classify_email(email_data, email_id=None):
         "confidence must be a float 0 to 1. "
         "Weighted evidence order: body intent is highest, sender identity/domain is second highest, "
         "subject is third. "
-        "If image context is present, treat it as part of the email evidence, but do not invent details beyond it. "
         "If body and sender conflict weakly, give sender extra weight unless body has a direct response request. "
         "Infer whether the sender appears to be a brand/company/news source or an individual from sender "
         "name/domain using your general knowledge and context in this email. "
@@ -5429,34 +5793,28 @@ def summarize_email(email_data, email_id=None):
     """Summarize email.
     """
     # Translate between API payloads and our local mailbox shape.
-    email_data = _ensure_email_image_context(email_data)
     if not should_summarize_email(email_data):
         return None
-    deterministic_bulk_summary = _bulk_newsletter_summary(email_data)
-    usable_deterministic_summary = _usable_summary_candidate(
-        deterministic_bulk_summary,
-        email_data,
-    )
-    if usable_deterministic_summary:
-        return usable_deterministic_summary
     profile = _summary_profile(email_data)
     title = _normalized_header_text(email_data.get("title") or "")
     structured_summary = _should_use_structured_summary(email_data)
-    fallback_source = (
-        _structured_summary_fallback(email_data)
-        if structured_summary
-        else _extractive_summary_fallback(email_data)
+    extractive_fallback = _extractive_summary_fallback(email_data)
+    structured_fallback = _structured_summary_fallback(email_data) if structured_summary else None
+    fallback_candidates = (
+        [extractive_fallback, structured_fallback]
+        if _looks_bulk_or_newsletter(email_data)
+        else [structured_fallback, extractive_fallback]
     )
-    fallback_summary = _finalize_summary_text(fallback_source, email_data) or None
-    if fallback_summary:
-        if _looks_bulk_or_newsletter(email_data):
-            return fallback_summary
-        if (
-            not _looks_actionable(email_data)
-            and profile["output_sentences"] <= 4
-            and not _looks_generic_posture_summary(fallback_summary)
-        ):
-            return fallback_summary
+    fallback_summary = None
+    for candidate in fallback_candidates:
+        finalized_candidate = _finalize_summary_text(candidate, email_data) or None
+        if not finalized_candidate:
+            continue
+        if not fallback_summary:
+            fallback_summary = finalized_candidate
+        if not _looks_generic_posture_summary(finalized_candidate):
+            fallback_summary = finalized_candidate
+            break
 
     # Keep prompts tightly constrained, then post-filter for grounding/paraphrase quality.
     system_prompt = (
@@ -5473,10 +5831,12 @@ def summarize_email(email_data, email_id=None):
         "Do not mimic the subject line and then paste the first paragraph. "
         "Treat the subject line as supplemental context only; do not quote, paraphrase, or summarize it. "
         "Do not add subscription/sign-up suggestions unless explicitly requested in the email. "
+        "Do not use stock lead-ins such as 'It includes', 'It mentions', 'It covers', "
+        "'The email notes that', or category labels like 'activity update' unless the email explicitly behaves that way. "
         "Use declarative statements only (no questions). "
+        "Prefer one natural paragraph that reads like an original human summary, not a template. "
         "Synthesize themes instead of retelling sentences in source order. "
         "Capture: main topic, concrete details, and any requested action or deadline. "
-        "If image context is present, use it as supporting evidence from the email visuals. "
         "When the email contains multiple sections, features, or story items, mention each major section explicitly in one compact paragraph. "
         + "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
         + "privacy/cookie/legal notices, and utility links unless they are the main request. "
@@ -5505,7 +5865,7 @@ def summarize_email(email_data, email_id=None):
             {"role": "user", "content": user_prompt},
         ],
         email_id=email_id,
-        temperature=0.0,
+        temperature=0.15,
         num_predict=profile["num_predict"],
     )
     # Prefer deterministic fallback whenever model output is missing or unusable.
@@ -5620,8 +5980,7 @@ def _reply_plan_source_text(email_data, max_chars=3200):
     """Return compact source text for reply-plan grounding checks."""
     title = _normalized_header_text(email_data.get("title") or "(No subject)")
     body = _clean_body_for_prompt(email_data, max_chars=max_chars)
-    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
-    combined = "\n".join(part for part in (title, body, image_context) if _compact_text(part))
+    combined = "\n".join(part for part in (title, body) if _compact_text(part))
     return _compact_text(combined)
 
 
@@ -5722,9 +6081,6 @@ def _heuristic_reply_plan(email_data):
         if request_sentence and _token_overlap_ratio(detail, request_sentence) > 0.9:
             continue
         details.append(detail)
-    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
-    if image_context:
-        details.append(f"Image context: {_truncate_compact_text(image_context, max_chars=180)}")
     details = _dedupe_text_items(details, max_items=4, max_chars=180)
 
     response_mode = "acknowledge_only"
@@ -5828,8 +6184,7 @@ def _extract_reply_plan(email_data, email_id=None):
 
     heuristic_plan = _heuristic_reply_plan(email_data)
     body = _clean_body_for_prompt(email_data, max_chars=2600)
-    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
-    if not body and not image_context:
+    if not body:
         if isinstance(email_data, dict):
             email_data["_reply_plan_cache"] = heuristic_plan
         return heuristic_plan
@@ -5840,7 +6195,6 @@ def _extract_reply_plan(email_data, email_id=None):
         f"To: {_normalized_header_text(email_data.get('recipients') or '')}\n"
         f"Cc: {_normalized_header_text(email_data.get('cc') or '')}\n"
         f"Body:\n{body}"
-        + (f"\nImage context:\n{image_context}" if image_context else "")
     )
     system_prompt = (
         "You extract compact reply plans from emails. "
@@ -6616,11 +6970,9 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     """Draft reply.
     """
     # Generate, revise, or validate draft reply used by reply and draft workflows.
-    email_data = _ensure_email_image_context(email_data)
     body = _email_body_text(email_data).strip()
-    image_context = _normalized_ai_image_context_text(email_data.get("ai_image_context"))
     title = _compact_text(email_data.get("title") or "(No subject)")
-    if not body and not title and not image_context:
+    if not body and not title:
         return None
     reply_plan = _extract_reply_plan(email_data, email_id=email_id)
 
@@ -6711,7 +7063,6 @@ def revise_reply(
     """Revise reply.
     """
     # Generate, revise, or validate revise reply used by reply and draft workflows.
-    email_data = _ensure_email_image_context(email_data)
     current_draft_text = str(current_draft_text or "").strip()
     if not current_draft_text:
         return None
@@ -6915,11 +7266,11 @@ def summary_looks_unusable(email_data):
         return True
     allowed_parrot_intro = raw_summary.lower().startswith("a promotional update from ")
     if re.match(
-        r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert)\s+from\b",
+        r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|job alert|activity update|reminder)\s+from\b",
         raw_summary,
         flags=re.IGNORECASE,
     ) or re.match(
-        r"^[a-z0-9 .&'_-]+\s+sent\s+(?:a|an)\s+(?:newsletter|news digest|question digest|article alert)\b",
+        r"^[a-z0-9 .&'_-]+\s+sent\s+(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|reminder)\b",
         raw_summary,
         flags=re.IGNORECASE,
     ):
@@ -6939,7 +7290,7 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
         return False
     if bool(email_data.get("is_archived")):
         return False
-    if not _email_body_text(email_data).strip() and not _email_has_possible_image_context(email_data):
+    if not _email_body_text(email_data).strip():
         return False
 
     # Trigger when either triage fields or long-email summary is missing.
@@ -6957,7 +7308,6 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
 
 def run_ai_analysis(email_data, force=False):
     """Run classification + summary, then save updated fields."""
-    email_data = _ensure_email_image_context(email_data, force=force)
     changed = False
     missing_classification = (
         not str(email_data.get("ai_category") or "").strip()

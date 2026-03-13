@@ -70,10 +70,7 @@ SELECT
     m.is_archived,
     m.ai_category,
     m.ai_needs_response,
-    m.ai_confidence,
-    m.ai_image_context,
-    m.ai_image_context_status,
-    m.ai_image_context_updated_at
+    m.ai_confidence
 FROM email_messages m
 """
 
@@ -169,6 +166,9 @@ def _apply_schema_migrations(conn):
         or "provider_draft_id" not in columns
         or "'sent'" not in definition_sql
         or "'draft'" not in definition_sql
+        or "ai_image_context" in columns
+        or "ai_image_context_status" in columns
+        or "ai_image_context_updated_at" in columns
     )
 
     # Rebuild when old schemas are missing columns/check constraints that ALTER TABLE cannot fix safely.
@@ -200,28 +200,6 @@ def _apply_schema_migrations(conn):
             """
             ALTER TABLE email_messages
             ADD COLUMN ai_confidence REAL
-            """
-        )
-    if "ai_image_context" not in columns_after:
-        conn.execute(
-            """
-            ALTER TABLE email_messages
-            ADD COLUMN ai_image_context TEXT
-            """
-        )
-    if "ai_image_context_status" not in columns_after:
-        conn.execute(
-            """
-            ALTER TABLE email_messages
-            ADD COLUMN ai_image_context_status TEXT
-              CHECK (ai_image_context_status IN ('ready','skipped','error'))
-            """
-        )
-    if "ai_image_context_updated_at" not in columns_after:
-        conn.execute(
-            """
-            ALTER TABLE email_messages
-            ADD COLUMN ai_image_context_updated_at TEXT
             """
         )
     if "is_archived" not in columns_after:
@@ -306,19 +284,6 @@ def _rebuild_email_tables(conn, existing_columns):
     ai_confidence_expr = (
         "ai_confidence" if "ai_confidence" in existing_columns else "NULL"
     )
-    ai_image_context_expr = (
-        "ai_image_context" if "ai_image_context" in existing_columns else "NULL"
-    )
-    ai_image_context_status_expr = (
-        "ai_image_context_status"
-        if "ai_image_context_status" in existing_columns
-        else "NULL"
-    )
-    ai_image_context_updated_at_expr = (
-        "ai_image_context_updated_at"
-        if "ai_image_context_updated_at" in existing_columns
-        else "NULL"
-    )
     is_archived_expr = "is_archived" if "is_archived" in existing_columns else "0"
 
     # Temporarily disable FK checks while tables are renamed/recreated in place.
@@ -352,11 +317,7 @@ def _rebuild_email_tables(conn, existing_columns):
             CHECK (ai_category IN ('urgent','informational','junk')),
           ai_needs_response INTEGER
             CHECK (ai_needs_response IN (0,1)),
-          ai_confidence REAL,
-          ai_image_context TEXT,
-          ai_image_context_status TEXT
-            CHECK (ai_image_context_status IN ('ready','skipped','error')),
-          ai_image_context_updated_at TEXT
+          ai_confidence REAL
         );
         """
     )
@@ -367,8 +328,7 @@ def _rebuild_email_tables(conn, existing_columns):
         INSERT INTO email_messages (
             id, external_id, provider_draft_id, thread_id, title, sender, body, body_html,
             type, priority, is_read, received_at, summary, draft, is_archived,
-            ai_category, ai_needs_response, ai_confidence,
-            ai_image_context, ai_image_context_status, ai_image_context_updated_at
+            ai_category, ai_needs_response, ai_confidence
         )
         SELECT
             id,
@@ -392,10 +352,7 @@ def _rebuild_email_tables(conn, existing_columns):
             {is_archived_expr},
             {ai_category_expr},
             {ai_needs_response_expr},
-            {ai_confidence_expr},
-            {ai_image_context_expr},
-            {ai_image_context_status_expr},
-            {ai_image_context_updated_at_expr}
+            {ai_confidence_expr}
         FROM email_messages_old
         """
     )
@@ -463,10 +420,6 @@ def _row_to_dict(row):
         data["ai_confidence"] = float(data["ai_confidence"])
     if "summary" in data and data["summary"] is not None:
         data["summary"] = " ".join(repair_body_text(data["summary"], None).split()).strip()
-    if "ai_image_context_status" in data and data["ai_image_context_status"] is not None:
-        data["ai_image_context_status"] = _normalize_ai_image_context_status(
-            data["ai_image_context_status"]
-        )
     if "title" not in data and "subject" in data:
         data["title"] = data["subject"]
     if "received_at" in data and "date" not in data:
@@ -606,19 +559,6 @@ def _normalize_ai_confidence(value):
     except (TypeError, ValueError):
         return None
     return max(0.0, min(1.0, confidence))
-
-
-def _normalize_ai_image_context_status(value):
-    """Normalize ai image context status.
-    """
-    if value is None:
-        return None
-    lowered = str(value).strip().lower()
-    if lowered in {"ready", "skipped", "error"}:
-        return lowered
-    return None
-
-
 def _normalize_archived_flag(value):
     """Normalize archived flag.
     """
@@ -885,10 +825,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                 is_archived,
                 ai_category,
                 ai_needs_response,
-                ai_confidence,
-                ai_image_context,
-                ai_image_context_status,
-                ai_image_context_updated_at
+                ai_confidence
             FROM email_messages
             WHERE external_id = ?
             """,
@@ -910,10 +847,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_archived,
                     ai_category,
                     ai_needs_response,
-                    ai_confidence,
-                    ai_image_context,
-                    ai_image_context_status,
-                    ai_image_context_updated_at
+                    ai_confidence
                 FROM email_messages
                 WHERE provider_draft_id = ?
                 """,
@@ -940,17 +874,6 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             is_archived_value = normalized["is_archived"]
             if is_archived_value is None:
                 is_archived_value = existing["is_archived"]
-            content_changed = (
-                str(existing["body"] or "") != str(normalized["body"] or "")
-                or str(existing["body_html"] or "") != str(body_html_value or "")
-            )
-            ai_image_context_value = existing["ai_image_context"]
-            ai_image_context_status_value = existing["ai_image_context_status"]
-            ai_image_context_updated_at_value = existing["ai_image_context_updated_at"]
-            if content_changed:
-                ai_image_context_value = None
-                ai_image_context_status_value = None
-                ai_image_context_updated_at_value = None
             existing_priority = existing["priority"]
             priority_value = (
                 int(existing_priority)
@@ -982,10 +905,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_archived = ?,
                     ai_category = ?,
                     ai_needs_response = ?,
-                    ai_confidence = ?,
-                    ai_image_context = ?,
-                    ai_image_context_status = ?,
-                    ai_image_context_updated_at = ?
+                    ai_confidence = ?
                 WHERE id = ?
                 """,
                 (
@@ -1005,9 +925,6 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     ai_category_value,
                     ai_needs_response_value,
                     ai_confidence_value,
-                    ai_image_context_value,
-                    ai_image_context_status_value,
-                    ai_image_context_updated_at_value,
                     existing["id"],
                 ),
             )
@@ -1033,12 +950,9 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     is_archived,
                     ai_category,
                     ai_needs_response,
-                    ai_confidence,
-                    ai_image_context,
-                    ai_image_context_status,
-                    ai_image_context_updated_at
+                    ai_confidence
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     external_id,
@@ -1058,9 +972,6 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
                     normalized["ai_category"],
                     normalized["ai_needs_response"],
                     normalized["ai_confidence"],
-                    None,
-                    None,
-                    None,
                 ),
             )
             email_id = cur.lastrowid
@@ -1266,8 +1177,6 @@ def update_email_ai_fields(
     ai_category=None,
     ai_needs_response=None,
     ai_confidence=None,
-    ai_image_context=None,
-    ai_image_context_status=None,
     lock_existing_classification=True,
     db_path=DB_DEFAULT,
 ):
@@ -1331,22 +1240,6 @@ def update_email_ai_fields(
                 raise ValueError("Invalid AI confidence value.")
             assignments.append("ai_confidence = ?")
             params.append(normalized_confidence)
-
-        if ai_image_context is not None:
-            assignments.append("ai_image_context = ?")
-            params.append(str(ai_image_context).strip() or None)
-            assignments.append("ai_image_context_updated_at = CURRENT_TIMESTAMP")
-
-        if ai_image_context_status is not None:
-            normalized_image_status = _normalize_ai_image_context_status(
-                ai_image_context_status
-            )
-            if normalized_image_status is None:
-                raise ValueError("Invalid AI image context status.")
-            assignments.append("ai_image_context_status = ?")
-            params.append(normalized_image_status)
-            if ai_image_context is None:
-                assignments.append("ai_image_context_updated_at = CURRENT_TIMESTAMP")
 
         if not assignments:
             return

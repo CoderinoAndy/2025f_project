@@ -128,6 +128,16 @@ def _promo_offer_email():
     }
 
 
+def _image_promo_email():
+    return {
+        "sender": "Uber Eats <uber@uber.com>",
+        "title": "Score big with Lonzo's Kitchen today.",
+        "body": "GAME CHANGING DEALS",
+        "recipients": "",
+        "cc": "",
+    }
+
+
 def _retail_roundup_email():
     return {
         "sender": "TechMart <deals@retail.example>",
@@ -162,6 +172,42 @@ def _science_digest_with_marketing_word():
     }
 
 
+def _html_fragment_newsletter_email():
+    return {
+        "sender": "Morning Brew <crew@morningbrew.com>",
+        "title": "A very 'Dora' update",
+        "body": (
+            'TSA gets desperate amid partial shutdown...<a href="http://www.morningbrew.com">'
+            '<img src="https://cdn.example.com/story.gif" alt="" border="0" /></a>\n\n'
+            "March 13, 2026View Online | Sign Up | Shop\n"
+            "Morning Brew\n"
+            "Happy Friday the 13th.\n"
+            "Markets: Stocks fell sharply after attacks on two oil tankers.\n"
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
+def _sobeys_paralympic_email():
+    return {
+        "sender": "Sobeys <sobeys@em.sobeys.com>",
+        "title": "The excitement of the Paralympic Games continues!",
+        "body": (
+            "Cheer on Team Canada at the Paralympic Games!\n\n"
+            "Andy, Cheer on Team Canada at the Paralympic Games!\n\n"
+            "Discover member exclusive grocery offers and inspiration from Sobeys through the Feed The Dream campaign.\n\n"
+            "Team Canada's Paralympic athletes are currently competing, backed by the communities "
+            "and supporters who help Feed The Dream. Let's come together to celebrate their dedication "
+            "and cheer them on at the Milano-Cortina 2026 Paralympic Games.\n\n"
+            "My Grocery Offers | Flyer | Inspiration | Preferences\n\n"
+            "Terms & Conditions | Privacy Policy | Unsubscribe"
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
 class OllamaSummaryFormattingTests(unittest.TestCase):
     def test_multistory_digest_gets_digest_overview_summary(self):
         email = _digest_email()
@@ -179,7 +225,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertIn("question digest", summary.lower())
         self.assertNotIn("\n", summary)
-        self.assertIn("It highlights questions about", summary)
+        self.assertIn("It features questions about", summary)
 
     def test_retail_roundup_summary_uses_offer_phrases_without_digest_boilerplate(self):
         summary = ollama_client._bulk_newsletter_summary(_retail_roundup_email())
@@ -218,6 +264,13 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertIsNotNone(summary)
         self.assertIn("news digest", summary.lower())
+
+    def test_clean_body_for_prompt_strips_inline_html_fragments(self):
+        cleaned = ollama_client._clean_body_for_prompt(_html_fragment_newsletter_email(), max_chars=800)
+
+        self.assertNotIn("<a href", cleaned)
+        self.assertNotIn("src=", cleaned)
+        self.assertIn("TSA gets desperate amid partial shutdown", cleaned)
 
     def test_card_style_newsletter_extracts_multiple_item_titles(self):
         titles = ollama_client._extract_digest_item_titles(_ted_digest_email(), max_items=4)
@@ -267,8 +320,19 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertTrue(finalized.startswith("A promotional update from Walmart."))
         self.assertNotIn("It also mentions", finalized)
-        self.assertIn("It mentions benefits such as easy store pickup", finalized)
+        self.assertIn("Key details include benefits such as easy store pickup", finalized)
         self.assertIn("Offers are valid from March 6 to 12, 2026.", finalized)
+
+    def test_promo_summary_avoids_subject_copy_and_lazy_promo_lead(self):
+        summary = ollama_client._bulk_newsletter_summary(_image_promo_email())
+
+        self.assertIsNotNone(summary)
+        self.assertTrue(summary.startswith("A promotional update from Uber Eats."))
+        self.assertIn("Lonzo's Kitchen", summary)
+        self.assertIn("special deals", summary.lower())
+        self.assertNotIn("It includes", summary)
+        self.assertNotIn("Score big with", summary)
+        self.assertNotIn("today.", summary)
 
     def test_multiline_summary_is_not_marked_unusable_just_for_newlines(self):
         email = _digest_email()
@@ -356,7 +420,13 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             summary,
         )
 
-    @mock.patch("app.ollama_client._call_ollama", return_value=None)
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value=(
+            "Morning Briefing covers tariff worries in the markets, hospitals preparing for flu season, "
+            "and cities debating zoning changes after rent increases."
+        ),
+    )
     def test_summarize_email_uses_paragraph_prompt_for_digest_emails(self, mock_call):
         email = _digest_email()
 
@@ -364,12 +434,14 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertIn("news digest", summary.lower())
         self.assertNotIn("\n", summary)
-        mock_call.assert_not_called()
+        self.assertEqual(mock_call.call_count, 1)
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
     @mock.patch(
         "app.ollama_client._call_ollama",
-        return_value="- Markets fall after tariff threats.\n\n- Hospitals prepare for a rough flu season.",
+        return_value=(
+            "The digest highlights tariff-related market pressure and hospitals preparing for a rough flu season."
+        ),
     )
     def test_summarize_email_uses_structured_prompt_for_multi_item_newsletters(
         self,
@@ -382,8 +454,8 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertIsNotNone(summary)
         self.assertNotIn("\n", summary)
-        self.assertIn("news digest", summary.lower())
-        mock_call.assert_not_called()
+        self.assertIn("tariff", summary.lower())
+        self.assertEqual(mock_call.call_count, 1)
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
     @mock.patch(
@@ -543,6 +615,29 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "but retailers are preparing for a new normal in shopping.",
             summary,
         )
+
+    def test_activity_summary_does_not_trigger_for_promotional_campaign_newsletter(self):
+        self.assertIsNone(ollama_client._activity_notification_summary(_sobeys_paralympic_email()))
+
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value=(
+            "A promotional update from Sobeys. It encourages support for Team Canada's Paralympic athletes "
+            "at the Milano-Cortina 2026 Paralympic Games as part of the Feed the Dream campaign."
+        ),
+    )
+    def test_summarize_email_does_not_force_activity_template_for_campaign_promo(self, mock_call):
+        summary = ollama_client.summarize_email(
+            _sobeys_paralympic_email(),
+            email_id="sobeys-campaign-1",
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertIn("sobeys", summary.lower())
+        self.assertIn("feed the dream", summary.lower())
+        self.assertNotIn("activity update", summary.lower())
+        self.assertNotIn("likes, comments, or follows", summary.lower())
+        self.assertEqual(mock_call.call_count, 1)
 
 
 if __name__ == "__main__":

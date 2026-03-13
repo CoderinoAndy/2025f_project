@@ -5,6 +5,18 @@ from app import ollama_client
 from app.email_content import repair_body_text
 
 
+def _mock_vision_message(*_args, **_kwargs):
+    return {
+        "role": "user",
+        "content": (
+            "Sender and subject metadata:\n"
+            "- From: Manager <manager@example.com>\n"
+            "- Subject: Client meeting coverage"
+        ),
+        "images": ["fake-vision-image"],
+    }
+
+
 def _digest_email():
     return {
         "sender": "Morning Briefing <briefing@news-digest.example>",
@@ -208,7 +220,37 @@ def _sobeys_paralympic_email():
     }
 
 
+def _html_layout_email():
+    return {
+        "sender": "Retail Brand <offers@retail.example>",
+        "title": "Weekend offers",
+        "body": "Weekend offers with a hero banner and product grid.",
+        "body_html": (
+            "<html><body><table><tr><td><img src='cid:hero-banner'></td></tr>"
+            "<tr><td><div style='display:grid'>Tap to shop the weekend offers.</div></td></tr>"
+            "</table></body></html>"
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
 class OllamaSummaryFormattingTests(unittest.TestCase):
+    def test_vision_render_body_text_keeps_full_email_content(self):
+        email = {
+            "sender": "Sender <sender@example.com>",
+            "title": "Status update",
+            "body": "Line one.\n\nLine two with details.\n\nLine three.",
+            "recipients": "you@example.com",
+            "cc": "",
+        }
+
+        rendered = ollama_client._vision_render_body_text(email)
+
+        self.assertIn("Line one.", rendered)
+        self.assertIn("Line two with details.", rendered)
+        self.assertIn("Line three.", rendered)
+
     def test_multistory_digest_gets_digest_overview_summary(self):
         email = _digest_email()
         summary = ollama_client._bulk_newsletter_summary(email)
@@ -236,7 +278,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertNotIn("it highlights", summary.lower())
         self.assertIn("up to $400 off select laptops", summary)
 
-    def test_summary_looks_unusable_flags_boilerplate_heavy_bulk_summary(self):
+    def test_summary_looks_unusable_does_not_reject_bulk_style_summary(self):
         email = _retail_roundup_email()
         email["summary"] = (
             "A news digest from TechMart. It highlights Plus, the new Arc Phone and more Top Deals. "
@@ -244,7 +286,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "It highlights Free Shipping and shop now."
         )
 
-        self.assertTrue(ollama_client.summary_looks_unusable(email))
+        self.assertFalse(ollama_client.summary_looks_unusable(email))
 
     def test_extractive_fallback_for_digest_avoids_repeated_it_highlights(self):
         email = _digest_email()
@@ -427,12 +469,13 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "and cities debating zoning changes after rent increases."
         ),
     )
-    def test_summarize_email_uses_paragraph_prompt_for_digest_emails(self, mock_call):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_summarize_email_returns_model_summary_for_digest_emails(self, _mock_vision, mock_call):
         email = _digest_email()
 
         summary = ollama_client.summarize_email(email, email_id="digest-1")
         self.assertIsNotNone(summary)
-        self.assertIn("news digest", summary.lower())
+        self.assertIn("Morning Briefing covers tariff worries", summary)
         self.assertNotIn("\n", summary)
         self.assertEqual(mock_call.call_count, 1)
 
@@ -443,8 +486,10 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "The digest highlights tariff-related market pressure and hospitals preparing for a rough flu season."
         ),
     )
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
     def test_summarize_email_uses_structured_prompt_for_multi_item_newsletters(
         self,
+        _mock_vision,
         mock_call,
         _mock_bulk,
     ):
@@ -465,7 +510,13 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "2 PM deck handoff and room setup."
         ),
     )
-    def test_summarize_email_uses_key_evidence_block_in_prompt(self, mock_call, _mock_bulk):
+    @mock.patch("app.ollama_client._render_email_image_pages")
+    def test_summarize_email_uses_text_payload_and_metadata_for_plain_text_email(
+        self,
+        mock_render,
+        mock_call,
+        _mock_bulk,
+    ):
         email = _long_action_email()
 
         ollama_client.summarize_email(email, email_id="summary-evidence-1")
@@ -473,13 +524,33 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         summarize_call = next(
             call for call in mock_call.call_args_list if call.kwargs.get("task") == "summarize"
         )
-        user_prompt = summarize_call.kwargs["messages"][1]["content"]
-        self.assertIn("Key evidence:", user_prompt)
-        self.assertNotIn("Body excerpts:", user_prompt)
-        self.assertNotIn("Subject:", user_prompt)
-        self.assertIn("deck handoff", user_prompt)
+        user_message = summarize_call.kwargs["messages"][1]
+        self.assertIn("Sender and subject metadata", user_message["content"])
+        self.assertIn("Source email text", user_message["content"])
+        self.assertNotIn("Key evidence:", user_message["content"])
+        self.assertNotIn("images", user_message)
+        mock_render.assert_not_called()
 
-    def test_subject_led_summary_is_marked_unusable(self):
+    @mock.patch("app.ollama_client._render_email_image_pages", return_value=["fake-vision-image"])
+    def test_vision_user_message_keeps_images_for_html_heavy_email(self, mock_render):
+        user_message = ollama_client._vision_user_message(
+            _html_layout_email(),
+            "Summarize this email.",
+            task="summarize",
+        )
+
+        self.assertIsNotNone(user_message)
+        self.assertEqual(user_message["images"], ["fake-vision-image"])
+        self.assertIn("Attached images preserve layout cues", user_message["content"])
+        mock_render.assert_called_once()
+
+    def test_summary_looks_unusable_flags_placeholder_summary(self):
+        email = _retail_roundup_email()
+        email["summary"] = "Summary unavailable."
+
+        self.assertTrue(ollama_client.summary_looks_unusable(email))
+
+    def test_summary_looks_unusable_allows_subject_led_summary(self):
         email = {
             "sender": "The Wall Street Journal <alerts@wsj.example>",
             "title": "Latest in Artificial Intelligence: The Pentagon Dealmaker Who Has Become Anthropic's Nemesis",
@@ -498,7 +569,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "Dealmaker Who Has Become Anthropic's Nemesis."
         )
 
-        self.assertTrue(ollama_client.summary_looks_unusable(email))
+        self.assertFalse(ollama_client.summary_looks_unusable(email))
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
     @mock.patch(
@@ -509,7 +580,8 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "Dealmaker Who Has Become Anthropic's Nemesis."
         ),
     )
-    def test_summarize_email_rejects_subject_led_summary(self, _mock_call, _mock_bulk):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_summarize_email_keeps_model_subject_led_summary(self, _mock_vision, _mock_call, _mock_bulk):
         email = {
             "sender": "The Wall Street Journal <alerts@wsj.example>",
             "title": "Latest in Artificial Intelligence: The Pentagon Dealmaker Who Has Become Anthropic's Nemesis",
@@ -526,80 +598,68 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         summary = ollama_client.summarize_email(email, email_id="subject-copy-1")
 
         self.assertIsNotNone(summary)
-        self.assertNotIn(email["title"], summary)
-        self.assertIn("Scale AI", summary)
-        self.assertIn("Anthropic", summary)
+        self.assertIn("The Pentagon Dealmaker Who Has Become Anthropic's Nemesis", summary)
+        self.assertIn("The Wall Street Journal sent a newsletter", summary)
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
     @mock.patch(
-        "app.ollama_client._sanitize_model_summary",
+        "app.ollama_client._call_ollama",
         return_value=(
-            "It also mentions benefits such as easy store pickup, fast free shipping, and a low price guarantee. "
-            "Offers are valid from March 6 to 12, 2026."
+            "Summary: Walmart is promoting Member Week savings with easy store pickup, fast free shipping, "
+            "and a low price guarantee from March 6 to 12, 2026."
         ),
     )
-    @mock.patch("app.ollama_client._call_ollama", return_value="raw summary")
-    def test_summarize_email_polishes_promotional_summary_lead(
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_summarize_email_only_lightly_cleans_model_output(
         self,
+        _mock_vision,
         _mock_call,
-        _mock_sanitize,
         _mock_bulk,
     ):
         summary = ollama_client.summarize_email(_promo_offer_email(), email_id="promo-lead-1")
 
         self.assertIsNotNone(summary)
-        self.assertTrue(summary.startswith("A promotional update from Walmart."))
-        self.assertNotIn("It also mentions", summary)
-        self.assertIn("benefits such as easy store pickup", summary)
-        self.assertIn("offers are valid from march 6 to 12, 2026", summary.lower())
-        self.assertNotIn("the email notes that", summary.lower())
+        self.assertEqual(
+            summary,
+            "Walmart is promoting Member Week savings with easy store pickup, fast free shipping, "
+            "and a low price guarantee from March 6 to 12, 2026.",
+        )
 
     @mock.patch(
         "app.ollama_client._call_ollama",
-        return_value="Please confirm whether you can cover the client meeting tomorrow afternoon.",
+        return_value=(
+            "You need to confirm whether you can cover the client meeting by noon while preparing for the "
+            "2 PM deck handoff and room setup."
+        ),
     )
-    def test_summarize_email_rejects_copied_opening_sentence(self, _mock_call):
+    @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_summarize_email_preserves_model_wording(self, _mock_vision, _mock_bulk, _mock_call):
         email = _long_action_email()
 
         summary = ollama_client.summarize_email(email, email_id="copy-1")
 
         self.assertIsNotNone(summary)
-        self.assertNotIn(
-            "Please confirm whether you can cover the client meeting tomorrow afternoon.",
+        self.assertEqual(
             summary,
+            "You need to confirm whether you can cover the client meeting by noon while preparing for the "
+            "2 PM deck handoff and room setup.",
         )
-        self.assertLess(len(summary), len(email["body"]))
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
     @mock.patch(
         "app.ollama_client._call_ollama",
-        return_value=(
-            "GET THE DETAILS Star border Checkerboard artist image 1 "
-            "You're one of Joji's top fans, so we just had to let you know: "
-            "they just dropped tour dates - and yep, they're headed your way."
-        ),
+        return_value="Summary unavailable.",
     )
-    def test_summarize_email_rewrites_copied_marketing_teaser(self, _mock_call, _mock_bulk):
-        email = _spotify_alert_email()
-
-        summary = ollama_client.summarize_email(email, email_id="copy-spotify-1")
-
-        self.assertIsNotNone(summary)
-        self.assertIn("Joji", summary)
-        self.assertIn("tour dates", summary.lower())
-        self.assertNotIn("GET THE DETAILS", summary)
-        self.assertNotIn("just had to let you know", summary.lower())
-
-    @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
     @mock.patch(
-        "app.ollama_client._call_ollama",
-        return_value=(
-            "A judge ruled that Amazon can keep outside AI bots off its site for now, "
-            "but retailers are preparing for a new normal in shopping."
-        ),
+        "app.ollama_client._extractive_summary_fallback",
+        return_value="The article also explains how sellers are responding to automated scraping in online shopping.",
     )
-    def test_summarize_email_fallback_does_not_repeat_copied_article_sentence(
+    def test_summarize_email_uses_fallback_for_placeholder_model_response(
         self,
+        _mock_fallback,
+        _mock_vision,
         _mock_call,
         _mock_bulk,
     ):
@@ -608,13 +668,11 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         summary = ollama_client.summarize_email(email, email_id="copy-wsj-1")
 
         self.assertIsNotNone(summary)
-        self.assertIn("shopping", summary.lower())
-        self.assertIn("automated scraping", summary.lower())
-        self.assertNotIn(
-            "A judge ruled that Amazon can keep outside AI bots off its site for now, "
-            "but retailers are preparing for a new normal in shopping.",
+        self.assertEqual(
             summary,
+            "The article also explains how sellers are responding to automated scraping in online shopping.",
         )
+        self.assertIn("automated scraping", summary.lower())
 
     def test_activity_summary_does_not_trigger_for_promotional_campaign_newsletter(self):
         self.assertIsNone(ollama_client._activity_notification_summary(_sobeys_paralympic_email()))
@@ -626,7 +684,12 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
             "at the Milano-Cortina 2026 Paralympic Games as part of the Feed the Dream campaign."
         ),
     )
-    def test_summarize_email_does_not_force_activity_template_for_campaign_promo(self, mock_call):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_summarize_email_does_not_force_activity_template_for_campaign_promo(
+        self,
+        _mock_vision,
+        mock_call,
+    ):
         summary = ollama_client.summarize_email(
             _sobeys_paralympic_email(),
             email_id="sobeys-campaign-1",

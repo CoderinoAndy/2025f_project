@@ -77,9 +77,9 @@ class OllamaLatencyControlTests(unittest.TestCase):
         with mock.patch("app.ollama_client._api_url_candidates", return_value=["http://127.0.0.1:11434/api/chat"]), mock.patch(
             "app.ollama_client._endpoint_allowed",
             return_value=True,
-        ), mock.patch("app.ollama_client._model_name", return_value="qwen2.5:14b"), mock.patch(
+        ), mock.patch("app.ollama_client._model_name", return_value="mistral-small3.2:24b"), mock.patch(
             "app.ollama_client._resolved_model_name",
-            return_value="qwen2.5:14b",
+            return_value="mistral-small3.2:24b",
         ), mock.patch("app.ollama_client._timeout_seconds", return_value=12.0), mock.patch(
             "app.ollama_client._keep_alive_value",
             return_value="15m",

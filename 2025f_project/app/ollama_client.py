@@ -1,8 +1,12 @@
 # MVC: Model
+import base64
+import hashlib
+import io
 import ipaddress
 import json
 import os
 import re
+import textwrap
 import threading
 import time
 import urllib.error
@@ -11,6 +15,12 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # Optional dependency until requirements are installed.
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 from .db import (
     fetch_email_by_id,
     get_user_display_name,
@@ -18,16 +28,21 @@ from .db import (
     update_email_ai_fields,
 )
 from .debug_logger import log_event
-from .email_content import contains_common_mojibake, repair_body_text, repair_header_text
+from .email_content import contains_common_mojibake, html_to_text, repair_body_text, repair_header_text
 
 # This module now contains both model-calling code and async AI task orchestration.
 # Core runtime defaults and normalized label sets shared across classify/summarize flows.
 OLLAMA_API_URL_DEFAULT = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL_DEFAULT = "qwen2.5:14b"
+OLLAMA_MODEL_DEFAULT = "mistral-small3.2:24b"
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 45
 OLLAMA_LONG_TASK_TIMEOUT_SECONDS_DEFAULT = 180
 OLLAMA_KEEP_ALIVE_DEFAULT = "15m"
 SUMMARY_MIN_CHARS_DEFAULT = 200
+VISION_RENDER_MAX_CHARS_DEFAULT = 6000
+VISION_RENDER_MAX_PAGES_DEFAULT = 2
+VISION_RENDER_WRAP_WIDTH_DEFAULT = 92
+VISION_RENDER_MAX_LINES_DEFAULT = 44
+VISION_RENDER_CACHE_MAX_ITEMS = 128
 VALID_CATEGORIES = {"urgent", "informational", "junk"}
 VALID_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
 LONG_OLLAMA_TASKS = {
@@ -50,10 +65,11 @@ LOCALHOST_NAMES = {"localhost"}
 OLLAMA_TAGS_CACHE_TTL_SECONDS = 300.0
 OLLAMA_TAGS_CACHE = {"fetched_at": 0.0, "models": ()}
 OLLAMA_TAGS_LOCK = threading.Lock()
+VISION_RENDER_CACHE = {}
+VISION_RENDER_CACHE_LOCK = threading.Lock()
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 MAILBOX_OWNER_NAME_ENV = "LOCAL_USER_NAME"
-SUMMARY_COMPRESSION_TARGET_RATIO = 0.28
 # Sender/domain heuristics used to separate person-to-person mail from automated mail.
 PERSONAL_EMAIL_DOMAINS = (
     "gmail.com",
@@ -89,6 +105,8 @@ REPLY_CHAIN_PATTERNS = (
 )
 # Marker sets for filtering unusable summaries and stripping newsletter/footer boilerplate.
 SUMMARY_FAILURE_MARKERS = (
+    "summary unavailable",
+    "summary generation failed",
     "unable to summarize",
     "unable to provide a summary",
     "unable to interpret",
@@ -604,6 +622,14 @@ SENTENCE_ABBREVIATION_ENDINGS = (
     "no.",
     "dept.",
 )
+HTML_VISUAL_COMPLEXITY_PATTERN = re.compile(
+    r"<\s*(?:img|picture|svg|canvas|video|audio|table|tr|td|th|iframe|form|input|button|style)\b"
+    r"|cid:"
+    r"|data:image/"
+    r"|background(?:-image)?\s*:"
+    r"|display\s*:\s*(?:grid|flex|table)",
+    re.IGNORECASE,
+)
 
 
 def _utc_now():
@@ -832,6 +858,318 @@ def _summary_min_chars():
     except ValueError:
         parsed = SUMMARY_MIN_CHARS_DEFAULT
     return max(50, min(5000, parsed))
+
+
+def _vision_render_max_chars():
+    """Return the maximum cleaned body chars rendered into vision pages."""
+    raw = (os.getenv("OLLAMA_VISION_MAX_CHARS") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_RENDER_MAX_CHARS_DEFAULT
+    except ValueError:
+        parsed = VISION_RENDER_MAX_CHARS_DEFAULT
+    return max(800, min(30000, parsed))
+
+
+def _vision_render_max_pages():
+    """Return the maximum number of rendered email images sent to Ollama."""
+    raw = (os.getenv("OLLAMA_VISION_MAX_PAGES") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_RENDER_MAX_PAGES_DEFAULT
+    except ValueError:
+        parsed = VISION_RENDER_MAX_PAGES_DEFAULT
+    return max(1, min(12, parsed))
+
+
+def _vision_render_wrap_width():
+    """Return the wrap width used by rendered email pages."""
+    raw = (os.getenv("OLLAMA_VISION_WRAP_WIDTH") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_RENDER_WRAP_WIDTH_DEFAULT
+    except ValueError:
+        parsed = VISION_RENDER_WRAP_WIDTH_DEFAULT
+    return max(40, min(140, parsed))
+
+
+def _vision_render_max_lines():
+    """Return the number of content lines rendered on each email image page."""
+    raw = (os.getenv("OLLAMA_VISION_MAX_LINES") or "").strip()
+    try:
+        parsed = int(raw) if raw else VISION_RENDER_MAX_LINES_DEFAULT
+    except ValueError:
+        parsed = VISION_RENDER_MAX_LINES_DEFAULT
+    return max(18, min(70, parsed))
+
+
+def _vision_render_available():
+    """Return True when local image rendering dependencies are available."""
+    return Image is not None and ImageDraw is not None and ImageFont is not None
+
+
+def _vision_render_cache_key(email_data):
+    """Return a stable cache key for rendered email page images."""
+    body_text = _vision_render_body_text(email_data)
+    payload = {
+        "sender": _normalized_header_text(email_data.get("sender") or ""),
+        "title": _normalized_header_text(email_data.get("title") or ""),
+        "recipients": _normalized_header_text(email_data.get("recipients") or ""),
+        "cc": _normalized_header_text(email_data.get("cc") or ""),
+        "type": _compact_text(email_data.get("type") or ""),
+        "priority": int(email_data.get("priority") or 1),
+        "received_at": _compact_text(email_data.get("received_at") or email_data.get("date") or ""),
+        "body": body_text,
+    }
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _vision_metadata_block(email_data):
+    """Return compact sender/subject metadata for multimodal prompts."""
+    return (
+        "Sender and subject metadata:\n"
+        f"- From: {_normalized_header_text(email_data.get('sender') or '(unknown sender)')}\n"
+        f"- Subject: {_normalized_header_text(email_data.get('title') or '(No subject)')}\n"
+        f"- To: {_normalized_header_text(email_data.get('recipients') or '(unknown)')}\n"
+        f"- Cc: {_normalized_header_text(email_data.get('cc') or '(none)')}\n"
+        f"- Mailbox type: {_compact_text(email_data.get('type') or '(unknown)')}\n"
+        f"- Priority: {int(email_data.get('priority') or 1)}\n"
+        f"- Received: {_compact_text(email_data.get('received_at') or email_data.get('date') or '(unknown)')}"
+    )
+
+
+def _source_text_limit(task=None, text_max_chars=None):
+    """Return a capped source-text budget for prompt payloads."""
+    if text_max_chars is not None:
+        try:
+            parsed = int(text_max_chars)
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed > 0:
+            return max(800, min(12000, parsed))
+
+    task_name = str(task or "").strip().lower()
+    if task_name == "summarize":
+        return 5200
+    if task_name == "draft_plan":
+        return 2600
+    if task_name == "classify":
+        return 2200
+    return 3600
+
+
+def _source_text_for_user_message(email_data, task=None, text_max_chars=None):
+    """Return cleaned source text for model prompts."""
+    return _clean_body_for_prompt(
+        email_data,
+        max_chars=_source_text_limit(task=task, text_max_chars=text_max_chars),
+    ) or _vision_render_body_text(email_data)
+
+
+def _html_requires_visual_context(email_data):
+    """Return True when raw HTML is different enough to justify an image fallback."""
+    if not isinstance(email_data, dict):
+        return False
+    raw_html = str(email_data.get("body_html") or "").strip()
+    if not raw_html:
+        return False
+    if HTML_VISUAL_COMPLEXITY_PATTERN.search(raw_html):
+        return True
+    html_text = _compact_text(html_to_text(raw_html))
+    plain_text = _compact_text(_email_body_text(email_data))
+    if not html_text:
+        return False
+    if not plain_text:
+        return True
+    return len(html_text) >= 160 and _token_overlap_ratio(html_text, plain_text) < 0.72
+
+
+def _vision_render_body_text(email_data):
+    """Return the full email body text rendered into screenshot-like pages."""
+    body = _email_body_text(email_data).replace("\r\n", "\n").replace("\r", "\n").strip()
+    body = re.sub(r"[ \t]+", " ", body)
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    max_chars = _vision_render_max_chars()
+    if len(body) > max_chars:
+        body = f"{body[: max_chars - 3].rstrip()}..."
+    if body:
+        return body
+    title = _normalized_header_text(email_data.get("title") or "")
+    return title or "(No usable email body text was available.)"
+
+
+def _vision_wrap_lines(text, width=None):
+    """Wrap multiline email text into deterministic image-friendly lines."""
+    wrap_width = width or _vision_render_wrap_width()
+    wrapped_lines = []
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        normalized = raw_line.rstrip()
+        if not normalized:
+            if wrapped_lines and wrapped_lines[-1] == "":
+                continue
+            wrapped_lines.append("")
+            continue
+        line_indent = ""
+        line_body = normalized
+        if normalized.startswith(("- ", "* ")):
+            line_indent = normalized[:2]
+            line_body = normalized[2:].strip()
+        current_width = max(20, wrap_width - len(line_indent))
+        pieces = textwrap.wrap(
+            line_body or normalized,
+            width=current_width,
+            break_long_words=True,
+            break_on_hyphens=False,
+            replace_whitespace=False,
+        ) or [line_body or normalized]
+        for index, piece in enumerate(pieces):
+            prefix = line_indent if index == 0 else (" " * len(line_indent) if line_indent else "")
+            wrapped_lines.append(f"{prefix}{piece}".rstrip())
+    return wrapped_lines or ["(No usable email body text was available.)"]
+
+
+def _vision_render_page_chunks(content_lines):
+    """Split wrapped content into page-sized chunks for multimodal analysis."""
+    max_lines = _vision_render_max_lines()
+    chunks = []
+    remaining = list(content_lines or [])
+    while remaining:
+        chunk = remaining[:max_lines]
+        remaining = remaining[max_lines:]
+        chunks.append(chunk)
+    return chunks or [["(No usable email body text was available.)"]]
+
+
+def _render_text_page_png(page_lines, page_number, page_count, email_data):
+    """Render one page of email text into a PNG and return base64 bytes."""
+    font = ImageFont.load_default()
+    image = Image.new("L", (1200, 1600), color=255)
+    draw = ImageDraw.Draw(image)
+    sample_bbox = draw.textbbox((0, 0), "Ag", font=font)
+    line_height = max(18, (sample_bbox[3] - sample_bbox[1]) + 6)
+    margin_x = 48
+    y = 48
+    header_lines = [
+        "Rendered email page for multimodal analysis",
+        f"Page {page_number} of {page_count}",
+        f"From: {_truncate_compact_text(email_data.get('sender') or '(unknown sender)', max_chars=180)}",
+        f"Subject: {_truncate_compact_text(email_data.get('title') or '(No subject)', max_chars=180)}",
+    ]
+    for line in header_lines:
+        draw.text((margin_x, y), str(line or ""), fill=20, font=font)
+        y += line_height
+    y += 8
+    draw.line((margin_x, y, 1152, y), fill=160, width=1)
+    y += 18
+    for line in page_lines:
+        draw.text((margin_x, y), str(line or ""), fill=28, font=font)
+        y += line_height
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True, compress_level=9)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _render_email_image_pages(email_data, email_id=None):
+    """Render the entire email into screenshot-like PNG pages for vision-first Ollama calls."""
+    if not isinstance(email_data, dict):
+        return []
+    if not _vision_render_available():
+        _log_action(
+            task="vision",
+            status="error",
+            email_id=email_id,
+            detail="pillow_not_installed_for_email_page_rendering",
+        )
+        return []
+
+    cache_key = _vision_render_cache_key(email_data)
+    with VISION_RENDER_CACHE_LOCK:
+        cached = VISION_RENDER_CACHE.get(cache_key)
+        if cached:
+            VISION_RENDER_CACHE.pop(cache_key, None)
+            VISION_RENDER_CACHE[cache_key] = cached
+            return list(cached)
+
+    intro_lines = [
+        "Supporting metadata",
+        f"To: {_normalized_header_text(email_data.get('recipients') or '(unknown)')}",
+        f"Cc: {_normalized_header_text(email_data.get('cc') or '(none)')}",
+        f"Mailbox type: {_compact_text(email_data.get('type') or '(unknown)')}",
+        f"Priority: {int(email_data.get('priority') or 1)}",
+        f"Received: {_compact_text(email_data.get('received_at') or email_data.get('date') or '(unknown)')}",
+        "",
+        "Email body",
+        "",
+    ]
+    content_lines = intro_lines + _vision_wrap_lines(_vision_render_body_text(email_data))
+    page_chunks = _vision_render_page_chunks(content_lines)
+    max_pages = _vision_render_max_pages()
+    total_pages = len(page_chunks)
+    if total_pages > max_pages:
+        omitted_pages = total_pages - max_pages
+        page_chunks = page_chunks[:max_pages]
+        page_chunks[-1] = (
+            page_chunks[-1]
+            + [
+                "",
+                f"[Rendered email truncated after {max_pages} pages. {omitted_pages} later page(s) were omitted.]",
+            ]
+        )
+    page_count = len(page_chunks)
+    rendered_pages = [
+        _render_text_page_png(page_lines, index + 1, page_count, email_data)
+        for index, page_lines in enumerate(page_chunks)
+    ]
+
+    with VISION_RENDER_CACHE_LOCK:
+        VISION_RENDER_CACHE.pop(cache_key, None)
+        VISION_RENDER_CACHE[cache_key] = tuple(rendered_pages)
+        while len(VISION_RENDER_CACHE) > VISION_RENDER_CACHE_MAX_ITEMS:
+            oldest_key = next(iter(VISION_RENDER_CACHE))
+            VISION_RENDER_CACHE.pop(oldest_key, None)
+
+    _log_action(
+        task="vision",
+        status="call_success",
+        email_id=email_id,
+        detail=f"rendered_email_pages={len(rendered_pages)}",
+    )
+    return rendered_pages
+
+
+def _vision_user_message(email_data, instruction_text, email_id=None, task=None, text_max_chars=None):
+    """Build the shared AI user message, preferring direct text over rendered images."""
+    source_text = _source_text_for_user_message(
+        email_data,
+        task=task,
+        text_max_chars=text_max_chars,
+    )
+    if not source_text:
+        return None
+    content = (
+        f"{instruction_text}\n\n"
+        f"{_vision_metadata_block(email_data)}\n\n"
+        "Source email text:\n"
+        "---BEGIN EMAIL TEXT---\n"
+        f"{source_text}\n"
+        "---END EMAIL TEXT---\n\n"
+        "Use the cleaned email text as the primary source of truth for the email contents. "
+        "Use the sender and subject metadata only as supporting context."
+    )
+    user_message = {
+        "role": "user",
+        "content": content,
+    }
+    if not _html_requires_visual_context(email_data):
+        return user_message
+
+    rendered_pages = _render_email_image_pages(email_data, email_id=email_id)
+    if not rendered_pages:
+        return user_message
+    user_message["content"] += (
+        "\n\nAttached images preserve layout cues and image-only details from the original email. "
+        "Consult them only when the cleaned text omits something layout-dependent."
+    )
+    user_message["images"] = rendered_pages
+    return user_message
 
 
 def _email_body_text(email_data):
@@ -1709,51 +2047,40 @@ def _summary_profile(email_data):
     body_length = len(body)
     if body_length >= 4000:
         profile = {
-            "char_limit": 3000,
-            "output_sentences": 10,
-            "context_sentences": 44,
-            "context_chars": 15000,
-            "prompt_target": "8-10 concise sentences",
-            "num_predict": 1200,
+            "char_limit": 2200,
+            "output_sentences": 8,
+            "context_sentences": 32,
+            "context_chars": 6400,
+            "prompt_target": "up to 8 sentences when the email needs it",
+            "num_predict": 460,
         }
     elif body_length >= 1800:
         profile = {
-            "char_limit": 2400,
-            "output_sentences": 8,
-            "context_sentences": 34,
-            "context_chars": 13000,
-            "prompt_target": "6-8 concise sentences",
-            "num_predict": 950,
+            "char_limit": 1700,
+            "output_sentences": 6,
+            "context_sentences": 26,
+            "context_chars": 5200,
+            "prompt_target": "up to 6 sentences when the email needs it",
+            "num_predict": 320,
         }
     elif body_length >= 900:
         profile = {
-            "char_limit": 1600,
-            "output_sentences": 6,
-            "context_sentences": 26,
-            "context_chars": 11000,
-            "prompt_target": "4-6 concise sentences",
-            "num_predict": 720,
+            "char_limit": 1200,
+            "output_sentences": 5,
+            "context_sentences": 18,
+            "context_chars": 3600,
+            "prompt_target": "up to 5 sentences when the email needs it",
+            "num_predict": 220,
         }
     else:
         profile = {
-            "char_limit": 900,
-            "output_sentences": 4,
-            "context_sentences": 16,
-            "context_chars": 8000,
-            "prompt_target": "3-4 concise sentences",
-            "num_predict": 460,
+            "char_limit": 750,
+            "output_sentences": 3,
+            "context_sentences": 12,
+            "context_chars": 2200,
+            "prompt_target": "up to 3 sentences when the email needs it",
+            "num_predict": 140,
         }
-
-    compression_char_limit = max(260, int(body_length * SUMMARY_COMPRESSION_TARGET_RATIO))
-    profile["char_limit"] = min(profile["char_limit"], compression_char_limit)
-    profile["output_sentences"] = min(
-        profile["output_sentences"],
-        max(3, profile["char_limit"] // 120),
-    )
-    profile["prompt_target"] = (
-        f"about {profile['output_sentences']} concise sentences and no more than roughly "
-        "one quarter of the source length"
-    )
     return profile
 
 
@@ -3442,11 +3769,30 @@ def _looks_summary_failure(summary_text):
         return True
     if contains_common_mojibake(summary_text):
         return True
-    if _uses_second_person(summary_text):
-        return True
     if _is_noise_fragment(normalized):
         return True
     return any(marker in normalized for marker in SUMMARY_FAILURE_MARKERS)
+
+
+def _prepare_model_summary(summary_text, char_limit):
+    """Lightly clean raw model output without rewriting the model's wording."""
+    summary = repair_body_text(summary_text or "", None).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not summary:
+        return ""
+    summary = re.sub(
+        r"^\s*(?:plain[- ]text\s+)?(?:email\s+)?summary\s*[:\-]\s*",
+        "",
+        summary,
+        flags=re.IGNORECASE,
+    )
+    summary = re.sub(r"\n{3,}", "\n\n", summary)
+    summary = _compact_text(summary)
+    if not summary:
+        return ""
+    limit = max(160, int(char_limit or 0))
+    if len(summary) > limit:
+        summary = f"{summary[: limit - 3].rstrip()}..."
+    return summary
 
 
 def _content_tokens(value):
@@ -5611,11 +5957,14 @@ def _normalize_classification(raw_value):
 def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320):
     """Call Ollama chat API and return response content or None on failure."""
     # Send one non-streaming chat request to Ollama and return the model text payload.
+    started_at = time.perf_counter()
     api_urls = _api_url_candidates()
     requested_model_name = _model_name(task=task)
     model_name = _resolved_model_name(task=task, api_urls=api_urls)
     request_timeout = _timeout_seconds(task=task)
     keep_alive = _keep_alive_value(task=task)
+    image_count = sum(len(message.get("images") or ()) for message in messages or ())
+    prompt_chars = sum(len(str(message.get("content") or "")) for message in messages or ())
     if model_name != requested_model_name:
         _log_action(
             task=task,
@@ -5629,7 +5978,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
         email_id=email_id,
         detail=(
             f"ollama_chat model={model_name} timeout={int(request_timeout)}s "
-            f"keep_alive={keep_alive or '-'} url={api_urls[0]}"
+            f"keep_alive={keep_alive or '-'} url={api_urls[0]} images={image_count} prompt_chars={prompt_chars}"
         ),
     )
 
@@ -5679,7 +6028,15 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
             continue
 
     if raw is None:
-        _log_action(task=task, status="error", email_id=email_id, detail=f"request_failed: {last_error}")
+        _log_action(
+            task=task,
+            status="error",
+            email_id=email_id,
+            detail=(
+                f"request_failed: {last_error} "
+                f"elapsed_ms={int((time.perf_counter() - started_at) * 1000)}"
+            ),
+        )
         return None
 
     try:
@@ -5697,7 +6054,7 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
         task=task,
         status="call_success",
         email_id=email_id,
-        detail=f"chars={len(content)}",
+        detail=f"chars={len(content)} elapsed_ms={int((time.perf_counter() - started_at) * 1000)}",
     )
     return content
 
@@ -5713,6 +6070,18 @@ def classify_email(email_data, email_id=None):
         return None
 
     heuristic = _heuristic_classification(normalized_email)
+    user_message = _vision_user_message(
+        email_data,
+        (
+            "Classify this email using the provided email source context. "
+            "Return JSON only."
+        ),
+        email_id=email_id,
+        task="classify",
+        text_max_chars=2200,
+    )
+    if not user_message:
+        return heuristic
 
     # Ask for strict JSON, then combine with deterministic heuristics for stability.
     system_prompt = (
@@ -5723,9 +6092,9 @@ def classify_email(email_data, email_id=None):
         "needs_response must be true or false. "
         "priority must be an integer 1 to 3. "
         "confidence must be a float 0 to 1. "
-        "Weighted evidence order: body intent is highest, sender identity/domain is second highest, "
-        "subject is third. "
-        "If body and sender conflict weakly, give sender extra weight unless body has a direct response request. "
+        "Weighted evidence order: email body content is highest, sender identity/domain is second highest, "
+        "and subject is third. "
+        "If the body content and sender conflict weakly, give sender extra weight unless the body clearly shows a direct response request. "
         "Infer whether the sender appears to be a brand/company/news source or an individual from sender "
         "name/domain using your general knowledge and context in this email. "
         "Do not rely on a predefined hardcoded brand list. "
@@ -5754,23 +6123,22 @@ def classify_email(email_data, email_id=None):
         "junk can be confirmed by the user. "
         "Treat plain person names as names, not email addresses."
     )
-    user_prompt = (
-        "Classify this email.\n\n"
+    user_message["content"] += (
+        "\n\n"
         f"{_classification_few_shot_block()}\n\n"
         f"{_sender_hint_block(normalized_email)}\n"
         f"{_junk_signal_block(normalized_email)}"
-        f"{_email_context_block(normalized_email)}\n\n"
         "Return JSON only."
     )
     response_text = _call_ollama(
         task="classify",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            user_message,
         ],
         email_id=email_id,
         temperature=0.0,
-        num_predict=280,
+        num_predict=160,
     )
     if not response_text:
         return heuristic
@@ -5796,7 +6164,6 @@ def summarize_email(email_data, email_id=None):
     if not should_summarize_email(email_data):
         return None
     profile = _summary_profile(email_data)
-    title = _normalized_header_text(email_data.get("title") or "")
     structured_summary = _should_use_structured_summary(email_data)
     extractive_fallback = _extractive_summary_fallback(email_data)
     structured_fallback = _structured_summary_fallback(email_data) if structured_summary else None
@@ -5815,60 +6182,44 @@ def summarize_email(email_data, email_id=None):
         if not _looks_generic_posture_summary(finalized_candidate):
             fallback_summary = finalized_candidate
             break
-
-    # Keep prompts tightly constrained, then post-filter for grounding/paraphrase quality.
-    system_prompt = (
-        "You write condensed email summaries for the mailbox owner. "
-        "Use neutral phrasing and never address the mailbox owner as you/your. "
-        "Never refer to the mailbox owner as 'the user'. "
-        "Use only facts explicitly present in the email context; do not infer new details. "
-        "Write in your own words: paraphrase and compress instead of copying source sentences. "
-        "No sentence in your output may closely match a sentence from the email body. "
-        "Do not quote long spans from the email body; only keep exact wording for short facts "
-        "like names, dates, times, and amounts when necessary. "
-        "Do not copy article headlines, newsletter teaser lines, or list items verbatim. "
-        "Do not spend the opening sentence merely naming the sender if the body contains more important substance. "
-        "Do not mimic the subject line and then paste the first paragraph. "
-        "Treat the subject line as supplemental context only; do not quote, paraphrase, or summarize it. "
-        "Do not add subscription/sign-up suggestions unless explicitly requested in the email. "
-        "Do not use stock lead-ins such as 'It includes', 'It mentions', 'It covers', "
-        "'The email notes that', or category labels like 'activity update' unless the email explicitly behaves that way. "
-        "Use declarative statements only (no questions). "
-        "Prefer one natural paragraph that reads like an original human summary, not a template. "
-        "Synthesize themes instead of retelling sentences in source order. "
-        "Capture: main topic, concrete details, and any requested action or deadline. "
-        "When the email contains multiple sections, features, or story items, mention each major section explicitly in one compact paragraph. "
-        + "Ignore newsletter/footer boilerplate like subscriber IDs, preference-management links, "
-        + "privacy/cookie/legal notices, and utility links unless they are the main request. "
-        + "Ignore subscription prompts like sign-up or subscribe CTAs unless the email is explicitly about subscribing. "
-        + "Return plain text only as one compact paragraph (no markdown or bullet points). "
-        + f"Target {profile['prompt_target']} for long emails; keep shorter emails concise. "
-        + "Treat plain person names as names, not email addresses."
+    user_message = _vision_user_message(
+        email_data,
+        (
+            "Analyze the provided email source context and summarize the email. "
+            "Use the email body text as the main source and the metadata only as support."
+        ),
+        email_id=email_id,
+        task="summarize",
+        text_max_chars=profile["context_chars"],
     )
-    user_prompt = (
-        "Generate an original condensed summary in your own words. "
-        "Do not copy or closely quote the email body. "
-        "Rewrite every sentence instead of reusing the sender's wording. "
-        "Only include claims that are explicitly supported by the email content. "
-        "Rewrite headlines and teaser copy into fresh wording instead of repeating them. "
-        "Do not use the subject line as a summary sentence or topic label. "
-        "For long emails, cover all major sections instead of summarizing only the opening lines. "
-        "Aim for no more than roughly one quarter of the source length. "
-        + "If the email has several distinct updates, features, or sections, include each one at least briefly in the same paragraph. "
-        + "Focus on what happened, key facts, and any requested next step without addressing the reader directly.\n\n"
-        f"{_summary_evidence_block(email_data, max_points=min(8, profile['output_sentences']))}"
+    if not user_message:
+        return fallback_summary
+
+    system_prompt = (
+        "You summarize emails for the mailbox owner. "
+        "Analyze the provided email source context and write a natural plain-text summary of what the email says. "
+        "Use the email content as the source of truth and use the sender and subject metadata only as support. "
+        "Capture the main topic, important details, and any requested action or deadline when present. "
+        "If the email has multiple sections or updates, cover the main ones. "
+        + f"Aim for {profile['prompt_target']}. "
+        + "Return plain text only."
+    )
+    user_message["content"] += (
+        "\n\n"
+        "Write the summary that best fits this email. "
+        "Keep it grounded in the provided email content, concise, and readable. "
+        "Mention any action item or deadline if there is one."
     )
     response_text = _call_ollama(
         task="summarize",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            user_message,
         ],
         email_id=email_id,
-        temperature=0.15,
+        temperature=0.2,
         num_predict=profile["num_predict"],
     )
-    # Prefer deterministic fallback whenever model output is missing or unusable.
     if not response_text:
         if fallback_summary:
             _log_action(
@@ -5879,10 +6230,7 @@ def summarize_email(email_data, email_id=None):
             )
         return fallback_summary
 
-    summary = _finalize_summary_text(
-        _sanitize_model_summary(response_text, email_data, structured=False) or "",
-        email_data,
-    )
+    summary = _prepare_model_summary(response_text, profile["char_limit"])
     if _looks_summary_failure(summary):
         if fallback_summary:
             _log_action(
@@ -5892,62 +6240,6 @@ def summarize_email(email_data, email_id=None):
                 detail="using_extractive_fallback_unusable_model_output",
             )
         return fallback_summary
-    if _looks_summary_call_to_action(summary, email_data):
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_model_cta_summary",
-            )
-        return fallback_summary
-    if _looks_bulk_summary_boilerplate_heavy(summary, email_data):
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_boilerplate_heavy_summary",
-            )
-        return fallback_summary
-    if _summary_uses_subject_content(summary, email_data):
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_subject_led_summary",
-            )
-        return fallback_summary
-    if _is_near_subject_copy(summary, title):
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_subject_parrot",
-            )
-        return fallback_summary
-    if _looks_summary_parrot(summary, email_data):
-        rewritten = _rewrite_parroted_summary(
-            summary,
-            email_data,
-            email_id=email_id,
-            structured=False,
-        )
-        if rewritten and not _is_near_subject_copy(rewritten, title):
-            return rewritten
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_model_body_parrot",
-            )
-        return fallback_summary
-    summary = _merge_summary_with_fallback_coverage(summary, email_data)
-    if len(summary) > profile["char_limit"]:
-        summary = f"{summary[: profile['char_limit'] - 3]}..."
     return summary or fallback_summary
 
 
@@ -6183,22 +6475,36 @@ def _extract_reply_plan(email_data, email_id=None):
         return cached_plan
 
     heuristic_plan = _heuristic_reply_plan(email_data)
+    if not _html_requires_visual_context(email_data):
+        if isinstance(email_data, dict):
+            email_data["_reply_plan_cache"] = heuristic_plan
+        _log_action(
+            task="draft_plan",
+            status="fallback",
+            email_id=email_id,
+            detail="using_heuristic_reply_plan_text_source",
+        )
+        return heuristic_plan
+
     body = _clean_body_for_prompt(email_data, max_chars=2600)
-    if not body:
+    user_message = _vision_user_message(
+        email_data,
+        (
+            "Extract a reply plan for the mailbox owner from the provided email source context. "
+            "Return JSON only."
+        ),
+        email_id=email_id,
+        task="draft_plan",
+        text_max_chars=2600,
+    )
+    if not body or not user_message:
         if isinstance(email_data, dict):
             email_data["_reply_plan_cache"] = heuristic_plan
         return heuristic_plan
 
-    context_block = (
-        f"Subject: {_normalized_header_text(email_data.get('title') or '(No subject)')}\n"
-        f"From: {_normalized_header_text(email_data.get('sender') or '')}\n"
-        f"To: {_normalized_header_text(email_data.get('recipients') or '')}\n"
-        f"Cc: {_normalized_header_text(email_data.get('cc') or '')}\n"
-        f"Body:\n{body}"
-    )
     system_prompt = (
         "You extract compact reply plans from emails. "
-        "Use only facts explicitly present in the email. "
+        "Use only facts explicitly present in the provided email content. "
         "Do not invent names, deadlines, commitments, or missing context. "
         "Return JSON only with keys: topic, sender_request, deadline, key_details, tone, "
         "response_mode, should_ask_clarifying_question. "
@@ -6207,20 +6513,21 @@ def _extract_reply_plan(email_data, email_id=None):
         "tone must be one of professional, friendly, urgent, informational, apologetic. "
         "Use empty strings or false when a field is unknown."
     )
-    user_prompt = (
-        "Extract a reply plan for the mailbox owner from this email.\n\n"
-        f"{context_block}\n\n"
+    user_message["content"] += (
+        "\n\n"
+        "Extract the sender's request, deadline, key details, and expected response style. "
+        "Use the provided email content as the source of truth. "
         "Return JSON only."
     )
     response_text = _call_ollama(
         task="draft_plan",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            user_message,
         ],
         email_id=email_id,
         temperature=0.0,
-        num_predict=260,
+        num_predict=180,
     )
     if not response_text:
         if isinstance(email_data, dict):
@@ -6612,7 +6919,7 @@ def _rewrite_generic_draft(
         ],
         email_id=email_id,
         temperature=0.25,
-        num_predict=650,
+        num_predict=260,
     )
     if not response_text:
         return None
@@ -6978,31 +7285,21 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
 
     # Generate a complete send-ready draft; fallback template keeps UX functional on failure.
     system_prompt = (
-        "You write high-quality professional email replies grounded in a structured reply plan. "
-        "Write as the mailbox owner (use I/we), not as an observer. "
-        "Do not refer to the mailbox owner as 'the user'. "
-        "Write the actual reply, not an analysis, summary, or explanation of the reply. "
-        "Do not open with phrases like 'the main points I found were', 'here are the key points', "
-        "'the sender is asking', or 'here is a draft'. "
-        "Start directly with the email greeting and body as if it will be sent. "
-        "Write from the structured plan instead of repeating the sender's original wording. "
-        "If the message is actionable, address the sender's request directly when possible. "
-        "Use at least one concrete detail from the plan in the reply body, not only in the greeting. "
-        "Avoid vague filler like 'thanks for the update' or 'I'll get back to you later' unless there is no better "
-        "grounded response. "
-        "If exact facts needed for a full answer are missing, give the most plausible professional next step and ask "
-        "at most one focused clarifying question. "
-        "If the message is informational/newsletter with no explicit ask, write a concise acknowledgment. "
+        "You write send-ready email replies from a structured reply plan. "
+        "Write as the mailbox owner using I/we and never as an observer or 'the user'. "
+        "Return only the email body with greeting and closing, no markdown and no subject. "
+        "Start directly with the reply itself. "
+        "Address the sender's request directly when possible and use at least one concrete plan detail in the body. "
+        "Avoid generic filler, summaries, or commentary about the draft. "
+        "If exact facts are missing, give the safest plausible next step and ask at most one focused clarifying question. "
         "Do not invent the mailbox owner's name, title, or signature. "
         "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
         "and never use the mailbox owner's email address as a person name. "
-        "If no name is provided, end with a generic closing such as Best regards, without a personal name. "
-        "Default to a complete response with greeting, substantive body, and closing sign-off. "
-        "Return only the email body text, no markdown and no subject. "
+        "If no name is provided, use a generic closing. "
         "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
-        "Draft a complete response email using the structured reply plan below.\n"
+        "Draft a complete response email from the structured reply plan below.\n"
         "Do not reuse long phrases from the sender's email.\n\n"
         f"{_reply_guidance_block(email_data, reply_plan=reply_plan)}\n"
         f"Reply To: {to_value}\n"
@@ -7016,8 +7313,8 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
             {"role": "user", "content": user_prompt},
         ],
         email_id=email_id,
-        temperature=0.35,
-        num_predict=650,
+        temperature=0.2,
+        num_predict=280,
     )
     if not response_text:
         fallback_draft = _draft_reply_fallback(email_data, reply_plan=reply_plan)
@@ -7081,26 +7378,16 @@ def revise_reply(
     # Preserve user-provided intent while improving clarity/completeness against source context.
     system_prompt = (
         "You revise email drafts using a structured reply plan. "
-        "Write as the mailbox owner (use I/we), not as an observer. "
-        "Never refer to the mailbox owner as 'the user'. "
-        "Return the final send-ready email itself, not commentary about the draft. "
-        "Do not add analysis phrases like 'the main points I found were', 'here are the key points', "
-        "'the sender is asking', or 'here is a revised draft'. "
-        "Treat the current draft as required user context: preserve its concrete points and intent. "
-        "If the current draft is only a short instruction like 'nope', 'sounds good', 'thanks', or "
-        "'wrong email', treat it as the user's intended stance and expand it into a complete reply. "
-        "Do not discard user-provided constraints, commitments, or questions. "
-        "Preserve the original intent, but expand vague or very short drafts into complete replies. "
-        "Include concrete details and next steps when the original email asks for action. "
-        "Use at least one concrete detail from the reply plan in the reply body. "
-        "Avoid vague filler like 'thanks for the update' or 'I'll get back to you later' unless there is no better "
-        "grounded response. "
-        "Write from the plan instead of copying long spans from the original email. "
+        "Write as the mailbox owner using I/we and never as an observer or 'the user'. "
+        "Return only the revised send-ready email with greeting and closing, no markdown and no subject. "
+        "Keep the current draft's intent, constraints, commitments, and questions. "
+        "If the current draft is a short instruction like 'nope', 'sounds good', 'thanks', or 'wrong email', "
+        "expand it into a complete reply with the same stance. "
+        "Replace weak wording with a direct answer and use at least one concrete plan detail. "
         "Do not invent the mailbox owner's name, title, or signature. "
         "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
         "and never use the mailbox owner's email address as a person name. "
-        "If no name is provided, use a generic closing without adding a personal name. "
-        "Return only the revised email body text with greeting and closing, no markdown and no subject. "
+        "If no name is provided, use a generic closing. "
         "Treat plain person names as names, not email addresses."
     )
     user_prompt = (
@@ -7124,7 +7411,7 @@ def revise_reply(
         ],
         email_id=email_id,
         temperature=0.1,
-        num_predict=650,
+        num_predict=280,
     )
     if not response_text:
         # Prefer a deterministic local rewrite over a pure no-op when the model is down.
@@ -7212,7 +7499,7 @@ def generate_reply_draft(
 ):
     """Generate reply draft.
     """
-    # Backward-compatible adapter for legacy qwen_client API consumers.
+    # Backward-compatible adapter for legacy AI client consumers.
     # Support both old and new parameter names.
     if not current_draft_text and current_reply_text:
         current_draft_text = current_reply_text
@@ -7252,34 +7539,7 @@ def summary_looks_unusable(email_data):
             return True
     if _looks_utility_sentence(raw_summary):
         return True
-    if _is_noise_fragment(raw_summary):
-        return True
-    if _summary_uses_subject_content(raw_summary, email_data):
-        return True
-    if contains_common_mojibake(raw_summary):
-        return True
-    if _uses_second_person(raw_summary):
-        return True
-    if _looks_summary_call_to_action(raw_summary, email_data):
-        return True
-    if _looks_bulk_summary_boilerplate_heavy(raw_summary, email_data):
-        return True
-    allowed_parrot_intro = raw_summary.lower().startswith("a promotional update from ")
-    if re.match(
-        r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|job alert|activity update|reminder)\s+from\b",
-        raw_summary,
-        flags=re.IGNORECASE,
-    ) or re.match(
-        r"^[a-z0-9 .&'_-]+\s+sent\s+(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|reminder)\b",
-        raw_summary,
-        flags=re.IGNORECASE,
-    ):
-        allowed_parrot_intro = True
-    if re.match(r"^[a-z0-9 .&'_-]+\s+thanks the team\b", raw_summary, flags=re.IGNORECASE):
-        allowed_parrot_intro = True
-    if _looks_summary_parrot(raw_summary, email_data) and not allowed_parrot_intro:
-        return True
-    return False
+    return _looks_summary_failure(raw_summary)
 
 
 def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "draft"})):

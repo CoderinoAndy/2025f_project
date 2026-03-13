@@ -46,7 +46,7 @@ Manual fallback without `make` (Windows):
 - `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `30`)
 - `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `60`)
 - `GMAIL_AI_TRIAGE_PER_SYNC`: max newly-synced emails to auto-classify per sync (default `0`)
-- `OLLAMA_MODEL`: defaults to `qwen2.5:14b`
+- `OLLAMA_MODEL`: defaults to `mistral-small3.2:24b`
 - `OLLAMA_CLASSIFY_MODEL`: optional override for classification requests
 - `OLLAMA_DRAFT_MODEL`: optional override for draft/revise requests
 - `OLLAMA_SUMMARY_MODEL`: optional override for summary requests
@@ -54,6 +54,10 @@ Manual fallback without `make` (Windows):
 - `OLLAMA_TIMEOUT_SECONDS`: base AI request timeout in seconds (default `45`)
 - `OLLAMA_LONG_TASK_TIMEOUT_SECONDS`: timeout for draft/revise/summarize requests (default `180`)
 - `OLLAMA_SUMMARY_MIN_CHARS`: summary threshold (default `200`)
+- `OLLAMA_VISION_MAX_CHARS`: max full-email chars rendered into screenshot pages (default `12000`)
+- `OLLAMA_VISION_MAX_PAGES`: max screenshot pages attached to a model call (default `6`)
+- `OLLAMA_VISION_WRAP_WIDTH`: wrap width for rendered screenshot pages (default `92`)
+- `OLLAMA_VISION_MAX_LINES`: content lines per screenshot page (default `38`)
 - `AI_ACTION_LOG_PATH`: path to `.txt` AI action log (default `instance/ai_actions.txt`)
 - `APP_DEBUG_LOG_PATH`: path to structured debug log (default `instance/debug_log.txt`)
 
@@ -64,7 +68,7 @@ AI calls are local-only and go to Ollama chat API (`http://127.0.0.1:11434/api/c
 1. Start Ollama:
    - `ollama serve`
 2. Confirm model is available:
-   - `ollama pull qwen2.5:14b`
+   - `ollama pull mistral-small3.2:24b`
 3. Start Flask app:
    - `make run`
 
@@ -81,6 +85,7 @@ AI calls are local-only and go to Ollama chat API (`http://127.0.0.1:11434/api/c
   - classification JSON (`category`, `needs_response`, `priority`, `confidence`)
   - summary generation only for long emails
   - category mapping into app type (`response-needed`, `read-only`, `junk`)
+- Ollama requests are now vision-first: the app renders screenshot-like pages of the full email, attaches those images to the model call, and includes sender/subject metadata as support.
 - AI analysis and draft generation now run in background tasks, so opening an email does not block on model inference.
 - Email page shows loading indicators while AI is running and types generated text into the UI when complete.
 - Draft generation is restricted to response-needed emails.

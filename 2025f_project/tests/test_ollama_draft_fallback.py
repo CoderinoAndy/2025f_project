@@ -42,6 +42,18 @@ def _action_email():
     }
 
 
+def _mock_vision_message(*_args, **_kwargs):
+    return {
+        "role": "user",
+        "content": (
+            "Sender and subject metadata:\n"
+            "- From: Manager <manager@example.com>\n"
+            "- Subject: Please confirm the staffing plan"
+        ),
+        "images": ["fake-vision-image"],
+    }
+
+
 class OllamaDraftFallbackTests(unittest.TestCase):
     def test_revise_fallback_does_not_echo_html_entity_noise_for_bulk_email(self):
         draft = ollama_client._revise_reply_fallback(
@@ -56,8 +68,10 @@ class OllamaDraftFallbackTests(unittest.TestCase):
 
     @mock.patch("app.ollama_client.get_user_display_name", return_value="Casey Nguyen")
     @mock.patch("app.ollama_client._call_ollama", return_value=None)
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
     def test_draft_reply_uses_saved_display_name_in_context_and_fallback(
         self,
+        _mock_vision,
         mock_call,
         _mock_name,
     ):
@@ -80,35 +94,32 @@ class OllamaDraftFallbackTests(unittest.TestCase):
         self.assertIn("by noon", draft.lower())
         self.assertNotIn("I'll review the details and send you a specific response as soon as I can.", draft)
 
-    @mock.patch(
-        "app.ollama_client._call_ollama",
-        side_effect=[
-            (
-                '{"topic":"staffing plan","sender_request":"confirm coverage for the client meeting tomorrow afternoon",'
-                '"deadline":"by noon","key_details":["client meeting tomorrow afternoon","deck handoff and room setup"],'
-                '"tone":"professional","response_mode":"answer_or_confirm","should_ask_clarifying_question":false}'
-            ),
-            None,
-        ],
-    )
-    def test_draft_reply_prompt_uses_reply_plan_not_raw_body_context(self, mock_call):
+    @mock.patch("app.ollama_client._call_ollama", return_value=None)
+    @mock.patch("app.ollama_client._render_email_image_pages")
+    def test_draft_reply_prompt_uses_text_reply_plan_context_for_plain_text_email(
+        self,
+        mock_render,
+        mock_call,
+    ):
         ollama_client.draft_reply(_action_email(), to_value="manager@example.com", email_id="reply-plan-1")
 
-        self.assertEqual(mock_call.call_args_list[0].kwargs["task"], "draft_plan")
-        draft_messages = mock_call.call_args_list[-1].kwargs["messages"]
+        self.assertEqual(mock_call.call_count, 1)
+        mock_render.assert_not_called()
+        draft_messages = mock_call.call_args_list[0].kwargs["messages"]
         self.assertIn("Reply plan:", draft_messages[1]["content"])
         self.assertNotIn("Body excerpts:", draft_messages[1]["content"])
         self.assertIn("deck handoff and room setup", draft_messages[1]["content"])
 
     @mock.patch("app.ollama_client._call_ollama")
-    def test_draft_reply_rejects_copied_request_sentence(self, mock_call):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_draft_reply_rejects_copied_request_sentence(self, _mock_vision, mock_call):
         mock_call.side_effect = [
-            None,
             (
                 "Hi Manager,\n\n"
                 "Can you confirm whether you can cover the client meeting tomorrow afternoon?\n\n"
                 "Best regards,"
             ),
+            None,
         ]
 
         draft = ollama_client.draft_reply(_action_email(), to_value="manager@example.com")
@@ -119,18 +130,17 @@ class OllamaDraftFallbackTests(unittest.TestCase):
         )
         self.assertIn("direct response", draft.lower())
 
-    @mock.patch("app.ollama_client._call_ollama")
-    def test_revise_reply_can_replace_weak_stub_with_plan_grounded_reply(self, mock_call):
-        mock_call.side_effect = [
-            None,
-            (
-                "Hi Manager,\n\n"
-                "Yes, I can cover the client meeting tomorrow afternoon. I'll handle the deck handoff and room setup "
-                "and confirm the roster before noon.\n\n"
-                "Best regards,"
-            ),
-        ]
-
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value=(
+            "Hi Manager,\n\n"
+            "Yes, I can cover the client meeting tomorrow afternoon. I'll handle the deck handoff and room setup "
+            "and confirm the roster before noon.\n\n"
+            "Best regards,"
+        ),
+    )
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_revise_reply_can_replace_weak_stub_with_plan_grounded_reply(self, _mock_vision, mock_call):
         revised = ollama_client.revise_reply(
             _action_email(),
             "Thanks, I'll review and get back to you.",

@@ -14,6 +14,18 @@ def _email(sender, title, body):
     }
 
 
+def _mock_vision_message(*_args, **_kwargs):
+    return {
+        "role": "user",
+        "content": (
+            "Sender and subject metadata:\n"
+            "- From: Deals Team <deals@brand-mail.example>\n"
+            "- Subject: 30% off today plus free shipping"
+        ),
+        "images": ["fake-vision-image"],
+    }
+
+
 class OllamaClassificationTests(unittest.TestCase):
     def test_promotional_store_blast_prefers_junk_uncertain(self):
         email = _email(
@@ -144,7 +156,8 @@ class OllamaClassificationTests(unittest.TestCase):
         "app.ollama_client._call_ollama",
         return_value='{"category":"junk","needs_response":false,"priority":1,"confidence":0.96}',
     )
-    def test_promotional_model_output_stays_junk_uncertain(self, mock_call):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_promotional_model_output_stays_junk_uncertain(self, _mock_vision, mock_call):
         email = _email(
             "Deals Team <deals@brand-mail.example>",
             "30% off today plus free shipping",
@@ -162,7 +175,12 @@ class OllamaClassificationTests(unittest.TestCase):
         "app.ollama_client._call_ollama",
         return_value='{"category":"informational","needs_response":false,"priority":1,"confidence":0.99}',
     )
-    def test_promotional_guardrail_overrides_high_confidence_read_only_model_output(self, mock_call):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_promotional_guardrail_overrides_high_confidence_read_only_model_output(
+        self,
+        _mock_vision,
+        mock_call,
+    ):
         email = _email(
             "Uber Eats <uber@uber.com>",
             "Score big with Lonzo's Kitchen today.",
@@ -176,7 +194,8 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertEqual(mock_call.call_count, 1)
 
     @mock.patch("app.ollama_client._call_ollama", return_value=None)
-    def test_classifier_prompt_explicitly_defines_promotional_junk(self, mock_call):
+    @mock.patch("app.ollama_client._vision_user_message", side_effect=_mock_vision_message)
+    def test_classifier_prompt_explicitly_defines_promotional_junk(self, _mock_vision, mock_call):
         email = _email(
             "Deals Team <deals@brand-mail.example>",
             "30% off today plus free shipping",
@@ -193,7 +212,9 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertIn("If the email is mainly a commercial promotion", system_prompt)
         self.assertIn("still use category=junk and lower confidence", system_prompt)
         self.assertIn("routine retail promotions and brand advertising", system_prompt)
+        self.assertIn("Sender and subject metadata", user_prompt)
         self.assertIn("commercial_promotion_pattern", user_prompt)
+        self.assertEqual(messages[1]["images"], ["fake-vision-image"])
 
 
 if __name__ == "__main__":

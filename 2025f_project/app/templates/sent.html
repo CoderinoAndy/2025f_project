@@ -31,9 +31,10 @@
   <body class="mailbox-list-page"
     data-live-email-view="sent"
     data-sort="{{ sort }}"
+    data-page="{{ current_page }}"
     data-fingerprint="{{ list_fingerprint|default('') }}"
     data-poll-interval-ms="{{ live_poll_interval_ms }}"
-    data-live-polling-enabled="0"
+    data-live-polling-enabled="{{ 1 if live_polling_enabled else 0 }}"
     data-search-query="{{ search_query }}"
   > <!-- Visible page content and interactive controls. -->
     {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
@@ -65,14 +66,7 @@
       </div>
       <!-- Scrollable mailbox list; this block is replaced by live polling updates. -->
       <div class="list-shell">
-        {# If we are filtering, show search context and a quick clear action. #}
-        {% if search_query %}
-        {% set empty_message = "No emails matched your search in Sent." %}
-        {% else %}
-        {% set empty_message = "Your Sent tab is empty." %}
-        {% endif %}
-        {# Shared row markup used by full-page render and live refresh responses. #}
-        {% include "_live_email_rows.html" %}
+        {% include "_mailbox_list_content.html" %}
       </div>
       {# Slide-out bulk action menu for selection mode. #}
       {% include "_bulk_selection_menu.html" %}

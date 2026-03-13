@@ -1,0 +1,32 @@
+{# MVC: View #}
+<!--
+  Template Partial: _mailbox_pagination.html
+  Purpose:
+  - Shows mailbox paging summary and previous/next links.
+  Expected context:
+  - pagination.
+-->
+{% if pagination %}
+  <div class="mailbox-pagination">
+    <div class="mailbox-pagination-summary muted">
+      {% if pagination.total_count > 0 %}
+        Showing {{ pagination.start_index }}-{{ pagination.end_index }} of {{ pagination.total_count }}
+      {% else %}
+        Showing 0 emails
+      {% endif %}
+    </div>
+    <div class="mailbox-pagination-actions">
+      {% if pagination.has_prev %}
+        <a class="btn btn-outline-light btn-sm" href="{{ pagination.prev_url }}">Previous</a>
+      {% else %}
+        <span class="btn btn-outline-light btn-sm disabled" aria-disabled="true">Previous</span>
+      {% endif %}
+      <span class="mailbox-page-indicator">Page {{ pagination.current_page }} of {{ pagination.total_pages }}</span>
+      {% if pagination.has_next %}
+        <a class="btn btn-outline-light btn-sm" href="{{ pagination.next_url }}">Next</a>
+      {% else %}
+        <span class="btn btn-outline-light btn-sm disabled" aria-disabled="true">Next</span>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}

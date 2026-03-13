@@ -1,6 +1,7 @@
 import unittest
 
 from app.email_content import (
+    decode_transfer_encoded_text,
     normalize_outgoing_text,
     repair_body_text,
     repair_header_text,
@@ -52,6 +53,42 @@ class EmailContentRepairTests(unittest.TestCase):
         normalized = normalize_outgoing_text(raw_text)
 
         self.assertEqual(normalized, "Thanks for the update-we'll review it...")
+
+    def test_decode_transfer_encoded_text_preserves_8bit_html(self):
+        html_body = (
+            '<!doctype html><html><body>'
+            '<p>Stock up on everyday essentials today \U0001f3c3\u200d\u2642\ufe0f\u200d\u27a1\ufe0f</p>'
+            '<a href="https://click.example.com/?promo=E2&layout=20">Open in browser</a>'
+            "</body></html>"
+        )
+
+        decoded = decode_transfer_encoded_text(
+            html_body.encode("utf-8"),
+            content_type='text/html; charset="utf-8"',
+            transfer_encoding="8bit",
+        )
+
+        self.assertEqual(decoded, html_body)
+        self.assertIn("\U0001f3c3", decoded)
+        self.assertNotIn("\u00f0\x9f", decoded)
+
+    def test_decode_transfer_encoded_text_skips_qp_decode_for_already_decoded_html(self):
+        html_body = (
+            '<!doctype html><html><head>'
+            '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            "</head><body><p>Hello</p></body></html>"
+        )
+
+        decoded = decode_transfer_encoded_text(
+            html_body.encode("utf-8"),
+            content_type='text/html; charset="utf-8"',
+            transfer_encoding="quoted-printable",
+        )
+
+        self.assertEqual(decoded, html_body)
+        self.assertIn("IE=edge", decoded)
+        self.assertIn("device-width", decoded)
 
 
 if __name__ == "__main__":

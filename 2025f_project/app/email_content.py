@@ -4,7 +4,7 @@ import unicodedata
 from html import unescape
 
 
-_QP_ESCAPE_PATTERN = re.compile(r"=(?:[0-9A-F]{2}|[\r\n])", re.IGNORECASE)
+_QP_ESCAPE_PATTERN = re.compile(r"=(?:[0-9A-F]{2}|[\r\n])")
 _MARKDOWN_LINK_PATTERN = re.compile(
     r"\[[^\]]{1,160}\]\((?:https?://|mailto:|ht=\s*\r?\n?\s*tps://)[^)]+\)",
     re.IGNORECASE,
@@ -89,6 +89,10 @@ def _compact_text(value):
 def _extract_charset(content_type):
     match = _CHARSET_PATTERN.search(str(content_type or ""))
     return match.group(1).strip() if match else ""
+
+
+def _is_html_content_type(content_type):
+    return "text/html" in str(content_type or "").lower()
 
 
 def _mojibake_marker_count(text):
@@ -214,7 +218,7 @@ def looks_transfer_encoded_text(text):
         return False
     qp_hits = len(_QP_ESCAPE_PATTERN.findall(value))
     markdown_hits = len(_MARKDOWN_LINK_PATTERN.findall(value))
-    if "=3D" in value or "=20" in value or "=E2=" in value:
+    if any(marker in value for marker in ("=3D", "=20", "=09", "=0A", "=0D", "=E2=")):
         return True
     if "=\r\n" in value or "=\n" in value:
         return True
@@ -232,12 +236,14 @@ def decode_transfer_encoded_text(content_bytes, *, content_type="", transfer_enc
 
     charset = _extract_charset(content_type)
     encoding = str(transfer_encoding or "").strip().lower()
-    decoded_bytes = raw
-    if "quoted-printable" in encoding:
+    is_html = _is_html_content_type(content_type)
+    text = _decode_bytes(raw, charset=charset)
+    if "quoted-printable" in encoding and looks_transfer_encoded_text(text):
         decoded_bytes = quopri.decodestring(raw)
-
-    text = _decode_bytes(decoded_bytes, charset=charset)
-    if looks_transfer_encoded_text(text):
+        repaired_text = _decode_bytes(decoded_bytes, charset=charset)
+        if _text_quality_score(repaired_text) >= _text_quality_score(text):
+            text = repaired_text
+    if looks_transfer_encoded_text(text) and not is_html:
         reparsed = quopri.decodestring(text.encode("utf-8", errors="ignore"))
         repaired_text = _decode_bytes(reparsed, charset=charset)
         if _text_quality_score(repaired_text) >= _text_quality_score(text):

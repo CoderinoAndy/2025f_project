@@ -16,6 +16,7 @@ from .email_content import (
 APP_ROOT = Path(__file__).resolve().parent.parent
 DB_DEFAULT = str(APP_ROOT / "instance" / "app.sqlite")
 LOCAL_USER_EMAIL = "you@example.com"
+SQLITE_BUSY_TIMEOUT_MS = 30000
 ALLOWED_TYPES = {
     "response-needed",
     "read-only",
@@ -76,15 +77,37 @@ SELECT
 FROM email_messages m
 """
 
+MAILBOX_LIST_SELECT_SQL = """
+SELECT
+    m.id,
+    m.title,
+    m.type,
+    m.priority,
+    m.is_read,
+    m.received_at,
+    m.is_archived
+FROM email_messages m
+"""
+
+MAILBOX_SORT_SQL = {
+    "date_desc": "m.received_at DESC, m.id DESC",
+    "date_asc": "m.received_at ASC, m.id ASC",
+    "priority_desc": "m.priority DESC, m.received_at DESC, m.id DESC",
+    "priority_asc": "m.priority ASC, m.received_at DESC, m.id DESC",
+    "unread_first": "m.is_read ASC, m.received_at DESC, m.id DESC",
+    "read_first": "m.is_read DESC, m.received_at DESC, m.id DESC",
+}
+
 
 @contextmanager
 def db_session(db_path):
     """Database session.
     """
     # One connection per context call keeps transaction boundaries explicit.
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS};")
         conn.execute("PRAGMA foreign_keys = ON;")
         yield conn
         # Commit once per session so callers can perform multi-statement updates atomically.
@@ -116,6 +139,8 @@ def init_db(db_path=DB_DEFAULT):
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with db_session(db_path) as conn:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.executescript(schema_path.read_text(encoding="utf-8"))
         _apply_schema_migrations(conn)
     log_event(
@@ -470,6 +495,68 @@ def _split_addresses(raw_value):
     return addresses
 
 
+def _escape_like_pattern(raw_value):
+    """Escape SQL LIKE wildcards so mailbox search behaves like plain text search."""
+    text = str(raw_value or "")
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _build_mailbox_filter_clause(
+    *,
+    email_type=None,
+    exclude_types=None,
+    include_archived=False,
+    archived_only=False,
+    search_query=None,
+):
+    """Build shared WHERE clauses for mailbox list/count queries."""
+    where_clauses = []
+    params = []
+
+    if archived_only:
+        where_clauses.append("m.is_archived = 1")
+    elif not include_archived:
+        where_clauses.append("m.is_archived = 0")
+
+    if email_type:
+        where_clauses.append("m.type = ?")
+        params.append(email_type)
+
+    excluded = sorted(set(exclude_types or []))
+    if excluded:
+        placeholders = ", ".join("?" for _ in excluded)
+        where_clauses.append(f"m.type NOT IN ({placeholders})")
+        params.extend(excluded)
+
+    normalized_query = " ".join(str(search_query or "").split()).strip()
+    if normalized_query:
+        like_value = f"%{_escape_like_pattern(normalized_query.lower())}%"
+        where_clauses.append(
+            """
+            (
+                lower(m.title) LIKE ? ESCAPE '\\'
+                OR lower(m.sender) LIKE ? ESCAPE '\\'
+                OR lower(coalesce(m.body, '')) LIKE ? ESCAPE '\\'
+                OR EXISTS (
+                    SELECT 1
+                    FROM email_recipients er
+                    WHERE er.email_id = m.id
+                      AND lower(er.address) LIKE ? ESCAPE '\\'
+                )
+            )
+            """
+        )
+        params.extend([like_value, like_value, like_value, like_value])
+
+    clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    return clause, params
+
+
+def _resolve_mailbox_sort_sql(sort_code):
+    """Resolve a mailbox sort code to a safe SQL ORDER BY fragment."""
+    return MAILBOX_SORT_SQL.get(str(sort_code or "").strip(), MAILBOX_SORT_SQL["date_desc"])
+
+
 def _insert_recipients(conn, email_id, recipient_type, raw_value):
     """Insert recipients.
     """
@@ -557,22 +644,13 @@ def fetch_emails(
 ):
     """Fetch emails.
     """
-    # Build a composable WHERE clause so one function can serve every mailbox tab.
-    where_clauses = []
-    params = []
-    if archived_only:
-        where_clauses.append("m.is_archived = 1")
-    elif not include_archived:
-        where_clauses.append("m.is_archived = 0")
-    if email_type:
-        where_clauses.append("m.type = ?")
-        params.append(email_type)
-    excluded = sorted(set(exclude_types or []))
-    if excluded:
-        placeholders = ", ".join("?" for _ in excluded)
-        where_clauses.append(f"m.type NOT IN ({placeholders})")
-        params.extend(excluded)
-    clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    # Full-message fetch used by detail views and smaller in-memory workflows.
+    clause, params = _build_mailbox_filter_clause(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        include_archived=include_archived,
+        archived_only=archived_only,
+    )
     with db_session(db_path) as conn:
         cur = conn.execute(
             f"""
@@ -581,6 +659,71 @@ def fetch_emails(
             ORDER BY m.received_at DESC, m.id DESC
             """,
             params,
+        )
+        return [_row_to_dict(r) for r in cur.fetchall()]
+
+
+def count_mailbox_emails(
+    *,
+    email_type=None,
+    exclude_types=None,
+    include_archived=False,
+    archived_only=False,
+    search_query=None,
+    db_path=DB_DEFAULT,
+):
+    """Count rows for a mailbox list query."""
+    clause, params = _build_mailbox_filter_clause(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        include_archived=include_archived,
+        archived_only=archived_only,
+        search_query=search_query,
+    )
+    with db_session(db_path) as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM email_messages m
+            {clause}
+            """,
+            params,
+        ).fetchone()
+    return int(row["total"] or 0) if row else 0
+
+
+def fetch_mailbox_page(
+    *,
+    email_type=None,
+    exclude_types=None,
+    include_archived=False,
+    archived_only=False,
+    search_query=None,
+    sort_code="date_desc",
+    limit=100,
+    offset=0,
+    db_path=DB_DEFAULT,
+):
+    """Fetch one lightweight mailbox page for list views."""
+    safe_limit = max(1, int(limit or 100))
+    safe_offset = max(0, int(offset or 0))
+    clause, params = _build_mailbox_filter_clause(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        include_archived=include_archived,
+        archived_only=archived_only,
+        search_query=search_query,
+    )
+    order_by_sql = _resolve_mailbox_sort_sql(sort_code)
+    with db_session(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            {MAILBOX_LIST_SELECT_SQL}
+            {clause}
+            ORDER BY {order_by_sql}
+            LIMIT ? OFFSET ?
+            """,
+            [*params, safe_limit, safe_offset],
         )
         return [_row_to_dict(r) for r in cur.fetchall()]
 

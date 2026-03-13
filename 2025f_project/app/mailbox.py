@@ -4,8 +4,9 @@ import re
 import threading
 import time
 from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from .db import fetch_emails
+from .db import count_mailbox_emails, fetch_mailbox_page
 from .gmail_service import sync_drafts_from_gmail
 
 # Helpers for live mailbox tabs: filtering, sorting, and sync throttling.
@@ -57,12 +58,14 @@ LIVE_LIST_CONFIGS = {
         "email_type": "sent",
         "empty_message": "Your Sent tab is empty.",
         "search_empty_message": "No emails matched your search in Sent.",
+        "live_polling_enabled": False,
     },
     "draft": {
         "email_type": "draft",
         "empty_message": "Your Drafts tab is empty.",
         "search_empty_message": "No emails matched your search in Drafts.",
         "sync_drafts": True,
+        "live_polling_enabled": False,
     },
 }
 
@@ -86,6 +89,7 @@ LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS = max(
     _env_int("LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS", 60),
 )
 DRAFT_SYNC_INTERVAL_SECONDS = max(10, _env_int("DRAFT_SYNC_INTERVAL_SECONDS", 45))
+MAILBOX_PAGE_SIZE = max(25, min(250, _env_int("MAILBOX_PAGE_SIZE", 100)))
 
 
 class _MailboxSyncState:
@@ -135,6 +139,54 @@ def trigger_draft_sync_async(max_results=40, force=False):
 
     threading.Thread(target=_worker, daemon=True).start()
     return True
+
+
+def build_mailbox_pagination(current_list_url, *, page, page_size, total_count):
+    """Build canonical paging URLs plus summary fields for mailbox templates."""
+    total = max(0, int(total_count or 0))
+    safe_page_size = max(1, int(page_size or MAILBOX_PAGE_SIZE))
+    total_pages = max(1, (total + safe_page_size - 1) // safe_page_size) if total else 1
+    current_page = min(max(1, int(page or 1)), total_pages)
+
+    def _page_url(target_page):
+        parsed = urlsplit(current_list_url or "/")
+        query_pairs = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key != "page"
+        ]
+        if target_page > 1:
+            query_pairs.append(("page", str(target_page)))
+        query_text = urlencode(query_pairs)
+        path = parsed.path or "/"
+        return f"{path}?{query_text}" if query_text else path
+
+    start_index = 0 if total == 0 else ((current_page - 1) * safe_page_size) + 1
+    end_index = min(total, current_page * safe_page_size) if total else 0
+
+    return {
+        "current_page": current_page,
+        "page_size": safe_page_size,
+        "total_count": total,
+        "total_pages": total_pages,
+        "start_index": start_index,
+        "end_index": end_index,
+        "has_prev": current_page > 1,
+        "has_next": current_page < total_pages,
+        "prev_url": _page_url(current_page - 1) if current_page > 1 else None,
+        "next_url": _page_url(current_page + 1) if current_page < total_pages else None,
+        "current_url": _page_url(current_page),
+    }
+
+
+def mailbox_live_polling_enabled(list_view, search_query="", page=1):
+    """Return whether a mailbox page should use live polling."""
+    config = LIVE_LIST_CONFIGS.get(list_view) or {}
+    if not config.get("live_polling_enabled", True):
+        return False
+    if (search_query or "").strip():
+        return False
+    return max(1, int(page or 1)) == 1
 
 
 def _email_search_text(email):
@@ -275,9 +327,11 @@ def sort_emails(emails, sort_code):
     return sorted_rows
 
 
-def emails_fingerprint(emails):
+def emails_fingerprint(emails, *, total_count=None, page=None):
     """Return a light hash string for live list refresh checks."""
     rows = []
+    rows.append(str(max(0, int(total_count or 0))))
+    rows.append(str(max(1, int(page or 1))))
     for email in emails:
         rows.append(
             ":".join(
@@ -302,27 +356,47 @@ def build_mailbox_context(
     search_query,
     live_poll_interval_ms,
     include_fingerprint=True,
+    presorted=False,
+    empty_message="",
+    pagination=None,
+    current_page=1,
+    live_polling_enabled=True,
 ):
     """Build the template context used by mailbox pages."""
     # All mailbox templates receive the same core fields for consistency.
-    emails_sorted = sort_emails(emails, sort_code)
+    emails_sorted = emails if presorted else sort_emails(emails, sort_code)
     context = {
         "emails": emails_sorted,
         "sort": sort_code,
         "current_list_url": current_list_url,
         "search_query": search_query,
         "live_poll_interval_ms": live_poll_interval_ms,
+        "empty_message": empty_message,
+        "pagination": pagination or {},
+        "current_page": max(1, int(current_page or 1)),
+        "live_polling_enabled": bool(live_polling_enabled),
     }
     if include_fingerprint:
-        context["list_fingerprint"] = emails_fingerprint(emails_sorted)
+        pagination_data = pagination or {}
+        context["list_fingerprint"] = emails_fingerprint(
+            emails_sorted,
+            total_count=pagination_data.get("total_count"),
+            page=pagination_data.get("current_page", current_page),
+        )
     return context
 
 
-def fetch_live_list_emails(list_view, search_query=""):
-    """Fetch rows + empty message for a live mailbox tab."""
+def fetch_live_list_emails(
+    list_view,
+    search_query="",
+    sort_code="date_desc",
+    page=1,
+    page_size=MAILBOX_PAGE_SIZE,
+):
+    """Fetch one mailbox page plus empty-state and count metadata."""
     config = LIVE_LIST_CONFIGS.get(list_view)
     if not config:
-        return None, None
+        return None, None, 0, 1
 
     # Draft tab asks Gmail for fresh drafts before reading local DB.
     if config.get("sync_drafts"):
@@ -331,12 +405,30 @@ def fetch_live_list_emails(list_view, search_query=""):
     email_type = config.get("email_type")
     exclude_types = config.get("exclude_types")
     archived_only = bool(config.get("archived_only"))
-    if email_type:
-        emails = fetch_emails(email_type=email_type, archived_only=archived_only)
-    else:
-        emails = fetch_emails(exclude_types=exclude_types, archived_only=archived_only)
-
-    filtered = filter_emails_by_query(emails, search_query)
+    safe_page_size = max(1, int(page_size or MAILBOX_PAGE_SIZE))
+    total_count = count_mailbox_emails(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        archived_only=archived_only,
+        search_query=search_query,
+    )
+    total_pages = max(1, (total_count + safe_page_size - 1) // safe_page_size) if total_count else 1
+    current_page = min(max(1, int(page or 1)), total_pages)
+    offset = (current_page - 1) * safe_page_size
+    emails = fetch_mailbox_page(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        archived_only=archived_only,
+        search_query=search_query,
+        sort_code=sort_code,
+        limit=safe_page_size,
+        offset=offset,
+    )
     if (search_query or "").strip():
-        return filtered, config.get("search_empty_message", "No emails matched your search.")
-    return filtered, config["empty_message"]
+        return (
+            emails,
+            config.get("search_empty_message", "No emails matched your search."),
+            total_count,
+            current_page,
+        )
+    return emails, config["empty_message"], total_count, current_page

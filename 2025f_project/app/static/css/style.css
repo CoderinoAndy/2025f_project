@@ -539,6 +539,27 @@ body.mailbox-list-page .list-shell{
   color: var(--muted);
 }
 
+.mailbox-pagination{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px 4px;
+}
+
+.mailbox-pagination-actions{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mailbox-page-indicator{
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
 .list-select-toggle-btn{
   border: 1px solid rgba(236, 233, 245, 0.24);
   border-radius: 999px;

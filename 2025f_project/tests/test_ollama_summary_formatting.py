@@ -129,7 +129,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertIsNotNone(summary)
         self.assertIn("question digest", summary.lower())
-        self.assertIn("\n\n- ", summary)
+        self.assertNotIn("\n", summary)
         self.assertIn("One featured question asks:", summary)
         self.assertIn("Another asks:", summary)
 
@@ -152,22 +152,24 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertIn("There's more to life than being happy", summary)
         self.assertIn("How boredom can lead to your most brilliant ideas", summary)
 
-    def test_rewrite_summary_for_second_person_preserves_bullets(self):
+    def test_rewrite_summary_for_second_person_flattens_bullets(self):
         rewritten = ollama_client._rewrite_summary_for_second_person(
             "- The user can read the politics update.\n\n- The recipient should watch the health story."
         )
 
-        self.assertIn("\n\n- ", rewritten)
+        self.assertNotIn("\n", rewritten)
+        self.assertNotIn("- ", rewritten)
         self.assertIn("you can read the politics update.", rewritten.lower())
         self.assertIn("you should watch the health story.", rewritten.lower())
 
-    def test_rewrite_summary_for_second_person_splits_inline_bullets(self):
+    def test_rewrite_summary_for_second_person_flattens_inline_bullets(self):
         rewritten = ollama_client._rewrite_summary_for_second_person(
             "- First story covers tariff threats. - Second story follows hospitals preparing for flu season."
         )
 
-        self.assertTrue(rewritten.startswith("- First story"))
-        self.assertIn("\n\n- Second story", rewritten)
+        self.assertTrue(rewritten.startswith("First story"))
+        self.assertNotIn("- Second story", rewritten)
+        self.assertIn("Second story", rewritten)
 
     def test_multiline_summary_is_not_marked_unusable_just_for_newlines(self):
         email = _digest_email()
@@ -279,13 +281,34 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         summary = ollama_client.summarize_email(email, email_id="digest-2")
 
         self.assertIsNotNone(summary)
-        self.assertIn("\n\n- ", summary)
+        self.assertNotIn("\n", summary)
         summarize_call = next(
             call for call in mock_call.call_args_list if call.kwargs.get("task") == "summarize"
         )
         messages = summarize_call.kwargs["messages"]
-        self.assertIn("newsletter or digest", messages[0]["content"].lower())
-        self.assertIn("bullet list", messages[0]["content"].lower())
+        self.assertNotIn("bullet list", messages[0]["content"].lower())
+        self.assertIn("one compact paragraph", messages[0]["content"].lower())
+
+    @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value=(
+            "You need to confirm whether you can cover the client meeting by noon while preparing for the "
+            "2 PM deck handoff and room setup."
+        ),
+    )
+    def test_summarize_email_uses_key_evidence_block_in_prompt(self, mock_call, _mock_bulk):
+        email = _long_action_email()
+
+        ollama_client.summarize_email(email, email_id="summary-evidence-1")
+
+        summarize_call = next(
+            call for call in mock_call.call_args_list if call.kwargs.get("task") == "summarize"
+        )
+        user_prompt = summarize_call.kwargs["messages"][1]["content"]
+        self.assertIn("Key evidence:", user_prompt)
+        self.assertNotIn("Body excerpts:", user_prompt)
+        self.assertIn("deck handoff", user_prompt)
 
     @mock.patch(
         "app.ollama_client._call_ollama",

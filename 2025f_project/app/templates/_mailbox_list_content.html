@@ -1,0 +1,10 @@
+{# MVC: View #}
+<!--
+  Template Partial: _mailbox_list_content.html
+  Purpose:
+  - Renders the mailbox row list plus pagination summary/links as one replaceable block.
+  Expected context:
+  - emails, current_list_url, empty_message, pagination.
+-->
+{% include "_live_email_rows.html" %}
+{% include "_mailbox_pagination.html" %}

@@ -18,16 +18,19 @@
     : 2000;
   const pollingEnabled = pageRoot.dataset.livePollingEnabled !== "0"; // Poll only on views that explicitly opt in.
   const searchQuery = pageRoot.dataset.searchQuery || ""; // Keep filtered list refreshes scoped to active query.
+  const parsedPage = Number(pageRoot.dataset.page || "1"); // Current mailbox page for paginated list refreshes.
   const sortSelect = document.querySelector(".sort-select"); // Sort dropdown affects polling query params.
   let currentSort = pageRoot.dataset.sort || "date_desc"; // Current sort mode sent to API.
+  let currentPage = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1; // Keep refreshes scoped to the active page.
   let lastFingerprint = pageRoot.dataset.fingerprint || ""; // Last known content hash from server.
   let timerId = null; // Active setInterval handle, if polling is running.
   let inFlight = false; // Prevent overlapping fetches when responses are slow.
 
-  const buildUrl = () => { // Build an API URL for the latest rows of this view/sort.
+  const buildUrl = () => { // Build an API URL for the latest rows of this view/sort/page.
     const params = new URLSearchParams();
     params.set("view", listView); // Mailbox tab currently open.
     params.set("sort", currentSort); // Sort code selected by user.
+    params.set("page", currentPage.toString()); // Preserve the current mailbox page during refreshes.
     params.set("sync", pollingEnabled ? "1" : "0"); // Skip provider sync on views that disabled polling.
     if (searchQuery) {
       params.set("q", searchQuery); // Preserve current search filter when refreshing rows.
@@ -56,6 +59,16 @@
       const payload = await response.json();
       if (!payload || typeof payload.html !== "string") { // Ignore malformed responses.
         return;
+      }
+      if (Number.isFinite(Number(payload.page)) && Number(payload.page) > 0) {
+        currentPage = Number(payload.page);
+        pageRoot.dataset.page = String(currentPage);
+      }
+      if (typeof payload.current_list_url === "string" && payload.current_list_url) {
+        const currentLocation = `${window.location.pathname}${window.location.search}`;
+        if (payload.current_list_url !== currentLocation) {
+          window.history.replaceState(null, "", payload.current_list_url);
+        }
       }
       if (payload.fingerprint && payload.fingerprint === lastFingerprint) { // Skip DOM write when content is unchanged.
         return;

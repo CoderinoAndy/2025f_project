@@ -30,9 +30,10 @@
   <body class="mailbox-list-page"
     data-live-email-view="read-only"
     data-sort="{{ sort }}"
+    data-page="{{ current_page }}"
     data-fingerprint="{{ list_fingerprint|default('') }}"
     data-poll-interval-ms="{{ live_poll_interval_ms }}"
-    data-live-polling-enabled="{{ 1 if not search_query else 0 }}"
+    data-live-polling-enabled="{{ 1 if live_polling_enabled else 0 }}"
     data-search-query="{{ search_query }}"
   > <!-- Visible page content and interactive controls. -->
     {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
@@ -63,12 +64,7 @@
         </form>
       </div>
       <div class="list-shell">
-        {% if search_query %}
-        {% set empty_message = "No emails matched your search in Read only." %}
-        {% else %}
-        {% set empty_message = "Your Read Only tab is empty." %}
-        {% endif %}
-        {% include "_live_email_rows.html" %}
+        {% include "_mailbox_list_content.html" %}
       </div>
       {% include "_bulk_selection_menu.html" %}
     </div>

@@ -5,7 +5,6 @@ import os
 import threading
 from urllib.parse import urlsplit
 from .db import (
-    fetch_emails,
     fetch_email_by_id,
     fetch_email_by_provider_draft_id,
     fetch_thread_emails,
@@ -31,6 +30,7 @@ from .gmail_service import (
     set_message_read_state,
     set_message_type,
     sync_drafts_from_gmail,
+    sync_message_by_external_id,
     trash_message,
     trigger_background_sync,
     upsert_gmail_draft,
@@ -47,15 +47,14 @@ from .ollama_client import (
     start_draft_task as _start_draft_task,
 )
 from .mailbox import (
-    HIDDEN_FROM_MAIN_LIST_TYPES,
     LIVE_EMAIL_POLL_INTERVAL_MS,
+    MAILBOX_PAGE_SIZE,
+    build_mailbox_pagination,
     build_mailbox_context,
     emails_fingerprint as _emails_fingerprint,
     fetch_live_list_emails as _fetch_live_list_emails,
-    filter_emails_by_query as _filter_emails_by_query,
+    mailbox_live_polling_enabled,
     maybe_get_live_sync_max_results,
-    sort_emails,
-    trigger_draft_sync_async as _trigger_draft_sync_async,
 )
 
 main = Blueprint("main", __name__)
@@ -184,7 +183,8 @@ def _list_query_state():
     # Apply list query state rules to shape list output for the active mailbox view.
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
-    return sort_code, search_query, _current_list_url()
+    page = max(1, _parse_optional_int(request.args.get("page")) or 1)
+    return sort_code, search_query, page, _current_list_url()
 
 
 def _safe_next_url(raw_next):
@@ -216,31 +216,44 @@ def _next_url_from_request():
 def _render_mailbox_page(
     template_name,
     *,
-    email_type=None,
-    exclude_types=None,
-    archived_only=False,
+    list_view,
     include_fingerprint=True,
-    sync_drafts=False,
 ):
     """Render mailbox page.
     """
     # Shared mailbox renderer used by /allemails, /junk, /archive, etc.
-    sort_code, search_query, current_list_url = _list_query_state()
-    if sync_drafts:
-        _trigger_draft_sync_async(max_results=40)
-    emails = fetch_emails(
-        email_type=email_type,
-        exclude_types=exclude_types,
-        archived_only=archived_only,
+    sort_code, search_query, page, current_list_url = _list_query_state()
+    emails, empty_message, total_count, current_page = _fetch_live_list_emails(
+        list_view,
+        search_query=search_query,
+        sort_code=sort_code,
+        page=page,
+        page_size=MAILBOX_PAGE_SIZE,
     )
-    emails = _filter_emails_by_query(emails, search_query)
+    if emails is None:
+        abort(404)
+    pagination = build_mailbox_pagination(
+        current_list_url,
+        page=current_page,
+        page_size=MAILBOX_PAGE_SIZE,
+        total_count=total_count,
+    )
     context = build_mailbox_context(
         emails,
         sort_code=sort_code,
-        current_list_url=current_list_url,
+        current_list_url=pagination["current_url"],
         search_query=search_query,
         live_poll_interval_ms=LIVE_EMAIL_POLL_INTERVAL_MS,
         include_fingerprint=include_fingerprint,
+        presorted=True,
+        empty_message=empty_message,
+        pagination=pagination,
+        current_page=current_page,
+        live_polling_enabled=mailbox_live_polling_enabled(
+            list_view,
+            search_query=search_query,
+            page=current_page,
+        ),
     )
     return render_template(template_name, **context)
 
@@ -329,6 +342,7 @@ def list_emails_api():
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
+    page = max(1, _parse_optional_int(request.args.get("page")) or 1)
     sync_requested = (request.args.get("sync") or "1").strip() != "0"
     current_list_url = _safe_next_url(request.args.get("next"))
 
@@ -337,23 +351,40 @@ def list_emails_api():
     if sync_max_results is not None:
         trigger_background_sync(max_results=sync_max_results)
 
-    emails, empty_message = _fetch_live_list_emails(list_view, search_query=search_query)
+    emails, empty_message, total_count, current_page = _fetch_live_list_emails(
+        list_view,
+        search_query=search_query,
+        sort_code=sort_code,
+        page=page,
+        page_size=MAILBOX_PAGE_SIZE,
+    )
     if emails is None:
         abort(400)
 
-    # Keep API and full-page list ordering behavior identical.
-    emails_sorted = sort_emails(emails, sort_code)
+    pagination = build_mailbox_pagination(
+        current_list_url,
+        page=current_page,
+        page_size=MAILBOX_PAGE_SIZE,
+        total_count=total_count,
+    )
     rows_html = render_template(
-        "_live_email_rows.html",
-        emails=emails_sorted,
-        current_list_url=current_list_url,
+        "_mailbox_list_content.html",
+        emails=emails,
+        current_list_url=pagination["current_url"],
         empty_message=empty_message,
+        pagination=pagination,
     )
     return jsonify(
         {
             "html": rows_html,
-            "fingerprint": _emails_fingerprint(emails_sorted),
-            "count": len(emails_sorted),
+            "fingerprint": _emails_fingerprint(
+                emails,
+                total_count=total_count,
+                page=current_page,
+            ),
+            "count": len(emails),
+            "page": current_page,
+            "current_list_url": pagination["current_url"],
         }
     )
 
@@ -462,7 +493,7 @@ def allemails():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "allemails.html",
-        exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
+        list_view="all",
     )
 
 @main.route("/readonly")
@@ -472,7 +503,7 @@ def readonly():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "readonly.html",
-        email_type="read-only",
+        list_view="read-only",
     )
 
 @main.route("/responseneeded")
@@ -482,7 +513,7 @@ def responseneeded():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "responseneeded.html",
-        email_type="response-needed",
+        list_view="response-needed",
     )
 
 @main.route("/junkmailconfirm")
@@ -492,7 +523,7 @@ def junkmailconfirm():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "junkmailconfirm.html",
-        email_type="junk-uncertain",
+        list_view="junk-uncertain",
     )
 
 @main.route("/junk")
@@ -502,7 +533,7 @@ def junk():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "junk.html",
-        email_type="junk",
+        list_view="junk",
     )
 
 
@@ -513,7 +544,7 @@ def sent():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "sent.html",
-        email_type="sent",
+        list_view="sent",
     )
 
 
@@ -524,8 +555,7 @@ def drafts():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "drafts.html",
-        email_type="draft",
-        sync_drafts=True,
+        list_view="draft",
     )
 
 
@@ -536,8 +566,7 @@ def archive():
     # Route handler: validate request inputs, then render or redirect.
     return _render_mailbox_page(
         "archive.html",
-        exclude_types=HIDDEN_FROM_MAIN_LIST_TYPES,
-        archived_only=True,
+        list_view="archived",
     )
 
 @main.route("/email/<int:id>")
@@ -548,9 +577,14 @@ def email(id):
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
+    external_id = email_data.get("external_id")
+    # Backfill missing HTML for older rows that were synced before MIME decoding was fixed.
+    if not email_data.get("body_html") and external_id:
+        refreshed = sync_message_by_external_id(external_id)
+        if refreshed:
+            email_data = fetch_email_by_id(id) or email_data
     # Opening a normal inbox email marks it as read in local DB and provider.
     if email_data.get("type") not in NON_MAIN_TYPES and not bool(email_data.get("is_archived")):
-        external_id = email_data.get("external_id")
         if external_id:
             _set_message_read_state_async(external_id, read=True)
         mark_read(id, True)

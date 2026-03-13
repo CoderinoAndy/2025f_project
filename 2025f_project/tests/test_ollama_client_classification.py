@@ -15,7 +15,7 @@ def _email(sender, title, body):
 
 
 class OllamaClassificationTests(unittest.TestCase):
-    def test_promotional_store_blast_is_junk(self):
+    def test_promotional_store_blast_prefers_junk_uncertain(self):
         email = _email(
             "Deals Team <deals@brand-mail.example>",
             "Last chance: 30% off today plus free shipping",
@@ -31,7 +31,7 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertTrue(assessment["commercial_promotion"])
         self.assertFalse(assessment["editorial_like"])
         self.assertEqual(result["category"], "junk")
-        self.assertEqual(result["email_type"], "junk")
+        self.assertEqual(result["email_type"], "junk-uncertain")
 
     def test_editorial_digest_stays_read_only(self):
         email = _email(
@@ -102,6 +102,24 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertEqual(result["category"], "junk")
         self.assertEqual(result["email_type"], "junk")
 
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value='{"category":"junk","needs_response":false,"priority":1,"confidence":0.96}',
+    )
+    def test_promotional_model_output_stays_junk_uncertain(self, mock_call):
+        email = _email(
+            "Deals Team <deals@brand-mail.example>",
+            "30% off today plus free shipping",
+            "Use code SPRING30 at checkout. Shop now. Manage preferences or unsubscribe.",
+        )
+
+        result = ollama_client.classify_email(email, email_id="promo-merge-1")
+
+        self.assertEqual(result["category"], "junk")
+        self.assertEqual(result["email_type"], "junk-uncertain")
+        self.assertLess(result["confidence"], ollama_client.JUNK_LOW_CONFIDENCE_THRESHOLD)
+        self.assertEqual(mock_call.call_count, 1)
+
     @mock.patch("app.ollama_client._call_ollama", return_value=None)
     def test_classifier_prompt_explicitly_defines_promotional_junk(self, mock_call):
         email = _email(
@@ -119,6 +137,7 @@ class OllamaClassificationTests(unittest.TestCase):
         self.assertIn("main purpose is advertising, promotion, sales conversion", system_prompt)
         self.assertIn("If the email is mainly a commercial promotion", system_prompt)
         self.assertIn("still use category=junk and lower confidence", system_prompt)
+        self.assertIn("routine retail promotions and brand advertising", system_prompt)
         self.assertIn("commercial_promotion_pattern", user_prompt)
 
 

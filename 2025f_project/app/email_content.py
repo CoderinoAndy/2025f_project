@@ -23,11 +23,15 @@ _HTML_BLOCK_TAG_PATTERN = re.compile(
     r"blockquote|ul|ol|h[1-6])(?:\s+[^>]*)?>"
 )
 _HTML_TAG_PATTERN = re.compile(r"(?is)<[^>]+>")
+_HTML_SCRIPT_BLOCK_PATTERN = re.compile(r"(?is)<\s*(script|noscript)\b[^>]*>.*?</\1\s*>")
+_HTML_HEAD_OPEN_PATTERN = re.compile(r"(?is)<head\b[^>]*>")
+_HTML_HTML_OPEN_PATTERN = re.compile(r"(?is)<html\b[^>]*>")
 _CHARSET_PATTERN = re.compile(r"charset\s*=\s*[\"']?([^\"';\s]+)", re.IGNORECASE)
 _INVISIBLE_CHAR_PATTERN = re.compile(
     r"[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u2000-\u200f\u2028-\u202f\u2060-\u206f\ufeff]"
 )
 _UNSAFE_TEXT_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_QP_STRONG_ESCAPE_PATTERN = re.compile(r"(?:=[0-9A-F]{2}){2,}")
 _MOJIBAKE_SEQUENCE_PATTERN = re.compile(
     r"(?:"
     r"[\u00c2\u00c3\u00e2\u00ef\u00f0]"
@@ -216,13 +220,12 @@ def looks_transfer_encoded_text(text):
     value = str(text or "")
     if not value:
         return False
-    qp_hits = len(_QP_ESCAPE_PATTERN.findall(value))
     markdown_hits = len(_MARKDOWN_LINK_PATTERN.findall(value))
-    if any(marker in value for marker in ("=3D", "=20", "=09", "=0A", "=0D", "=E2=")):
+    if any(marker in value for marker in ("=3D", "=20", "=09", "=0A", "=0D", "=C2=", "=E2=")):
         return True
     if "=\r\n" in value or "=\n" in value:
         return True
-    if qp_hits >= 4:
+    if _QP_STRONG_ESCAPE_PATTERN.search(value):
         return True
     if markdown_hits >= 4 and len(_compact_text(value)) >= 300:
         return True
@@ -241,12 +244,14 @@ def decode_transfer_encoded_text(content_bytes, *, content_type="", transfer_enc
     if "quoted-printable" in encoding and looks_transfer_encoded_text(text):
         decoded_bytes = quopri.decodestring(raw)
         repaired_text = _decode_bytes(decoded_bytes, charset=charset)
-        if _text_quality_score(repaired_text) >= _text_quality_score(text):
+        decoded_has_new_mojibake = contains_common_mojibake(repaired_text) and not contains_common_mojibake(text)
+        if not decoded_has_new_mojibake and _text_quality_score(repaired_text) >= _text_quality_score(text):
             text = repaired_text
     if looks_transfer_encoded_text(text) and not is_html:
         reparsed = quopri.decodestring(text.encode("utf-8", errors="ignore"))
         repaired_text = _decode_bytes(reparsed, charset=charset)
-        if _text_quality_score(repaired_text) >= _text_quality_score(text):
+        decoded_has_new_mojibake = contains_common_mojibake(repaired_text) and not contains_common_mojibake(text)
+        if not decoded_has_new_mojibake and _text_quality_score(repaired_text) >= _text_quality_score(text):
             text = repaired_text
     return text
 
@@ -276,6 +281,45 @@ def repair_html_content(raw_html):
     cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)
     cleaned = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", cleaned)
     return cleaned.strip()
+
+
+def prepare_html_email_document(raw_html):
+    """Wrap repaired email HTML in a stable document for iframe rendering."""
+    html = repair_html_content(raw_html)
+    if not html:
+        return ""
+
+    html = _HTML_SCRIPT_BLOCK_PATTERN.sub(" ", html)
+    head_injection = (
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<base target="_blank">'
+        "<style>"
+        "html, body { margin: 0; padding: 0; }"
+        "body { padding: 12px; color: #111; background: #fff; font: 14px/1.45 Arial, sans-serif; overflow-wrap: anywhere; }"
+        "img { max-width: 100%; height: auto; }"
+        "table { max-width: 100% !important; }"
+        "pre { white-space: pre-wrap; }"
+        "a { word-break: break-word; }"
+        "</style>"
+    )
+
+    if _HTML_HTML_OPEN_PATTERN.search(html):
+        if _HTML_HEAD_OPEN_PATTERN.search(html):
+            return _HTML_HEAD_OPEN_PATTERN.sub(lambda match: f"{match.group(0)}{head_injection}", html, count=1)
+        return _HTML_HTML_OPEN_PATTERN.sub(
+            lambda match: f"{match.group(0)}<head>{head_injection}</head>",
+            html,
+            count=1,
+        )
+
+    return (
+        "<!doctype html>"
+        '<html lang="en">'
+        f"<head>{head_injection}</head>"
+        f"<body>{html}</body>"
+        "</html>"
+    )
 
 
 def normalize_outgoing_text(value, *, preserve_newlines=True):

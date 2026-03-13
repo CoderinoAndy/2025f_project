@@ -1813,7 +1813,7 @@ def _prompt_summary_sentence(prompt_text):
         prompt,
         flags=re.IGNORECASE,
     ):
-        return f"It includes a prompt asking you to {lowered_prompt}"
+        return f"The email includes a prompt to {lowered_prompt}"
     return f"It includes a prompt about {prompt}"
 
 
@@ -1932,8 +1932,8 @@ def _digest_overview_summary(email_data, sender_name, title_topic, key_sentences
     if len(topics) < 2:
         return None
 
-    intro = f"You received a news digest from {sender_name}"
-    if title_topic and not _is_near_subject_copy(title_topic, topics[0]):
+    intro = f"{sender_name} sent a news digest"
+    if title_topic and not title_topic.endswith("...") and not _is_near_subject_copy(title_topic, topics[0]):
         intro += f" about {title_topic}"
     summary = _compact_text(
         f"{_ensure_sentence_ending(intro)} "
@@ -1944,16 +1944,12 @@ def _digest_overview_summary(email_data, sender_name, title_topic, key_sentences
 
 def _extract_digest_questions(raw_body, max_questions=3):
     """Extract distinct featured questions from inline or multiline digest bodies."""
-    question_source = str(raw_body or "").replace("\r\n", "\n").replace("\r", "\n")
+    question_source = repair_body_text(raw_body or "", None).replace("\r\n", "\n").replace("\r", "\n")
     if not question_source:
         return []
 
     questions = []
-    for match in re.finditer(
-        r"Question:\s*(.*?)(?=(?:\s+Question:\s*)|(?:\s+Answer from\s+[^:]+:?[\s-]*)|$)",
-        question_source,
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
+    for match in re.finditer(r"Question:\s*(.+?)(?=(?:\r?\n|$))", question_source, flags=re.IGNORECASE):
         question = repair_header_text(match.group(1))
         question = _strip_footer_noise_text(question)
         question = _compact_text(question).strip(" -:;,.")
@@ -1961,6 +1957,34 @@ def _extract_digest_questions(raw_body, max_questions=3):
             continue
         if not question.endswith("?"):
             question = f"{question}?"
+        question = _truncate_compact_text(question, max_chars=200)
+        if any(_token_overlap_ratio(question, existing) > 0.9 for existing in questions):
+            continue
+        questions.append(question)
+        if len(questions) >= max_questions:
+            break
+    if questions:
+        return questions
+
+    lines = [
+        _compact_text(_strip_footer_noise_text(line)).strip(" -:;,.")
+        for line in question_source.split("\n")
+        if _compact_text(_strip_footer_noise_text(line)).strip(" -:;,.")
+    ]
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+        if len(line) < 18 or len(line) > 220:
+            continue
+        if not line.endswith("?"):
+            continue
+        if _is_digest_call_to_action_line(line) or _looks_utility_sentence(line):
+            continue
+        if lowered.startswith(("asked in ", "answer from ", "read more", "top stories")):
+            continue
+        lookahead = " ".join(lines[index + 1 : index + 3]).lower()
+        if not any(marker in lookahead for marker in ("answered", "asked in", "posted")):
+            continue
+        question = _truncate_compact_text(line, max_chars=200)
         if any(_token_overlap_ratio(question, existing) > 0.9 for existing in questions):
             continue
         questions.append(question)
@@ -1974,23 +1998,38 @@ def _digest_question_summary(sender_name, title_topic, digest_questions):
     if not digest_questions:
         return None
 
-    intro = f"You received a question digest from {sender_name}"
-    if title_topic and not _is_near_subject_copy(title_topic, digest_questions[0]):
+    intro = f"{sender_name} sent a question digest"
+    if title_topic and not title_topic.endswith("...") and not _is_near_subject_copy(title_topic, digest_questions[0]):
         intro += f" about {title_topic}"
 
-    if len(digest_questions) == 1:
-        summary = _compact_text(
-            f"{_ensure_sentence_ending(intro)} "
-            f"{_ensure_sentence_ending(f'It highlights a featured question: {digest_questions[0]}')}"
+    topic_fragments = []
+    for question in digest_questions[:3]:
+        topic = repair_body_text(question or "", None).strip().rstrip("?")
+        if not topic:
+            continue
+        replacements = (
+            (r"\bhow can i\b", "how to"),
+            (r"\bwhat should i do\b", ""),
+            (r"\bdo you have to\b", "whether someone has to"),
+            (r"\bcan you\b", "whether someone can"),
+            (r"\byou\b", "someone"),
         )
-        return summary[:SUMMARY_MAX_CHARS] if summary else None
+        for pattern, replacement in replacements:
+            topic = re.sub(pattern, replacement, topic, flags=re.IGNORECASE)
+        topic = _compact_text(topic).strip(" -:;,.")
+        if not topic:
+            continue
+        topic = _truncate_compact_text(topic, max_chars=100)
+        if any(_token_overlap_ratio(topic, existing) > 0.88 for existing in topic_fragments):
+            continue
+        topic_fragments.append(topic)
+    if not topic_fragments:
+        return None
 
-    labels = ("One featured question asks", "Another asks", "A third asks")
-    sentences = [_ensure_sentence_ending(intro)]
-    for index, question in enumerate(digest_questions[:3]):
-        label = labels[min(index, len(labels) - 1)]
-        sentences.append(_ensure_sentence_ending(f"{label}: {question}"))
-    summary = _compact_text(" ".join(sentences))
+    summary = _compact_text(
+        f"{_ensure_sentence_ending(intro)} "
+        f"{_ensure_sentence_ending(f'It highlights questions about {_natural_join(topic_fragments)}')}"
+    )
     return summary[:SUMMARY_MAX_CHARS] if summary else None
 
 
@@ -2076,8 +2115,8 @@ def _digest_item_titles_summary(sender_name, title_topic, item_titles):
         return None
 
     featured_titles = list(item_titles[:3])
-    intro = f"You received a newsletter from {sender_name}"
-    if title_topic and not _is_near_subject_copy(title_topic, featured_titles[0]):
+    intro = f"{sender_name} sent a newsletter"
+    if title_topic and not title_topic.endswith("...") and not _is_near_subject_copy(title_topic, featured_titles[0]):
         intro += f" about {title_topic}"
 
     featured_line = f"It features {_natural_join(featured_titles)}"
@@ -2270,19 +2309,19 @@ def _bulk_newsletter_summary(email_data):
             if title_topic:
                 sentences.append(
                     _ensure_sentence_ending(
-                        f"You received a reminder from {sender_name} about {title_topic}"
+                        f"{sender_name} sent a reminder about {title_topic}"
                     )
                 )
             else:
                 sentences.append(
-                    _ensure_sentence_ending(f"You received a reminder from {sender_name}")
+                    _ensure_sentence_ending(f"{sender_name} sent a reminder")
                 )
         elif title_topic:
             sentences.append(
-                _ensure_sentence_ending(f"You received an email from {sender_name} about {title_topic}")
+                _ensure_sentence_ending(f"{sender_name} sent an email about {title_topic}")
             )
         else:
-            sentences.append(_ensure_sentence_ending(f"You received an email from {sender_name}"))
+            sentences.append(_ensure_sentence_ending(f"{sender_name} sent an email"))
         prompt_sentence = _prompt_summary_sentence(prompt_text)
         if prompt_sentence:
             sentences.append(_ensure_sentence_ending(prompt_sentence))
@@ -2327,7 +2366,7 @@ def _bulk_newsletter_summary(email_data):
         sample_dates = [f"{city} on {date}" for city, date in date_matches[:2]]
         sentences = [
             _ensure_sentence_ending(
-                f"{sender_name} is offering you presale access to an upcoming tour"
+                f"{sender_name} is offering presale access to an upcoming tour"
             )
         ]
         detail_bits = [bit for bit in [presale, f"Offer code {offer_code}" if offer_code else "", ends] if bit]
@@ -2392,7 +2431,7 @@ def _bulk_newsletter_summary(email_data):
         sentences = []
         if title_topic:
             sentences.append(
-                _ensure_sentence_ending(f"You received a newsletter from {sender_name} about {title_topic}")
+                _ensure_sentence_ending(f"{sender_name} sent a newsletter about {title_topic}")
             )
         lead = numbered_sections[0]
         if lead and not _is_near_subject_copy(lead, title_topic or title):
@@ -2419,17 +2458,17 @@ def _bulk_newsletter_summary(email_data):
             marketing_teaser = _paraphrase_marketing_alert_teaser(teaser)
             if marketing_teaser:
                 summary = _compact_text(
-                    f"You received an article alert from {sender_name}. "
+                    f"{sender_name} sent an article alert. "
                     f"{_ensure_sentence_ending(marketing_teaser)}"
                 )
             else:
                 title_basis = title_topic or title
                 if title_basis:
                     summary = _compact_text(
-                        f"You received an article alert from {sender_name} about {title_basis}."
+                        f"{sender_name} sent an article alert about {title_basis}."
                     )
                 else:
-                    summary = _compact_text(f"You received an article alert from {sender_name}.")
+                    summary = _compact_text(f"{sender_name} sent an article alert.")
             if summary and len(summary) <= SUMMARY_MAX_CHARS:
                 return summary
 
@@ -2515,7 +2554,7 @@ def _bulk_newsletter_summary(email_data):
             sentence += ", and the promo is already applied to your account"
         sentences.append(_ensure_sentence_ending(sentence))
     elif max_savings:
-        sentences.append(_ensure_sentence_ending(f"{sender_name} is promoting a savings offer for you"))
+        sentences.append(_ensure_sentence_ending(f"{sender_name} is promoting a savings offer"))
     elif title and title.lower() != "(no subject)":
         sentences.append(_ensure_sentence_ending(f"{sender_name} sent you a promotional update about {title}"))
 
@@ -2581,6 +2620,8 @@ def _looks_summary_failure(summary_text):
     if normalized.startswith("{") or normalized.startswith("["):
         return True
     if contains_common_mojibake(summary_text):
+        return True
+    if _uses_second_person(summary_text):
         return True
     if _is_noise_fragment(normalized):
         return True
@@ -2870,10 +2911,11 @@ def _looks_digest_title_summary(summary_text):
     normalized = _compact_text(summary_text).lower()
     if not normalized:
         return False
-    return (
-        normalized.startswith("you received a newsletter from ")
-        and " it features " in normalized
-        and len(normalized) <= 240
+    if len(normalized) > 240 or " it features " not in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in ("newsletter", "news digest", "question digest")
     )
 
 
@@ -2970,7 +3012,7 @@ def _rewrite_parroted_summary(summary_text, email_data, email_id=None, structure
 
     system_prompt = (
         "You rewrite copied email summaries into original condensed wording. "
-        "Address the mailbox owner directly using you/your. "
+        "Use neutral phrasing and never address the mailbox owner as you/your. "
         "Use only explicit facts present in the email context. "
         "Do not copy or quote source sentences. "
         "No sentence in your rewrite may closely match a sentence from the email. "
@@ -3467,7 +3509,7 @@ def _extractive_summary_fallback(email_data):
     summary = _compact_text(f"{intro} {posture} {action}")
     if _is_noise_fragment(summary):
         if title and title.lower() != "(no subject)":
-            return f"You received an email about {title}."
+            return f"The email is about {title}."
         return None
     if len(summary) > profile["char_limit"]:
         summary = f"{summary[: profile['char_limit'] - 3]}..."
@@ -3490,19 +3532,30 @@ def _structured_summary_fallback(email_data):
 
 
 def _rewrite_summary_for_second_person(summary_text):
-    """Normalize generated summaries to second-person wording and paragraph style."""
-    # Keep summary style predictable so the UI addresses the mailbox owner directly.
+    """Normalize generated summaries to neutral paragraph-style wording."""
+    # Keep summary style predictable and avoid second-person address in the UI.
     summary = _normalize_summary_layout(summary_text)
     if not summary:
         return ""
     replacements = (
-        (r"\bthe user\b", "you"),
-        (r"\bthis user\b", "you"),
-        (r"\buser's\b", "your"),
-        (r"\bthe recipient\b", "you"),
-        (r"\brecipient's\b", "your"),
-        (r"\bthe email recipient\b", "you"),
-        (r"\bmailbox owner\b", "you"),
+        (r"\bthe user\b", "the recipient"),
+        (r"\bthis user\b", "the recipient"),
+        (r"\buser's\b", "the recipient's"),
+        (r"\bthe mailbox owner\b", "the recipient"),
+        (r"\bmailbox owner\b", "the recipient"),
+        (r"\brecipient's\b", "the recipient's"),
+        (r"\bthe email recipient\b", "the recipient"),
+        (r"\byou received an email from\b", "The email is from"),
+        (r"\byou received a reminder from\b", "A reminder from"),
+        (r"\byou received a newsletter from\b", "A newsletter from"),
+        (r"\byou received a news digest from\b", "A news digest from"),
+        (r"\byou received a question digest from\b", "A question digest from"),
+        (r"\byou received an article alert from\b", "An article alert from"),
+        (r"\bit includes a prompt asking you to\b", "The email includes a prompt to"),
+        (r"\byou need to\b", "The email asks for"),
+        (r"\byou should\b", "The email recommends"),
+        (r"\byour\b", "the recipient's"),
+        (r"\byou\b", "the recipient"),
     )
     normalized_lines = []
     for raw_line in summary.split("\n"):
@@ -3518,7 +3571,11 @@ def _rewrite_summary_for_second_person(summary_text):
         if not stripped:
             continue
         normalized_lines.append(_ensure_sentence_ending(stripped))
-    return _compact_text(" ".join(normalized_lines))
+    rewritten = _compact_text(" ".join(normalized_lines))
+    rewritten = re.sub(r"\b[Tt]he email asks for whether\b", "The email asks whether", rewritten)
+    rewritten = re.sub(r"\b[Tt]he email recommends watch\b", "The email recommends watching", rewritten)
+    rewritten = re.sub(r"\b[Tt]he recipient received\b", "The email", rewritten)
+    return rewritten
 
 
 def _uses_second_person(text):
@@ -4564,8 +4621,8 @@ def summarize_email(email_data, email_id=None):
     # Keep prompts tightly constrained, then post-filter for grounding/paraphrase quality.
     system_prompt = (
         "You write condensed email summaries for the mailbox owner. "
-        "Address the summary in second person using you/your. "
-        "Never refer to the mailbox owner as 'the user' or 'the recipient'. "
+        "Use neutral phrasing and never address the mailbox owner as you/your. "
+        "Never refer to the mailbox owner as 'the user'. "
         "Use only facts explicitly present in the email context; do not infer new details. "
         "Write in your own words: paraphrase and compress instead of copying source sentences. "
         "No sentence in your output may closely match a sentence from the email body. "
@@ -4596,7 +4653,7 @@ def summarize_email(email_data, email_id=None):
         "For long emails, cover all major sections instead of summarizing only the opening lines. "
         "Aim for no more than roughly one quarter of the source length. "
         + "If the email has several distinct updates, features, or sections, include each one at least briefly in the same paragraph. "
-        + "Focus on what happened, key facts, and what you need to do next.\n\n"
+        + "Focus on what happened, key facts, and any requested next step without addressing the reader directly.\n\n"
         f"{_summary_evidence_block(email_data, max_points=min(8, profile['output_sentences']))}"
     )
     response_text = _call_ollama(
@@ -6056,6 +6113,8 @@ def summary_looks_unusable(email_data):
     if _is_noise_fragment(raw_summary):
         return True
     if contains_common_mojibake(raw_summary):
+        return True
+    if _uses_second_person(raw_summary):
         return True
     if _looks_summary_call_to_action(raw_summary, email_data):
         return True

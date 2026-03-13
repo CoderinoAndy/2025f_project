@@ -35,6 +35,7 @@ from .gmail_service import (
     trigger_background_sync,
     upsert_gmail_draft,
 )
+from .email_content import prepare_html_email_document
 from .ollama_client import (
     ai_enabled,
     can_generate_reply_draft as _can_generate_reply_draft,
@@ -590,6 +591,13 @@ def email(id):
         mark_read(id, True)
         email_data = fetch_email_by_id(id) or email_data
         email_data["is_read"] = True
+
+    if email_data.get("body_html"):
+        email_data["render_html_document"] = prepare_html_email_document(
+            email_data.get("body_html")
+        )
+    else:
+        email_data["render_html_document"] = ""
 
     ai_analysis_needed = False
     ai_analysis_task_id = None

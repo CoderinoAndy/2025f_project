@@ -3,6 +3,7 @@ import unittest
 from app.email_content import (
     decode_transfer_encoded_text,
     normalize_outgoing_text,
+    prepare_html_email_document,
     repair_body_text,
     repair_header_text,
     repair_html_content,
@@ -89,6 +90,41 @@ class EmailContentRepairTests(unittest.TestCase):
         self.assertEqual(decoded, html_body)
         self.assertIn("IE=edge", decoded)
         self.assertIn("device-width", decoded)
+
+    def test_decode_transfer_encoded_text_skips_qp_decode_for_html_with_query_params(self):
+        html_body = (
+            '<!doctype html><html><head>'
+            '<meta http-equiv="X-UA-Compatible" content="IE=edge">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '</head><body><a href="https://www.quora.com/qemail/tc?id=a6c0f428df8a482783edf43edfd36891&et=2">'
+            "Read more</a></body></html>"
+        )
+
+        decoded = decode_transfer_encoded_text(
+            html_body.encode("utf-8"),
+            content_type='text/html; charset="utf-8"',
+            transfer_encoding="quoted-printable",
+        )
+
+        self.assertEqual(decoded, html_body)
+        self.assertIn("IE=edge", decoded)
+        self.assertIn("device-width", decoded)
+        self.assertIn("id=a6c0f428df8a482783edf43edfd36891", decoded)
+
+    def test_prepare_html_email_document_wraps_fragment_and_drops_scripts(self):
+        raw_html = (
+            '<div class="story">Top story</div>'
+            '<script>alert("x")</script>'
+            '<a href="https://example.com/read">Read more</a>'
+        )
+
+        prepared = prepare_html_email_document(raw_html)
+
+        self.assertIn("<!doctype html>", prepared.lower())
+        self.assertIn("<base target=\"_blank\">", prepared)
+        self.assertIn("Top story", prepared)
+        self.assertNotIn("<script>", prepared.lower())
+        self.assertIn("Read more", prepared)
 
 
 if __name__ == "__main__":

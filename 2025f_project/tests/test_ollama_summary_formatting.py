@@ -130,8 +130,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertIn("question digest", summary.lower())
         self.assertNotIn("\n", summary)
-        self.assertIn("One featured question asks:", summary)
-        self.assertIn("Another asks:", summary)
+        self.assertIn("It highlights questions about", summary)
 
     def test_card_style_newsletter_extracts_multiple_item_titles(self):
         titles = ollama_client._extract_digest_item_titles(_ted_digest_email(), max_items=4)
@@ -159,8 +158,9 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertNotIn("\n", rewritten)
         self.assertNotIn("- ", rewritten)
-        self.assertIn("you can read the politics update.", rewritten.lower())
-        self.assertIn("you should watch the health story.", rewritten.lower())
+        self.assertIn("the recipient can read the politics update.", rewritten.lower())
+        self.assertIn("the recipient should watch the health story.", rewritten.lower())
+        self.assertNotIn(" you ", f" {rewritten.lower()} ")
 
     def test_rewrite_summary_for_second_person_flattens_inline_bullets(self):
         rewritten = ollama_client._rewrite_summary_for_second_person(
@@ -190,7 +190,7 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         )
         rewritten = ollama_client._rewrite_summary_for_second_person(mojibake)
 
-        self.assertIn("you saw the justice department", rewritten.lower())
+        self.assertIn("the recipient saw the justice department", rewritten.lower())
         self.assertIn("'", rewritten)
         self.assertNotIn(chr(0x00E2) + chr(0x0080) + chr(0x0099), rewritten)
 

@@ -435,7 +435,7 @@
             <small class="text-secondary">Category locked</small>
           {% endif %}
             </div>
-            {% if email.body_html %}
+            {% if email.render_html_document %}
               <iframe
                 id="message-html-frame"
                 class="message-html-frame"
@@ -443,7 +443,8 @@
                 referrerpolicy="no-referrer"
                 title="Rendered email"
               ></iframe>
-              <script id="message-html-source" type="application/json">{{ email.body_html|tojson }}</script>
+              <div id="message-text-fallback" class="message-content hidden">{{ email.body|linkify_email_text }}</div>
+              <script id="message-html-source" type="application/json">{{ email.render_html_document|tojson }}</script>
             {% else %}
               <div class="message-content">{{ email.body|linkify_email_text }}</div>
             {% endif %}
@@ -625,37 +626,28 @@
         // DOM nodes required to mount the HTML email body.
         const frame = document.getElementById("message-html-frame");
         const source = document.getElementById("message-html-source");
+        const fallback = document.getElementById("message-text-fallback");
         if (!frame || !source) {
           return;
         }
 
-        let rawHtml = "";
-        try {
-          rawHtml = JSON.parse(source.textContent || "\"\"");
-        } catch {
-          rawHtml = "";
-        }
+        const showFallback = () => {
+          frame.classList.add("hidden");
+          if (fallback) {
+            fallback.classList.remove("hidden");
+          }
+        };
 
-        // Render email HTML inside an isolated iframe so message CSS cannot break app layout.
-        // Wrap incoming HTML with a minimal document and safe defaults.
-        const wrappedHtml = `
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <base target="_blank">
-    <!-- Page-specific styling for the email detail view. -->
-    <style>
-      html, body { margin: 0; padding: 0; }
-      body { padding: 12px; color: #111; background: #fff; font: 14px/1.45 Arial, sans-serif; }
-      img { max-width: 100%; height: auto; }
-      table { max-width: 100%; }
-      pre { white-space: pre-wrap; }
-    </style>
-  </head>
-  <body>${rawHtml}</body>
-</html>`.trim();
+        let htmlDocument = "";
+        try {
+          htmlDocument = JSON.parse(source.textContent || "\"\"");
+        } catch {
+          htmlDocument = "";
+        }
+        if (!String(htmlDocument || "").trim()) {
+          showFallback();
+          return;
+        }
 
         // Keep iframe height in sync with rendered content height.
         const resizeFrame = () => {
@@ -703,7 +695,11 @@
           setTimeout(resizeFrame, 250);
           setTimeout(resizeFrame, 750);
         });
-        frame.srcdoc = wrappedHtml;
+        try {
+          frame.srcdoc = htmlDocument;
+        } catch {
+          showFallback();
+        }
       })();
 
       // Module 1: render HTML email content safely inside an iframe.

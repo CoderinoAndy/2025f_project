@@ -41,7 +41,7 @@ class HtmlImageContextTests(unittest.TestCase):
         self.assertIn("Image context:", messages[1]["content"])
         self.assertIn("Invoice screenshot", messages[1]["content"])
 
-    @mock.patch("app.ollama_client._call_ollama", return_value="You received an invoice image to review.")
+    @mock.patch("app.ollama_client._call_ollama", return_value="The invoice image shows a balance due of $18.")
     def test_summarize_email_runs_for_short_email_when_image_context_exists(self, mock_call):
         email = {
             "sender": "Billing <billing@example.com>",
@@ -63,7 +63,7 @@ class HtmlImageContextTests(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertIn("invoice", summary.lower())
         messages = mock_call.call_args.kwargs["messages"]
-        self.assertIn("Image context:", messages[1]["content"])
+        self.assertIn("Image evidence:", messages[1]["content"])
         self.assertIn("balance due of $18", messages[1]["content"])
 
     @mock.patch("app.ollama_client.update_email_ai_fields")

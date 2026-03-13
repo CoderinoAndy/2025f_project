@@ -1,6 +1,5 @@
 # MVC: Model
 import os
-import re
 import threading
 import time
 from datetime import datetime
@@ -19,8 +18,6 @@ VALID_SORTS = {
     "unread_first",
     "read_first",
 }
-TOKEN_PATTERN = re.compile(r"[a-z0-9._%+\-]+")
-
 # Per-tab data rules for live mailbox pages and API views.
 LIVE_LIST_CONFIGS = {
     "all": {
@@ -187,57 +184,6 @@ def mailbox_live_polling_enabled(list_view, search_query="", page=1):
     if (search_query or "").strip():
         return False
     return max(1, int(page or 1)) == 1
-
-
-def _email_search_text(email):
-    """Build one lowercase string used for simple substring search."""
-    # Put all searchable fields into one normalized text blob.
-    return " ".join(
-        [
-            str(email.get("title") or ""),
-            str(email.get("sender") or ""),
-            str(email.get("recipients") or ""),
-            str(email.get("cc") or ""),
-            str(email.get("body") or ""),
-        ]
-    ).lower()
-
-
-def filter_emails_by_query(emails, query_text):
-    """Filter rows using token-index narrowing plus final text verification."""
-    query = (query_text or "").strip().lower()
-    if not query:
-        return emails
-
-    # Keep token parsing simple but robust for punctuation-heavy queries.
-    query_tokens = TOKEN_PATTERN.findall(query)
-    if not query_tokens:
-        return emails
-
-    haystacks = [_email_search_text(email) for email in emails]
-
-    # Build token -> row index map once for this query.
-    token_rows = {}
-    for row_index, haystack in enumerate(haystacks):
-        for token in set(TOKEN_PATTERN.findall(haystack)):
-            token_rows.setdefault(token, set()).add(row_index)
-
-    # Intersect row sets so we only scan likely matches.
-    candidate_rows = None
-    for token in query_tokens:
-        # If any token is missing globally, we can stop immediately.
-        rows = token_rows.get(token)
-        if not rows:
-            return []
-        candidate_rows = rows if candidate_rows is None else candidate_rows & rows
-        if not candidate_rows:
-            return []
-
-    filtered = []
-    for row_index in sorted(candidate_rows):
-        if query in haystacks[row_index]:
-            filtered.append(emails[row_index])
-    return filtered
 
 
 def _parse_date(date_text):

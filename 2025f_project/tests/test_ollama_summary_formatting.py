@@ -113,6 +113,55 @@ def _ted_digest_email():
     }
 
 
+def _promo_offer_email():
+    return {
+        "sender": "Walmart <offers@walmart.example>",
+        "title": "Member Week deals",
+        "body": (
+            "Member Week highlights extra store savings for subscribers. "
+            "Enjoy benefits such as easy store pickup, fast free shipping, and a low price guarantee. "
+            "Offers are valid from March 6 to 12, 2026, and the message encourages members to browse "
+            "qualifying items across home goods, electronics, and everyday essentials while supplies last."
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
+def _retail_roundup_email():
+    return {
+        "sender": "TechMart <deals@retail.example>",
+        "title": "The Ultimate Smartphone Sale is here.",
+        "body": (
+            "Plus, the new Arc Phone and more Top Deals.\n\n"
+            "Save up to $400 on select laptops.\n\n"
+            "Save up to $1,100 on select big screen TVs.\n\n"
+            "Get up to 25% off when you buy multiple select appliances.\n\n"
+            "Save up to 40% on select headphones and portable speakers.\n\n"
+            "Shop Now\n\n"
+            "Free Shipping\n\n"
+            "Unsubscribe"
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
+def _science_digest_with_marketing_word():
+    return {
+        "sender": "Science Briefing <digest@science.example>",
+        "title": "Today in Science: How moon-base planning is evolving",
+        "body": (
+            "Discover how moon-base planning is evolving.\n"
+            "Today in Science\n"
+            "Researchers are testing new construction approaches for future lunar habitats. | 3 min read\n"
+            "Another report examines how ocean temperatures are reshaping storm forecasting. | 4 min read"
+        ),
+        "recipients": "",
+        "cc": "",
+    }
+
+
 class OllamaSummaryFormattingTests(unittest.TestCase):
     def test_multistory_digest_gets_digest_overview_summary(self):
         email = _digest_email()
@@ -131,6 +180,44 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertIn("question digest", summary.lower())
         self.assertNotIn("\n", summary)
         self.assertIn("It highlights questions about", summary)
+
+    def test_retail_roundup_summary_uses_offer_phrases_without_digest_boilerplate(self):
+        summary = ollama_client._bulk_newsletter_summary(_retail_roundup_email())
+
+        self.assertIsNotNone(summary)
+        self.assertIn("promotional update", summary.lower())
+        self.assertNotIn("news digest", summary.lower())
+        self.assertNotIn("it highlights", summary.lower())
+        self.assertIn("up to $400 off select laptops", summary)
+
+    def test_summary_looks_unusable_flags_boilerplate_heavy_bulk_summary(self):
+        email = _retail_roundup_email()
+        email["summary"] = (
+            "A news digest from TechMart. It highlights Plus, the new Arc Phone and more Top Deals. "
+            "It highlights Explore more deals. It highlights by category Laptops TVs Audio Appliances Smart Home. "
+            "It highlights Free Shipping and shop now."
+        )
+
+        self.assertTrue(ollama_client.summary_looks_unusable(email))
+
+    def test_extractive_fallback_for_digest_avoids_repeated_it_highlights(self):
+        email = _digest_email()
+
+        with mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None):
+            summary = ollama_client._extractive_summary_fallback(email)
+
+        self.assertIsNotNone(summary)
+        self.assertIn("it covers", summary.lower())
+        self.assertEqual(summary.lower().count("it highlights"), 0)
+
+    def test_single_weak_promo_word_does_not_flip_editorial_digest_into_promo(self):
+        email = _science_digest_with_marketing_word()
+
+        self.assertIsNone(ollama_client._promotion_summary(email))
+        summary = ollama_client._bulk_newsletter_summary(email)
+
+        self.assertIsNotNone(summary)
+        self.assertIn("news digest", summary.lower())
 
     def test_card_style_newsletter_extracts_multiple_item_titles(self):
         titles = ollama_client._extract_digest_item_titles(_ted_digest_email(), max_items=4)
@@ -170,6 +257,18 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertTrue(rewritten.startswith("First story"))
         self.assertNotIn("- Second story", rewritten)
         self.assertIn("Second story", rewritten)
+
+    def test_finalize_summary_text_adds_source_intro_and_removes_leading_also(self):
+        finalized = ollama_client._finalize_summary_text(
+            "It also mentions benefits such as easy store pickup, fast free shipping, and a low price guarantee. "
+            "Offers are valid from March 6 to 12, 2026.",
+            _promo_offer_email(),
+        )
+
+        self.assertTrue(finalized.startswith("A promotional update from Walmart."))
+        self.assertNotIn("It also mentions", finalized)
+        self.assertIn("It mentions benefits such as easy store pickup", finalized)
+        self.assertIn("Offers are valid from March 6 to 12, 2026.", finalized)
 
     def test_multiline_summary_is_not_marked_unusable_just_for_newlines(self):
         email = _digest_email()
@@ -223,9 +322,9 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         summary = ollama_client._bulk_newsletter_summary(email)
 
         self.assertIsNotNone(summary)
-        self.assertNotIn("It focuses on", summary)
-        self.assertIn("Nvidia", summary)
-        self.assertNotIn("nvidia will invest", summary)
+        self.assertNotIn(email["title"], summary)
+        self.assertIn("nvidia", summary.lower())
+        self.assertNotIn("about Nvidia to Invest", summary)
 
     def test_article_alert_summary_rewrites_marketing_teaser_instead_of_copying(self):
         email = _spotify_alert_email()
@@ -249,7 +348,8 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertIsNotNone(summary)
         self.assertIn("The Wall Street Journal", summary)
-        self.assertIn("Retailers Brace for a New Shopping Reality", summary)
+        self.assertNotIn(email["title"], summary)
+        self.assertIn("shopping", summary.lower())
         self.assertNotIn(
             "A judge ruled that Amazon can keep outside AI bots off its site for now, "
             "but retailers are preparing for a new normal in shopping.",
@@ -282,12 +382,8 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
 
         self.assertIsNotNone(summary)
         self.assertNotIn("\n", summary)
-        summarize_call = next(
-            call for call in mock_call.call_args_list if call.kwargs.get("task") == "summarize"
-        )
-        messages = summarize_call.kwargs["messages"]
-        self.assertNotIn("bullet list", messages[0]["content"].lower())
-        self.assertIn("one compact paragraph", messages[0]["content"].lower())
+        self.assertIn("news digest", summary.lower())
+        mock_call.assert_not_called()
 
     @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
     @mock.patch(
@@ -308,7 +404,83 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         user_prompt = summarize_call.kwargs["messages"][1]["content"]
         self.assertIn("Key evidence:", user_prompt)
         self.assertNotIn("Body excerpts:", user_prompt)
+        self.assertNotIn("Subject:", user_prompt)
         self.assertIn("deck handoff", user_prompt)
+
+    def test_subject_led_summary_is_marked_unusable(self):
+        email = {
+            "sender": "The Wall Street Journal <alerts@wsj.example>",
+            "title": "Latest in Artificial Intelligence: The Pentagon Dealmaker Who Has Become Anthropic's Nemesis",
+            "body": (
+                "The newsletter profiles Michael Brown's Pentagon contracting role and how his "
+                "data-labeling company Scale AI became a rival to Anthropic. It also describes "
+                "defense-tech customers, model-evaluation work, and the company's expanding role "
+                "in military AI programs."
+            ),
+            "recipients": "",
+            "cc": "",
+        }
+        email["summary"] = (
+            "The Wall Street Journal sent a newsletter about The Pentagon Dealmaker Who Has Become "
+            "Anthropic's Nemesis. It features Latest in Artificial Intelligence and The Pentagon "
+            "Dealmaker Who Has Become Anthropic's Nemesis."
+        )
+
+        self.assertTrue(ollama_client.summary_looks_unusable(email))
+
+    @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        return_value=(
+            "The Wall Street Journal sent a newsletter about The Pentagon Dealmaker Who Has Become "
+            "Anthropic's Nemesis. It features Latest in Artificial Intelligence and The Pentagon "
+            "Dealmaker Who Has Become Anthropic's Nemesis."
+        ),
+    )
+    def test_summarize_email_rejects_subject_led_summary(self, _mock_call, _mock_bulk):
+        email = {
+            "sender": "The Wall Street Journal <alerts@wsj.example>",
+            "title": "Latest in Artificial Intelligence: The Pentagon Dealmaker Who Has Become Anthropic's Nemesis",
+            "body": (
+                "The newsletter profiles Michael Brown's Pentagon contracting role and how his "
+                "data-labeling company Scale AI became a rival to Anthropic. It also describes "
+                "defense-tech customers, model-evaluation work, and the company's expanding role "
+                "in military AI programs."
+            ),
+            "recipients": "",
+            "cc": "",
+        }
+
+        summary = ollama_client.summarize_email(email, email_id="subject-copy-1")
+
+        self.assertIsNotNone(summary)
+        self.assertNotIn(email["title"], summary)
+        self.assertIn("Scale AI", summary)
+        self.assertIn("Anthropic", summary)
+
+    @mock.patch("app.ollama_client._bulk_newsletter_summary", return_value=None)
+    @mock.patch(
+        "app.ollama_client._sanitize_model_summary",
+        return_value=(
+            "It also mentions benefits such as easy store pickup, fast free shipping, and a low price guarantee. "
+            "Offers are valid from March 6 to 12, 2026."
+        ),
+    )
+    @mock.patch("app.ollama_client._call_ollama", return_value="raw summary")
+    def test_summarize_email_polishes_promotional_summary_lead(
+        self,
+        _mock_call,
+        _mock_sanitize,
+        _mock_bulk,
+    ):
+        summary = ollama_client.summarize_email(_promo_offer_email(), email_id="promo-lead-1")
+
+        self.assertIsNotNone(summary)
+        self.assertTrue(summary.startswith("A promotional update from Walmart."))
+        self.assertNotIn("It also mentions", summary)
+        self.assertIn("benefits such as easy store pickup", summary)
+        self.assertIn("offers are valid from march 6 to 12, 2026", summary.lower())
+        self.assertNotIn("the email notes that", summary.lower())
 
     @mock.patch(
         "app.ollama_client._call_ollama",
@@ -364,7 +536,8 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         summary = ollama_client.summarize_email(email, email_id="copy-wsj-1")
 
         self.assertIsNotNone(summary)
-        self.assertIn("shopping reality", summary.lower())
+        self.assertIn("shopping", summary.lower())
+        self.assertIn("automated scraping", summary.lower())
         self.assertNotIn(
             "A judge ruled that Amazon can keep outside AI bots off its site for now, "
             "but retailers are preparing for a new normal in shopping.",

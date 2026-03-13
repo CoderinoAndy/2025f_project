@@ -635,34 +635,6 @@ def _normalize_archived_flag(value):
     return None
 
 
-def fetch_emails(
-    email_type=None,
-    exclude_types=None,
-    include_archived=False,
-    archived_only=False,
-    db_path=DB_DEFAULT,
-):
-    """Fetch emails.
-    """
-    # Full-message fetch used by detail views and smaller in-memory workflows.
-    clause, params = _build_mailbox_filter_clause(
-        email_type=email_type,
-        exclude_types=exclude_types,
-        include_archived=include_archived,
-        archived_only=archived_only,
-    )
-    with db_session(db_path) as conn:
-        cur = conn.execute(
-            f"""
-            {EMAIL_SELECT_SQL}
-            {clause}
-            ORDER BY m.received_at DESC, m.id DESC
-            """,
-            params,
-        )
-        return [_row_to_dict(r) for r in cur.fetchall()]
-
-
 def count_mailbox_emails(
     *,
     email_type=None,
@@ -1119,21 +1091,6 @@ def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
         conn.execute(
             "UPDATE email_messages SET is_archived = ? WHERE id = ?",
             (1 if archived else 0, email_id),
-        )
-
-
-def toggle_read_state(email_id, db_path=DB_DEFAULT):
-    """Toggle read state.
-    """
-    # Used by other functions in this file.
-    with db_session(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE email_messages
-            SET is_read = 1 - is_read
-            WHERE id = ?
-            """,
-            (email_id,),
         )
 
 

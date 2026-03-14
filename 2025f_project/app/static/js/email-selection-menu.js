@@ -1,6 +1,6 @@
-// MVC: Controller
-// Handles row selection mode and bulk actions on mailbox list pages.
-(() => { // Manage selection mode and bulk actions for mailbox rows.
+// Controller-side behavior.
+// Handle row selection mode and bulk actions on mailbox list pages.
+(() => { // Handle selection mode and bulk actions for mailbox rows.
   const shell = document.querySelector(".list-shell"); // List container that receives live row updates.
   const sideMenu = document.querySelector("[data-bulk-side-menu]"); // Floating menu for bulk actions.
   if (!shell || !sideMenu) { // Exit on pages that do not render bulk-selection UI.

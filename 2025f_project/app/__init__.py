@@ -1,4 +1,4 @@
-# MVC: Controller
+# Controller layer.
 from flask import Flask, g, request
 from werkzeug.exceptions import HTTPException
 from datetime import datetime
@@ -21,12 +21,12 @@ PLAIN_TEXT_URL_RE = re.compile(
 )
 
 
-# App factory: build Flask app, wire startup tasks, then attach routes.
+# Build the Flask app, run startup setup, and then attach routes.
 def create_app():
     """Create app.
     """
     app = Flask(__name__, instance_relative_config=True)
-    # Initialize structured logging before startup work so boot failures are recorded.
+    # Set up structured logging first so startup failures get captured.
     configure_debug_logger()
     try:
         init_db()
@@ -56,7 +56,7 @@ def create_app():
     @app.before_request
     def _log_request_start():
         """Capture request start timing and write a start event to the debug log."""
-        # Write a structured log entry so this step is easy to trace later.
+        # Log this here so it is easier to trace later.
         g.request_started_at = perf_counter()
         log_event(
             action_type="http_request",
@@ -73,7 +73,7 @@ def create_app():
     def _log_request_complete(response):
         """Log request completion details (status + duration) before sending the response."""
         started = getattr(g, "request_started_at", None)
-        # Use monotonic timer values from before/after hooks to avoid wall-clock drift.
+        # Use monotonic timing here so wall-clock drift does not skew request timing.
         duration_ms = int((perf_counter() - started) * 1000) if started is not None else -1
         status_code = int(response.status_code)
         if status_code >= 500:
@@ -103,7 +103,7 @@ def create_app():
     @app.teardown_request
     def _log_request_exception(error):
         """Log unexpected request exceptions that were not handled by Flask HTTP errors."""
-        # Write a structured log entry so this step is easy to trace later.
+        # Log this here so it is easier to trace later.
         if error is None or isinstance(error, HTTPException):
             return
         log_exception(
@@ -116,7 +116,7 @@ def create_app():
             endpoint=request.endpoint or "",
         )
     
-    # Template filter is registered during app construction, once per process.
+    # Register this template filter once when the app is created.
     @app.template_filter("fmt_dt")
     def fmt_dt(value):
         """
@@ -132,7 +132,7 @@ def create_app():
 
         s = str(value).strip()
         dt = None
-        # Accept both date-only and date-time values because legacy rows are mixed.
+        # Older rows mix date-only and date-time values, so accept both.
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
             try:
                 dt = datetime.strptime(s, fmt)
@@ -141,7 +141,7 @@ def create_app():
                 continue
 
         if dt is None:
-            return s  # fallback: show original text if parsing fails
+            return s  # If parsing fails, just show the original text.
 
         return dt.strftime("%d/%m/%Y %H:%M")
 
@@ -180,9 +180,9 @@ def create_app():
 
         return Markup("\n").join(_linkify_line(line) for line in str(value).split("\n"))
 
-    # Import routes late so startup utilities above are initialized first.
+    # Import routes late so the startup utilities above are ready first.
     from .routes import main
-    app.register_blueprint(main) # Attaches everything in the blueprint to the app object
+    app.register_blueprint(main) # Hook the blueprint routes into the app.
     log_event(
         action_type="system",
         action="app_ready",

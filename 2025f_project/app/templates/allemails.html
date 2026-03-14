@@ -1,16 +1,16 @@
-{# MVC: View #}
-<!doctype html> <!-- Standard document shell for this page. -->
+{# View template. #}
+<!doctype html> <!-- Standard page shell. -->
 <!--
-  Template: allemails.html
-  Purpose:
+  Page: allemails.html
+  What this does:
   - Default mailbox landing view aggregating all inbound categories.
   - Hosts list-level search and sorting controls plus bulk row operations.
   - Passes polling fingerprints/interval values used by incremental live refresh logic.
-  Expected context:
+  This template expects:
   - emails, sort, search_query, list_fingerprint, live_poll_interval_ms, current_list_url.
 -->
 <html lang="en">
-  <head> <!-- Page metadata, title, and style links. -->
+  <head> <!-- Head metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>All Emails</title>
@@ -26,7 +26,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <!-- Live mailbox page root; data-* values feed the polling and action scripts. -->
+  <!-- Mailbox page root; the data-* values are used by the polling and action scripts. -->
   <body class="mailbox-list-page"
     data-live-email-view="all"
     data-sort="{{ sort }}"
@@ -35,9 +35,9 @@
     data-poll-interval-ms="{{ live_poll_interval_ms }}"
     data-live-polling-enabled="{{ 1 if live_polling_enabled else 0 }}"
     data-search-query="{{ search_query }}"
-  > <!-- Visible page content and interactive controls. -->
-    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
-    <div class="container-fluid app-main py-3 px-4"> <!-- Main page content area. -->
+  > <!-- Main page content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared top nav for the mailbox pages. -->
+    <div class="container-fluid app-main py-3 px-4"> <!-- Main content area. -->
       <div class="list-header">
         {% if search_query %}
         <div class="d-flex align-items-center gap-2">
@@ -45,7 +45,7 @@
           <a class="btn btn-outline-light btn-sm" href="{{ url_for('main.allemails') }}">Clear</a>
         </div>
         {% endif %}
-        <form method="get" class="sort-form"> <!-- Form used for this action. -->
+        <form method="get" class="sort-form"> <!-- Form for this action. -->
           {% if search_query %}
           <input type="hidden" name="q" value="{{ search_query }}">
           {% endif %}
@@ -68,18 +68,18 @@
       </div>
       {% include "_bulk_selection_menu.html" %}
     </div>
-    <!-- Floating quick action to open compose from any mailbox tab. -->
+    <!-- Floating shortcut to open compose from any mailbox tab. -->
     <a class="compose-fab" href="{{ url_for('main.compose', next=current_list_url) }}" aria-label="Compose email">
       <i class="bi bi-pencil" aria-hidden="true"></i>
       <span>Compose</span>
     </a>
-    <!-- Bootstrap JS for dropdowns, menus, and other interactive components. -->
-    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Page scripts. -->
-    <!-- Selection mode logic: choose rows and trigger bulk actions. -->
+    <!-- Bootstrap JS for dropdowns, menus, and the other interactive bits. -->
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Page-specific scripts. -->
+    <!-- Selection-mode script for picking rows and running bulk actions. -->
     <script src="{{ url_for('static', filename='js/email-selection-menu.js') }}"></script>
-    <!-- Polling logic: fetch latest rows and patch only when content changed. -->
+    <!-- Polling script that refreshes rows only when something changed. -->
     <script src="{{ url_for('static', filename='js/live-email-list.js') }}"></script>
-    <!-- Row action logic: submit archive/delete/read toggles without full reload. -->
+    <!-- Row-action script for archive, delete, and read updates without a full reload. -->
     <script src="{{ url_for('static', filename='js/mailbox-actions.js') }}"></script>
   </body>
 </html>

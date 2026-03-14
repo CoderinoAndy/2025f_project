@@ -1,16 +1,16 @@
-{# MVC: View #}
-<!doctype html> <!-- Standard document shell for this page. -->
+{# View template. #}
+<!doctype html> <!-- Standard page shell. -->
 <!--
-  Template: compose.html
-  Purpose:
+  Page: compose.html
+  What this does:
   - Compose/new draft editor with recipients, subject/body, attachments, and send/save actions.
   - Supports editing existing drafts through hidden draft/thread identifiers.
   - Includes client-side dirty tracking and beforeunload autosave behavior.
-  Expected context:
+  This template expects:
   - draft_email, draft_attachments, next_url.
 -->
 <html lang="en">
-  <head> <!-- Page metadata, title, and style links. -->
+  <head> <!-- Head metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Compose</title>
@@ -136,10 +136,10 @@
       }
     </style>
   </head>
-  <body> <!-- Visible page content and interactive controls. -->
-    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
+  <body> <!-- Main page content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared top nav for the mailbox pages. -->
 
-    <div class="container app-main compose-shell py-4"> <!-- Main page content area. -->
+    <div class="container app-main compose-shell py-4"> <!-- Main content area. -->
       <a id="compose-backlink" class="backlink d-inline-flex mb-3" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
@@ -149,7 +149,7 @@
         </div>
         <p class="hint mb-3">Leaving this page with unsent changes autosaves a draft.</p>
 
-        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data"> <!-- Form used for this action. -->
+        <form id="compose-form" method="post" action="{{ url_for('main.compose_send') }}" enctype="multipart/form-data"> <!-- Form for this action. -->
           {# Hidden IDs keep local and Gmail draft records linked across saves/sends. #}
           <input type="hidden" name="local_draft_id" value="{{ draft_email.id or '' }}">
           <input type="hidden" name="provider_draft_id" value="{{ draft_email.provider_draft_id or '' }}">

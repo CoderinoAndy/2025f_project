@@ -207,10 +207,9 @@ class OllamaClassificationTests(unittest.TestCase):
         user_prompt = messages[1]["content"]
 
         self.assertEqual(result["category"], "junk")
-        self.assertIn("main purpose is advertising, promotion, sales conversion", system_prompt)
-        self.assertIn("If the email is mainly a commercial promotion", system_prompt)
-        self.assertIn("still use category=junk and lower confidence", system_prompt)
-        self.assertIn("routine retail promotions and brand advertising", system_prompt)
+        self.assertIn("Return valid JSON only with exactly these keys", system_prompt)
+        self.assertIn("Treat ads, coupons, sales blasts, marketing promotions", system_prompt)
+        self.assertIn("Treat receipts, account notices, newsletters, and service updates", system_prompt)
         self.assertIn("Sender and subject metadata", user_prompt)
         self.assertIn("commercial_promotion_pattern", user_prompt)
         self.assertNotIn("images", messages[1])

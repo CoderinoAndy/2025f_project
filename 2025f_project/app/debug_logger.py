@@ -1,4 +1,4 @@
-# MVC: Model
+# Model layer.
 import logging
 import os
 from datetime import datetime, timezone
@@ -12,11 +12,11 @@ MAX_FIELD_LENGTH = 1000
 _CONFIG_LOCK = Lock()
 
 
-# Normalize values so logs stay one-line and easy to grep.
+# Normalize values so log lines stay single-line and easy to grep.
 def _clean_value(value):
     """Clean value.
     """
-    # Clean this value so the rest of the code gets predictable input.
+    # Clean this up so the rest of the code sees something predictable.
     text = str(value if value is not None else "")
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
     if len(text) > MAX_FIELD_LENGTH:
@@ -27,7 +27,7 @@ def _clean_value(value):
 def _clean_key(value):
     """Clean key.
     """
-    # Clean this value so the rest of the code gets predictable input.
+    # Clean this up so the rest of the code sees something predictable.
     raw = _clean_value(value).lower()
     if not raw:
         return "meta"
@@ -39,7 +39,7 @@ def _clean_key(value):
 def _log_path():
     """Log path.
     """
-    # Write a structured log entry so this step is easy to trace later.
+    # Log this here so it is easier to trace later.
     configured = (os.getenv("APP_DEBUG_LOG_PATH") or "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -49,18 +49,18 @@ def _log_path():
 def get_debug_log_path():
     """Get debug log path.
     """
-    # Return this value, with a safe fallback when config is missing.
+    # Return this value, with a safe fallback if config is missing.
     return str(_log_path())
 
 
 def configure_debug_logger():
     """Configure debug logger.
     """
-    # Write a structured log entry so this step is easy to trace later.
+    # Log this here so it is easier to trace later.
     logger = logging.getLogger(LOGGER_NAME)
     target_path = _log_path()
 
-    with _CONFIG_LOCK:  # Serialize logger setup to avoid duplicate handlers.
+    with _CONFIG_LOCK:  # Serialize logger setup so we do not add duplicate handlers.
         target_path.parent.mkdir(parents=True, exist_ok=True)
         resolved_target = str(target_path.resolve())
         for handler in logger.handlers:
@@ -84,7 +84,7 @@ def configure_debug_logger():
 def _logger():
     """Logger.
     """
-    # Write a structured log entry so this step is easy to trace later.
+    # Log this here so it is easier to trace later.
     return configure_debug_logger()
 
 
@@ -100,12 +100,12 @@ def log_event(
 ):
     """Log event.
     """
-    # Convert string level into numeric level used by stdlib logger.
+    # Convert a string level into the numeric level the stdlib logger expects.
     level_name = str(level or "INFO").upper()
     level_number = getattr(logging, level_name, logging.INFO)
     logger = _logger()
 
-    # Base fields are always present for consistent log parsing.
+    # Base fields are always present so log parsing stays consistent.
     payload = {
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "level": logging.getLevelName(level_number),
@@ -117,12 +117,12 @@ def log_event(
     if details:
         payload["details"] = _clean_value(details)
 
-    # Optional metadata is appended as extra key=value fields.
+    # Optional metadata gets appended as extra key=value fields.
     for key, value in metadata.items():
         if value is None:
             continue
         cleaned_key = _clean_key(key)
-        # Keep base keys stable and move colliding metadata under a prefixed field.
+        # Keep the base keys stable and tuck colliding metadata under a prefixed field.
         if cleaned_key in payload:
             cleaned_key = f"meta_{cleaned_key}"
         payload[cleaned_key] = _clean_value(value)
@@ -143,10 +143,10 @@ def log_exception(
 ):
     """Log exception.
     """
-    # Write a structured log entry so this step is easy to trace later.
+    # Log this here so it is easier to trace later.
     error_name = type(error).__name__
     fallback_details = details or str(error)
-    log_event(  # Log the exception as a normalized structured event.
+    log_event(  # Log the exception as one normalized structured event.
         action_type=action_type,
         action=action,
         status=status,

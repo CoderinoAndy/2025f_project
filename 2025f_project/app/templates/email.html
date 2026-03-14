@@ -1,16 +1,16 @@
-{# MVC: View #}
-<!doctype html> <!-- Standard document shell for this page. -->
+{# View template. #}
+<!doctype html> <!-- Standard page shell. -->
 <!--
-  Template: email.html
-  Purpose:
+  Page: email.html
+  What this does:
   - Renders the email detail experience (metadata, body, summary, thread, and reply).
   - Coordinates server-rendered actions (move/archive/send) with client-side AI workflows.
   - Contains inline scripts for HTML body isolation, attachment management, and task polling.
-  Expected context:
+  This template expects:
   - email, next_url, thread_emails/thread_count, ai_* flags/task ids, current_user_email.
 -->
 <html lang="en">
-  <head> <!-- Page metadata, title, and style links. -->
+  <head> <!-- Head metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Email</title>
@@ -307,19 +307,19 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
 
-  <body> <!-- Visible page content and interactive controls. -->
-    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
+  <body> <!-- Main page content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared top nav for the mailbox pages. -->
     {% set ai_draft_available_value = ai_draft_available|default(false) %}
 
-    <!-- Wide content container for message + side panels. -->
-    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);"> <!-- Main page content area. -->
+    <!-- Wide content container for the message and side panels. -->
+    <div class="container-fluid app-main py-3 px-3" style="max-width: min(1600px, 98vw);"> <!-- Main content area. -->
       <a class="backlink d-inline-flex mb-2" href="{{ next_url }}" aria-label="Back">
         <i class="bi bi-arrow-left"></i>
       </a>
-      <!-- Expect: email = object/dict with title, sender, date, type, body, summary, draft -->
-      <!-- Two-column layout: message/reply on left, summary/thread on right. -->
+      <!-- Expects an email object with title, sender, date, type, body, summary, and draft fields. -->
+      <!-- Two-column layout: message and reply on the left, summary and thread on the right. -->
       <div class="row g-3 mt-3 align-items-start">
-        <!-- Left column: Message + Reply -->
+        <!-- Left column: message and reply. -->
         <!-- Left column: message metadata, body, and reply tools. -->
         <div class="col-12 col-lg-8">
         <!-- Message metadata summary block. -->
@@ -372,8 +372,8 @@
             </div>
           </div>
         </div>
-          <!-- Message panel -->
-          <!-- Message body card. -->
+          <!-- Message panel. -->
+          <!-- Email body card. -->
           <!-- AI summary card. -->
           <div class="panel-card">
             <div class="panel-header">
@@ -401,13 +401,13 @@
                 ] %}
                   {% if t != current_type %}
                     <li>
-                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0"> <!-- Form used for this action. -->
+                      <form method="post" action="{{ url_for('main.set_email_type', id=email.id) }}" class="m-0"> <!-- Form for this action. -->
                         <input type="hidden" name="new_type" value="{{ t }}" />
                         <input type="hidden" name="next" value="{{ next_url }}" />
                         <button class="dropdown-item" type="submit">{{ label }}</button>
                       </form>
                     </li>
-                  <!-- Conditional render block closes here. -->
+                  <!-- End of this conditional block. -->
                   {% endif %}
                 {% endfor %}
                 {% if email.type != 'draft' %}
@@ -426,7 +426,7 @@
                         <button class="dropdown-item" type="submit">Move to archive</button>
                       </form>
                     </li>
-                  <!-- Conditional render block closes here. -->
+                  <!-- End of this conditional block. -->
                   {% endif %}
                 {% endif %}
               </ul>
@@ -536,10 +536,10 @@
           </div>
         </div>
 
-        <!-- Right column: Summary -->
+        <!-- Right column: summary. -->
         <!-- Right column: AI summary and thread navigation. -->
         <div class="col-12 col-lg-4">
-          <!-- Message body card. -->
+          <!-- Email body card. -->
           <!-- AI summary card. -->
           <div class="panel-card">
             <div class="panel-header">
@@ -601,7 +601,7 @@
       </div>
     </div>
 
-    <!-- Server-rendered config consumed by the AI interaction script below. -->
+    <!-- Server-rendered config for the AI interaction script below. -->
     <script id="email-page-config" type="application/json">
       {{
         {
@@ -617,13 +617,13 @@
       }}
     </script>
     <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
-    <!-- Client-side behavior for HTML body rendering, attachments, and AI actions. -->
+    <!-- Client-side behavior for HTML rendering, attachments, and AI actions. -->
     <script>
-      // Module 1: render HTML email content safely inside an iframe.
-      // Module 2: manage reply attachment selection and removal.
-      // Module 3: trigger/poll AI tasks for summary and draft generation.
+      // Step 1: render the HTML email safely inside an iframe.
+      // Step 2: handle reply attachments as files are added or removed.
+      // Step 3: kick off AI jobs and poll for summary or draft results.
       (() => {
-        // DOM nodes required to mount the HTML email body.
+        // Grab the DOM nodes we need to mount the HTML email body.
         const frame = document.getElementById("message-html-frame");
         const source = document.getElementById("message-html-source");
         const fallback = document.getElementById("message-text-fallback");
@@ -649,7 +649,7 @@
           return;
         }
 
-        // Keep iframe height in sync with rendered content height.
+        // Keep the iframe height matched to the rendered content.
         const resizeFrame = () => {
           try {
             const doc = frame.contentDocument;
@@ -661,7 +661,7 @@
             const nextHeight = Math.max(320, Math.min(5000, Math.max(bodyHeight, rootHeight) + 8));
             frame.style.height = `${nextHeight}px`;
           } catch {
-            // Cross-origin/sandbox edge case fallback.
+            // Fallback for the occasional cross-origin or sandbox edge case.
             frame.style.height = "700px";
           }
         };
@@ -685,7 +685,7 @@
               link.setAttribute("rel", "noopener noreferrer");
             });
           } catch {
-            // Ignore sandbox/document access edge cases and keep the message readable.
+            // If the sandbox gets weird, fall back and keep the message readable.
           }
         };
 
@@ -702,11 +702,11 @@
         }
       })();
 
-      // Module 1: render HTML email content safely inside an iframe.
-      // Module 2: manage reply attachment selection and removal.
-      // Module 3: trigger/poll AI tasks for summary and draft generation.
+      // Step 1: render the HTML email safely inside an iframe.
+      // Step 2: handle reply attachments as files are added or removed.
+      // Step 3: kick off AI jobs and poll for summary or draft results.
       (() => {
-        // Attachment input + list container in the reply form.
+        // Attachment input and the list that shows what has been picked.
         const attachmentInput = document.getElementById("reply-attachments");
         const attachmentList = document.getElementById("reply-attachment-list");
         if (!attachmentInput || !attachmentList) {
@@ -715,11 +715,11 @@
 
         let selectedAttachments = [];
 
-        // Stable per-file key for dedupe checks.
+        // Build a stable per-file key so dedupe stays simple.
         const fileKey = (file) =>
           [file.name || "", file.size || 0, file.lastModified || 0].join("::");
 
-        // Human-readable attachment sizes.
+        // Format attachment sizes the way people expect to read them.
         const formatBytes = (bytes) => {
           const value = Number(bytes) || 0;
           if (value < 1024) {
@@ -731,12 +731,12 @@
           return `${(value / (1024 * 1024)).toFixed(1)} MB`;
         };
 
-        // Rebuild FileList from our in-memory selectedAttachments array.
+        // Rebuild the FileList from the in-memory selectedAttachments array.
         const syncAttachmentInput = () => {
           if (typeof DataTransfer === "undefined") {
             return;
           }
-          // Rebuild the FileList whenever user removes an item; FileList itself is read-only.
+          // FileList is read-only, so rebuild it whenever the user removes something.
           const transfer = new DataTransfer();
           selectedAttachments.forEach((file) => {
             transfer.items.add(file);
@@ -744,7 +744,7 @@
           attachmentInput.files = transfer.files;
         };
 
-        // Repaint the visible attachment list.
+        // Redraw the visible attachment list.
         const renderAttachmentList = () => {
           attachmentList.innerHTML = "";
           selectedAttachments.forEach((file, index) => {
@@ -791,11 +791,11 @@
         });
       })();
 
-      // Module 1: render HTML email content safely inside an iframe.
-      // Module 2: manage reply attachment selection and removal.
-      // Module 3: trigger/poll AI tasks for summary and draft generation.
+      // Step 1: render the HTML email safely inside an iframe.
+      // Step 2: handle reply attachments as files are added or removed.
+      // Step 3: kick off AI jobs and poll for summary or draft results.
       (() => {
-        // Load API URLs and initial state from server JSON.
+        // Load API URLs and the initial state from the server JSON.
         const pageConfigNode = document.getElementById("email-page-config");
         if (!pageConfigNode) {
           return;
@@ -842,10 +842,10 @@
         const aiTaskPollInitialDelayMs = 750;
         const aiTaskPollMaxDelayMs = 4000;
 
-        // Small delay helper used by polling and typing animations.
+        // Small delay helper for polling and typing animations.
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-        // Toggle summary spinner and message text.
+        // Toggle the summary spinner and its status text.
         const setSummaryLoading = (isLoading, label = "Analyzing email...") => {
           if (!summaryLoading) {
             return;
@@ -880,7 +880,7 @@
           syncDraftButtonState();
         };
 
-        // Toggle temporary draft-loading text inside the textarea.
+        // Show or hide the temporary draft-loading text in the textarea.
         const setDraftLoading = (isLoading, label = "Draft loading...") => {
           if (!replyText) {
             return;
@@ -913,7 +913,7 @@
           syncDraftButtonState();
         };
 
-        // Disable draft/send actions while async work is in flight.
+        // Disable draft and send actions while async work is running.
         const setActionButtonsBusy = (isBusy) => {
           if (draftButton) {
             drafting = Boolean(isBusy);
@@ -924,7 +924,7 @@
           }
         };
 
-        // Animate text output for smoother UI updates.
+        // Animate text output so the UI feels less abrupt.
         const typeIntoTarget = async (target, text, isTextarea = false) => {
           if (!target) {
             return;
@@ -956,7 +956,7 @@
           }
         };
 
-        // Fetch wrapper with shared headers and error handling.
+        // Small fetch wrapper with shared headers and error handling.
         const requestJson = async (url, options = {}) => {
           const response = await fetch(url, {
             credentials: "same-origin",
@@ -975,18 +975,18 @@
                 message = payloadMessage;
               }
             } catch (_error) {
-              // Keep the generic status message when the response is not JSON.
+              // If the response is not JSON, keep the generic status message.
             }
             throw new Error(message);
           }
           return response.json();
         };
 
-        // Poll task status until completed/error/timeout.
+        // Poll task status until it finishes, errors, or times out.
         const pollTask = async (taskId, maxWaitMs = aiTaskPollMaxWaitMs) => {
           const startedAt = Date.now();
           let delayMs = aiTaskPollInitialDelayMs;
-          // Poll server-side task state until completion/error to drive async UI updates.
+          // Poll the server-side task until it finishes or errors so the async UI can update.
           while (Date.now() - startedAt < maxWaitMs) {
             const task = await requestJson(`${taskStatusBase}${taskId}`);
             if (task.status === "completed") {
@@ -1004,7 +1004,7 @@
           throw new Error("AI task timed out.");
         };
 
-        // Start or resume analyze task, then update summary panel.
+        // Start or resume the analyze task, then update the summary panel.
         const startAnalyze = async (taskIdHint = "") => {
           if (analyzing) {
             return;
@@ -1054,7 +1054,7 @@
           }
         };
 
-        // Start draft task, then write generated text into reply box.
+        // Start the draft task, then drop the generated text into the reply box.
         const startDraft = async () => {
           if (drafting || !replyText) {
             return;
@@ -1121,7 +1121,7 @@
         }
         syncDraftButtonState();
 
-        // Type out server-provided summary on first load.
+        // Type out the server-provided summary on first load.
         const animateInitialSummary = async () => {
           if (!summaryText || !initialSummaryText) {
             return;

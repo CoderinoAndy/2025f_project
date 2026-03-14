@@ -1,11 +1,11 @@
-{# MVC: View #}
+{# View template. #}
 <!--
-  Template Partial: _live_email_rows.html
-  Purpose:
+  Partial: _live_email_rows.html
+  What this does:
   - Reusable mailbox rows used by both initial page render and live polling refreshes.
   - Emits capability metadata via data-* attributes for bulk selection/actions JS.
   - Handles row-level links/forms for archive, move, delete, and read-state toggles.
-  Expected context:
+  This template expects:
   - emails, current_list_url, empty_message.
 -->
 {% if emails and emails|length > 0 %} <!-- Shared row partial used by full page render + live polling API responses. -->
@@ -64,7 +64,7 @@
       <div class="row-actions">
         {% if email.type not in ['sent', 'draft'] %}
           {% if email.is_archived %}
-            <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Form used for this action. -->
+            <form method="post" action="{{ url_for('main.unarchive_email', id=email.id) }}" class="m-0"> <!-- Form for this action. -->
               <input type="hidden" name="next" value="{{ current_list_url }}">
               <button type="submit" class="row-action-btn" title="Unarchive" aria-label="Unarchive">
                 <i class="bi bi-box-arrow-up"></i>

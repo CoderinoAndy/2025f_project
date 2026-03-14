@@ -1,4 +1,5 @@
-# MVC: Model
+# Model layer.
+import atexit
 import base64
 import hashlib
 import io
@@ -17,7 +18,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 try:
     from PIL import Image, ImageDraw, ImageFont
-except ImportError:  # Optional dependency until requirements are installed.
+except ImportError:  # Optional until the extra requirements are installed.
     Image = None
     ImageDraw = None
     ImageFont = None
@@ -25,7 +26,7 @@ try:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
-except ImportError:  # Optional dependency for true HTML screenshots.
+except ImportError:  # Optional dependency for real HTML screenshots.
     PlaywrightError = RuntimeError
     PlaywrightTimeoutError = RuntimeError
     sync_playwright = None
@@ -38,14 +39,18 @@ from .db import (
 from .debug_logger import log_event
 from .email_content import contains_common_mojibake, html_to_text, repair_body_text, repair_header_text
 
-# This module now contains both model-calling code and async AI task orchestration.
-# Core runtime defaults and normalized label sets shared across classify/summarize flows.
+# This module handles both model calls and the async AI task plumbing.
+# Shared runtime defaults and label sets for classification and summary work.
 OLLAMA_API_URL_DEFAULT = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL_DEFAULT = "mistral-small3.2:24b"
+OLLAMA_CLASSIFY_MODEL_DEFAULT = "qwen2.5:7b-instruct"
+OLLAMA_SUMMARY_MODEL_DEFAULT = "mistral-small3.2:24b"
+OLLAMA_DRAFT_MODEL_DEFAULT = OLLAMA_SUMMARY_MODEL_DEFAULT
+OLLAMA_MODEL_DEFAULT = OLLAMA_SUMMARY_MODEL_DEFAULT
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 45
 OLLAMA_LONG_TASK_TIMEOUT_SECONDS_DEFAULT = 180
 OLLAMA_KEEP_ALIVE_DEFAULT = "15m"
 SUMMARY_MIN_CHARS_DEFAULT = 200
+CLASSIFY_NUM_PREDICT_DEFAULT = 96
 VISION_RENDER_MAX_CHARS_DEFAULT = 6000
 VISION_RENDER_MAX_PAGES_DEFAULT = 2
 VISION_RENDER_WRAP_WIDTH_DEFAULT = 92
@@ -73,13 +78,42 @@ TASK_MODEL_ENV_MAP = {
     "summarize": "OLLAMA_SUMMARY_MODEL",
     "summarize_rewrite": "OLLAMA_SUMMARY_MODEL",
 }
+TASK_MODEL_DEFAULTS = {
+    "classify": OLLAMA_CLASSIFY_MODEL_DEFAULT,
+    "draft": OLLAMA_DRAFT_MODEL_DEFAULT,
+    "draft_plan": OLLAMA_DRAFT_MODEL_DEFAULT,
+    "revise": OLLAMA_DRAFT_MODEL_DEFAULT,
+    "draft_rewrite": OLLAMA_DRAFT_MODEL_DEFAULT,
+    "summarize": OLLAMA_SUMMARY_MODEL_DEFAULT,
+    "summarize_rewrite": OLLAMA_SUMMARY_MODEL_DEFAULT,
+}
+TASK_NUM_PREDICT_ENV_MAP = {
+    "classify": "OLLAMA_CLASSIFY_NUM_PREDICT",
+    "draft": "OLLAMA_DRAFT_NUM_PREDICT",
+    "draft_plan": "OLLAMA_DRAFT_NUM_PREDICT",
+    "revise": "OLLAMA_DRAFT_NUM_PREDICT",
+    "draft_rewrite": "OLLAMA_DRAFT_NUM_PREDICT",
+    "summarize": "OLLAMA_SUMMARY_NUM_PREDICT",
+    "summarize_rewrite": "OLLAMA_SUMMARY_NUM_PREDICT",
+}
 LOCALHOST_NAMES = {"localhost"}
 OLLAMA_TAGS_CACHE_TTL_SECONDS = 300.0
 OLLAMA_TAGS_CACHE = {"fetched_at": 0.0, "models": ()}
 OLLAMA_TAGS_LOCK = threading.Lock()
 VISION_RENDER_CACHE = {}
 VISION_RENDER_CACHE_LOCK = threading.Lock()
+VISION_BROWSER_STATE = {
+    "playwright": None,
+    "browser": None,
+    "launch_options_key": None,
+}
+VISION_BROWSER_STATE_LOCK = threading.Lock()
+VISION_BROWSER_RENDER_LOCK = threading.Lock()
 VISION_BROWSER_CHANNEL_CANDIDATES = ("msedge", "chrome")
+VISUAL_SUMMARY_TEXT_FAILURE_CHARS_DEFAULT = 120
+VISUAL_SUMMARY_MIN_HTML_CHARS_DEFAULT = 180
+VISUAL_SUMMARY_COMPLEXITY_THRESHOLD_DEFAULT = 2
+VISUAL_SUMMARY_TEXT_OVERLAP_THRESHOLD_DEFAULT = 0.72
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 MAILBOX_OWNER_NAME_ENV = "LOCAL_USER_NAME"
@@ -648,14 +682,14 @@ HTML_VISUAL_COMPLEXITY_PATTERN = re.compile(
 def _utc_now():
     """Utc now.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _action_log_path():
     """Action log path.
     """
-    # Write a structured log entry so this step is easy to trace later.
+    # Log this here so it is easier to trace later.
     configured = (os.getenv("AI_ACTION_LOG_PATH") or "").strip()
     if configured:
         return Path(configured)
@@ -665,7 +699,7 @@ def _action_log_path():
 def _one_line(value):
     """One line.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     return text[:500]
 
@@ -697,21 +731,37 @@ def _log_action(task, status, email_id=None, detail=""):
         with target.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
     except OSError:
-        # Avoid breaking request paths if logging fails.
+        # If logging fails, do not break the request path.
         pass
 
 
 def log_ai_event(task, status, email_id=None, detail=""):
     """Log AI event.
     """
-    # Write a structured log entry so this step is easy to trace later.
+    # Log this here so it is easier to trace later.
     _log_action(task=task, status=status, email_id=email_id, detail=detail)
+
+
+def _log_performance(action, duration_ms, *, email_id=None, **metadata):
+    """Write a structured timing event for the current AI pipeline step."""
+    try:
+        log_event(
+            action_type="performance",
+            action=action,
+            status="ok",
+            component="ollama_client",
+            email_id=email_id if email_id is not None else "",
+            duration_ms=max(0, int(duration_ms)),
+            **metadata,
+        )
+    except Exception:
+        pass
 
 
 def _api_url():
     """Api url.
     """
-    # Resolve api url with configured values and a safe fallback.
+    # Resolve the API URL, with a safe fallback if config is missing.
     value = (os.getenv("OLLAMA_API_URL") or OLLAMA_API_URL_DEFAULT).strip()
     return value or OLLAMA_API_URL_DEFAULT
 
@@ -729,6 +779,34 @@ def _env_flag(env_names, default=False):
         if raw in falsy:
             return False
     return bool(default)
+
+
+def _env_int(name, default, *, minimum=None, maximum=None):
+    """Return an integer env var with clamped bounds."""
+    raw = (os.getenv(name) or "").strip()
+    try:
+        value = int(raw) if raw else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def _env_float(name, default, *, minimum=None, maximum=None):
+    """Return a float env var with clamped bounds."""
+    raw = (os.getenv(name) or "").strip()
+    try:
+        value = float(raw) if raw else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
 
 
 def _api_url_candidates():
@@ -851,7 +929,7 @@ def _resolved_model_name(task=None, api_urls=None):
 def _model_name(task=None):
     """Model name.
     """
-    # Prefer task-specific model overrides for latency-sensitive workflows.
+    # Prefer task-specific model overrides for the latency-sensitive flows.
     task_name = str(task or "").strip().lower()
     task_env = TASK_MODEL_ENV_MAP.get(task_name)
     if task_env:
@@ -861,13 +939,25 @@ def _model_name(task=None):
     global_override = (os.getenv("OLLAMA_MODEL") or "").strip()
     if global_override:
         return global_override
+    task_default = TASK_MODEL_DEFAULTS.get(task_name)
+    if task_default:
+        return task_default
     return OLLAMA_MODEL_DEFAULT
+
+
+def _num_predict_for_task(task, default):
+    """Return the configured generation-token budget for a task."""
+    task_name = str(task or "").strip().lower()
+    env_name = TASK_NUM_PREDICT_ENV_MAP.get(task_name)
+    if not env_name:
+        return max(32, int(default or 32))
+    return _env_int(env_name, int(default or 32), minimum=32, maximum=2048)
 
 
 def _timeout_seconds(task=None):
     """Timeout seconds.
     """
-    # Give slower local generations a larger default timeout than short classification calls.
+    # Give slower local generations a bigger default timeout than short classification calls.
     task_name = str(task or "").strip().lower()
     env_name = "OLLAMA_LONG_TASK_TIMEOUT_SECONDS" if task_name in LONG_OLLAMA_TASKS else "OLLAMA_TIMEOUT_SECONDS"
     default_value = (
@@ -910,98 +1000,98 @@ def _tags_timeout_seconds():
 def _summary_min_chars():
     """Summary min chars.
     """
-    # Used by other functions in this file.
-    raw = (os.getenv("OLLAMA_SUMMARY_MIN_CHARS") or "").strip()
-    try:
-        parsed = int(raw) if raw else SUMMARY_MIN_CHARS_DEFAULT
-    except ValueError:
-        parsed = SUMMARY_MIN_CHARS_DEFAULT
-    return max(50, min(5000, parsed))
+    # Shared helper for this file.
+    return _env_int(
+        "OLLAMA_SUMMARY_MIN_CHARS",
+        SUMMARY_MIN_CHARS_DEFAULT,
+        minimum=50,
+        maximum=5000,
+    )
 
 
 def _vision_render_max_chars():
     """Return the maximum cleaned body chars rendered into vision pages."""
-    raw = (os.getenv("OLLAMA_VISION_MAX_CHARS") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_RENDER_MAX_CHARS_DEFAULT
-    except ValueError:
-        parsed = VISION_RENDER_MAX_CHARS_DEFAULT
-    return max(800, min(30000, parsed))
+    return _env_int(
+        "OLLAMA_VISION_MAX_CHARS",
+        VISION_RENDER_MAX_CHARS_DEFAULT,
+        minimum=800,
+        maximum=30000,
+    )
 
 
 def _vision_render_max_pages():
     """Return the maximum number of rendered email images sent to Ollama."""
-    raw = (os.getenv("OLLAMA_VISION_MAX_PAGES") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_RENDER_MAX_PAGES_DEFAULT
-    except ValueError:
-        parsed = VISION_RENDER_MAX_PAGES_DEFAULT
-    return max(1, min(12, parsed))
+    return _env_int(
+        "OLLAMA_VISION_MAX_PAGES",
+        VISION_RENDER_MAX_PAGES_DEFAULT,
+        minimum=1,
+        maximum=12,
+    )
 
 
 def _vision_render_wrap_width():
     """Return the wrap width used by rendered email pages."""
-    raw = (os.getenv("OLLAMA_VISION_WRAP_WIDTH") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_RENDER_WRAP_WIDTH_DEFAULT
-    except ValueError:
-        parsed = VISION_RENDER_WRAP_WIDTH_DEFAULT
-    return max(40, min(140, parsed))
+    return _env_int(
+        "OLLAMA_VISION_WRAP_WIDTH",
+        VISION_RENDER_WRAP_WIDTH_DEFAULT,
+        minimum=40,
+        maximum=140,
+    )
 
 
 def _vision_render_max_lines():
     """Return the number of content lines rendered on each email image page."""
-    raw = (os.getenv("OLLAMA_VISION_MAX_LINES") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_RENDER_MAX_LINES_DEFAULT
-    except ValueError:
-        parsed = VISION_RENDER_MAX_LINES_DEFAULT
-    return max(18, min(70, parsed))
+    return _env_int(
+        "OLLAMA_VISION_MAX_LINES",
+        VISION_RENDER_MAX_LINES_DEFAULT,
+        minimum=18,
+        maximum=70,
+    )
 
 
 def _vision_render_available():
     """Return True when true HTML screenshot dependencies are available."""
-    return Image is not None and sync_playwright is not None
+    return sync_playwright is not None
 
 
 def _vision_browser_timeout_seconds():
     """Return timeout for headless-browser HTML rendering."""
-    raw = (os.getenv("OLLAMA_VISION_BROWSER_TIMEOUT_SECONDS") or "").strip()
-    try:
-        parsed = float(raw) if raw else VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT
-    except ValueError:
-        parsed = VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT
-    return max(3.0, min(30.0, parsed))
+    return _env_float(
+        "OLLAMA_VISION_BROWSER_TIMEOUT_SECONDS",
+        VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT,
+        minimum=3.0,
+        maximum=30.0,
+    )
 
 
 def _vision_browser_wait_ms():
     """Return the post-load settle delay for HTML screenshot rendering."""
-    raw = (os.getenv("OLLAMA_VISION_BROWSER_WAIT_MS") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_BROWSER_WAIT_MS_DEFAULT
-    except ValueError:
-        parsed = VISION_BROWSER_WAIT_MS_DEFAULT
-    return max(0, min(5000, parsed))
+    return _env_int(
+        "OLLAMA_VISION_BROWSER_WAIT_MS",
+        VISION_BROWSER_WAIT_MS_DEFAULT,
+        minimum=0,
+        maximum=5000,
+    )
 
 
 def _vision_render_viewport_width():
     """Return viewport width used for HTML email screenshots."""
-    raw = (os.getenv("OLLAMA_VISION_VIEWPORT_WIDTH") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_RENDER_VIEWPORT_WIDTH_DEFAULT
-    except ValueError:
-        parsed = VISION_RENDER_VIEWPORT_WIDTH_DEFAULT
-    return max(640, min(2200, parsed))
+    return _env_int(
+        "OLLAMA_VISION_VIEWPORT_WIDTH",
+        VISION_RENDER_VIEWPORT_WIDTH_DEFAULT,
+        minimum=640,
+        maximum=2200,
+    )
 
 
 def _vision_render_page_height():
     """Return max pixel height for each attached screenshot page."""
-    raw = (os.getenv("OLLAMA_VISION_PAGE_HEIGHT") or "").strip()
-    try:
-        parsed = int(raw) if raw else VISION_RENDER_PAGE_HEIGHT_DEFAULT
-    except ValueError:
-        parsed = VISION_RENDER_PAGE_HEIGHT_DEFAULT
-    return max(600, min(3000, parsed))
+    return _env_int(
+        "OLLAMA_VISION_PAGE_HEIGHT",
+        VISION_RENDER_PAGE_HEIGHT_DEFAULT,
+        minimum=600,
+        maximum=3000,
+    )
 
 
 def _vision_browser_channel():
@@ -1012,6 +1102,51 @@ def _vision_browser_channel():
 def _vision_browser_executable_path():
     """Return an optional browser executable path for Playwright launch."""
     return (os.getenv("OLLAMA_VISION_BROWSER_EXECUTABLE_PATH") or "").strip()
+
+
+def _visual_summary_enabled():
+    """Return whether summary generation may escalate to HTML screenshots."""
+    return _env_flag(["OLLAMA_VISUAL_SUMMARY_ENABLED"], default=True)
+
+
+def _visual_summary_text_failure_chars():
+    """Return the text-length threshold that counts as failed extraction."""
+    return _env_int(
+        "OLLAMA_VISUAL_SUMMARY_TEXT_FAILURE_CHARS",
+        VISUAL_SUMMARY_TEXT_FAILURE_CHARS_DEFAULT,
+        minimum=20,
+        maximum=2000,
+    )
+
+
+def _visual_summary_min_html_chars():
+    """Return the minimum HTML-derived text size that justifies visual fallback checks."""
+    return _env_int(
+        "OLLAMA_VISUAL_SUMMARY_MIN_HTML_CHARS",
+        VISUAL_SUMMARY_MIN_HTML_CHARS_DEFAULT,
+        minimum=40,
+        maximum=6000,
+    )
+
+
+def _visual_summary_complexity_threshold():
+    """Return the number of layout signals required before treating layout as important."""
+    return _env_int(
+        "OLLAMA_VISUAL_SUMMARY_COMPLEXITY_THRESHOLD",
+        VISUAL_SUMMARY_COMPLEXITY_THRESHOLD_DEFAULT,
+        minimum=1,
+        maximum=8,
+    )
+
+
+def _visual_summary_text_overlap_threshold():
+    """Return the maximum text overlap below which HTML and text diverge enough to escalate."""
+    return _env_float(
+        "OLLAMA_VISUAL_SUMMARY_TEXT_OVERLAP_THRESHOLD",
+        VISUAL_SUMMARY_TEXT_OVERLAP_THRESHOLD_DEFAULT,
+        minimum=0.2,
+        maximum=0.98,
+    )
 
 
 def _visual_context_allowed(task=None):
@@ -1069,7 +1204,7 @@ def _source_text_limit(task=None, text_max_chars=None):
     if task_name == "draft_plan":
         return 2600
     if task_name == "classify":
-        return 2200
+        return 1200
     return 3600
 
 
@@ -1106,6 +1241,50 @@ def _html_requires_visual_context(email_data):
     if not plain_text:
         return True
     return len(html_text) >= 160 and _token_overlap_ratio(html_text, plain_text) < 0.72
+
+
+def _summary_visual_decision(email_data):
+    """Return whether summary generation should escalate from text to screenshots."""
+    if not _visual_summary_enabled():
+        return {"should_escalate": False, "reason": "visual_summary_disabled"}
+    if not isinstance(email_data, dict):
+        return {"should_escalate": False, "reason": "invalid_email"}
+
+    raw_html = str(email_data.get("body_html") or "").strip()
+    if not raw_html:
+        return {"should_escalate": False, "reason": "no_html"}
+
+    html_text = _compact_text(html_to_text(raw_html))
+    plain_text = _compact_text(_email_body_text(email_data))
+    html_chars = len(html_text)
+    plain_chars = len(plain_text)
+    complexity_hits = len(list(HTML_VISUAL_COMPLEXITY_PATTERN.finditer(raw_html)))
+    text_failure = (
+        html_chars >= _visual_summary_min_html_chars()
+        and plain_chars < _visual_summary_text_failure_chars()
+    )
+    overlap = _token_overlap_ratio(html_text, plain_text) if html_text and plain_text else 0.0
+    layout_essential = complexity_hits >= _visual_summary_complexity_threshold()
+    text_diverges = (
+        html_chars >= _visual_summary_min_html_chars()
+        and plain_chars >= _visual_summary_text_failure_chars()
+        and overlap < _visual_summary_text_overlap_threshold()
+    )
+    should_escalate = bool(text_failure or (layout_essential and text_diverges))
+    if text_failure:
+        reason = "text_extraction_failed"
+    elif layout_essential and text_diverges:
+        reason = "layout_essential"
+    else:
+        reason = "text_sufficient"
+    return {
+        "should_escalate": should_escalate,
+        "reason": reason,
+        "html_chars": html_chars,
+        "plain_chars": plain_chars,
+        "complexity_hits": complexity_hits,
+        "text_overlap": round(overlap, 4),
+    }
 
 
 def _vision_render_body_text(email_data):
@@ -1192,6 +1371,61 @@ def _vision_browser_launch_options():
     return deduped
 
 
+def _close_vision_browser_locked():
+    """Close the shared Playwright browser/session held in module state."""
+    browser = VISION_BROWSER_STATE.get("browser")
+    playwright = VISION_BROWSER_STATE.get("playwright")
+    VISION_BROWSER_STATE["browser"] = None
+    VISION_BROWSER_STATE["playwright"] = None
+    VISION_BROWSER_STATE["launch_options_key"] = None
+    if browser is not None:
+        try:
+            browser.close()
+        except Exception:
+            pass
+    if playwright is not None:
+        try:
+            playwright.stop()
+        except Exception:
+            pass
+
+
+def _shutdown_vision_browser():
+    """Best-effort process shutdown hook for the persistent screenshot browser."""
+    with VISION_BROWSER_STATE_LOCK:
+        _close_vision_browser_locked()
+
+
+atexit.register(_shutdown_vision_browser)
+
+
+def _get_or_launch_vision_browser():
+    """Return a persistent Playwright browser plus any launch errors."""
+    launch_options = _vision_browser_launch_options()
+    launch_key = tuple(tuple(sorted(option.items())) for option in launch_options)
+    launch_errors = []
+    with VISION_BROWSER_STATE_LOCK:
+        browser = VISION_BROWSER_STATE.get("browser")
+        current_key = VISION_BROWSER_STATE.get("launch_options_key")
+        if browser is not None and current_key == launch_key:
+            return browser, launch_errors
+        if current_key != launch_key:
+            _close_vision_browser_locked()
+        if VISION_BROWSER_STATE.get("playwright") is None:
+            VISION_BROWSER_STATE["playwright"] = sync_playwright().start()
+        playwright = VISION_BROWSER_STATE["playwright"]
+        for option in launch_options:
+            try:
+                browser = playwright.chromium.launch(headless=True, **option)
+                VISION_BROWSER_STATE["browser"] = browser
+                VISION_BROWSER_STATE["launch_options_key"] = launch_key
+                return browser, launch_errors
+            except Exception as exc:  # pragma: no cover - exercised by the fallback logging tests.
+                launch_errors.append(f"{option or {'default': True}}:{exc}")
+        _close_vision_browser_locked()
+        return None, launch_errors
+
+
 def _encode_png_bytes(image_bytes):
     """Encode raw PNG bytes as base64 for Ollama image payloads."""
     return base64.b64encode(image_bytes).decode("ascii")
@@ -1227,37 +1461,70 @@ def _split_rendered_email_pages(image_bytes):
         return [_encode_png_bytes(image_bytes)]
 
 
+def _capture_html_email_pages(page, *, viewport_width, segment_height, max_pages, wait_ms):
+    """Capture only the visible HTML segments we may attach to the vision model."""
+    full_height = int(
+        page.evaluate(
+            """
+            () => Math.ceil(
+                Math.max(
+                    document.body ? document.body.scrollHeight : 0,
+                    document.documentElement ? document.documentElement.scrollHeight : 0,
+                    window.innerHeight || 0
+                )
+            )
+            """
+        )
+        or segment_height
+    )
+    total_pages = max(1, min(max_pages, (full_height + segment_height - 1) // segment_height))
+    rendered_pages = []
+    settle_after_scroll_ms = min(wait_ms, 120)
+    for index in range(total_pages):
+        top = index * segment_height
+        page.evaluate("(y) => window.scrollTo(0, y)", top)
+        if settle_after_scroll_ms:
+            page.wait_for_timeout(settle_after_scroll_ms)
+        remaining = max(1, min(segment_height, full_height - top))
+        image_bytes = page.screenshot(
+            type="png",
+            full_page=False,
+            clip={
+                "x": 0,
+                "y": 0,
+                "width": viewport_width,
+                "height": remaining,
+            },
+        )
+        rendered_pages.append(_encode_png_bytes(image_bytes))
+        if top + remaining >= full_height:
+            break
+    return rendered_pages
+
+
 def _render_html_email_pages(email_data, email_id=None):
     """Render true screenshots from the email's HTML with a headless browser."""
+    started_at = time.perf_counter()
     if not _vision_render_available():
-        detail = (
-            "visual_render_unavailable_playwright_missing"
-            if sync_playwright is None
-            else "visual_render_unavailable_pillow_missing"
-        )
+        detail = "visual_render_unavailable_playwright_missing"
         _log_action(task="vision", status="fallback", email_id=email_id, detail=detail)
+        _log_performance("playwright_render", 0, email_id=email_id, rendered_pages=0, skipped=1)
         return []
 
     document_html = _html_document_for_visual_render(email_data)
     if not document_html:
+        _log_performance("playwright_render", 0, email_id=email_id, rendered_pages=0, skipped=1)
         return []
 
     timeout_ms = int(_vision_browser_timeout_seconds() * 1000)
     viewport_width = _vision_render_viewport_width()
-    viewport_height = min(_vision_render_page_height(), 1400)
+    viewport_height = _vision_render_page_height()
     wait_ms = _vision_browser_wait_ms()
-    launch_errors = []
-    screenshot_bytes = None
+    max_pages = _vision_render_max_pages()
 
     try:
-        with sync_playwright() as playwright:
-            browser = None
-            for launch_options in _vision_browser_launch_options():
-                try:
-                    browser = playwright.chromium.launch(headless=True, **launch_options)
-                    break
-                except Exception as exc:  # pragma: no cover - exercised through fallback logging tests.
-                    launch_errors.append(f"{launch_options or {'default': True}}:{exc}")
+        with VISION_BROWSER_RENDER_LOCK:
+            browser, launch_errors = _get_or_launch_vision_browser()
             if browser is None:
                 _log_action(
                     task="vision",
@@ -1272,14 +1539,19 @@ def _render_html_email_pages(email_data, email_id=None):
                         email_id=email_id,
                         detail=" | ".join(launch_errors[:3]),
                     )
+                _log_performance(
+                    "playwright_render",
+                    int((time.perf_counter() - started_at) * 1000),
+                    email_id=email_id,
+                    rendered_pages=0,
+                    launch_failed=1,
+                )
                 return []
 
+            context = None
             try:
                 context = browser.new_context(
-                    viewport={
-                        "width": viewport_width,
-                        "height": viewport_height,
-                    }
+                    viewport={"width": viewport_width, "height": viewport_height}
                 )
                 page = context.new_page()
                 page.set_content(
@@ -1289,20 +1561,34 @@ def _render_html_email_pages(email_data, email_id=None):
                 )
                 if wait_ms:
                     page.wait_for_timeout(wait_ms)
-                screenshot_bytes = page.screenshot(full_page=True, type="png")
-                context.close()
+                rendered_pages = _capture_html_email_pages(
+                    page,
+                    viewport_width=viewport_width,
+                    segment_height=viewport_height,
+                    max_pages=max_pages,
+                    wait_ms=wait_ms,
+                )
             finally:
-                browser.close()
+                if context is not None:
+                    context.close()
     except (PlaywrightTimeoutError, PlaywrightError, OSError) as exc:
+        with VISION_BROWSER_STATE_LOCK:
+            _close_vision_browser_locked()
         _log_action(
             task="vision",
             status="fallback",
             email_id=email_id,
             detail=f"visual_render_failed: {exc}",
         )
+        _log_performance(
+            "playwright_render",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            rendered_pages=0,
+            failed=1,
+        )
         return []
 
-    rendered_pages = _split_rendered_email_pages(screenshot_bytes)
     if rendered_pages:
         _log_action(
             task="vision",
@@ -1310,6 +1596,12 @@ def _render_html_email_pages(email_data, email_id=None):
             email_id=email_id,
             detail=f"rendered_html_pages={len(rendered_pages)}",
         )
+    _log_performance(
+        "playwright_render",
+        int((time.perf_counter() - started_at) * 1000),
+        email_id=email_id,
+        rendered_pages=len(rendered_pages),
+    )
     return rendered_pages
 
 
@@ -1384,11 +1676,11 @@ def _render_text_page_png(page_lines, page_number, page_count, email_data):
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _render_email_image_pages(email_data, email_id=None):
+def _render_email_image_pages(email_data, email_id=None, force=False):
     """Render true HTML screenshots for visually complex emails when available."""
     if not isinstance(email_data, dict):
         return []
-    if not _html_requires_visual_context(email_data):
+    if not force and not _html_requires_visual_context(email_data):
         return []
 
     cache_key = _vision_render_cache_key(email_data)
@@ -1412,7 +1704,15 @@ def _render_email_image_pages(email_data, email_id=None):
     return rendered_pages
 
 
-def _vision_user_message(email_data, instruction_text, email_id=None, task=None, text_max_chars=None):
+def _vision_user_message(
+    email_data,
+    instruction_text,
+    email_id=None,
+    task=None,
+    text_max_chars=None,
+    allow_visual=None,
+    force_visual=False,
+):
     """Build the shared AI user message, attaching real screenshots only when available."""
     source_text = _source_text_for_user_message(
         email_data,
@@ -1435,12 +1735,21 @@ def _vision_user_message(email_data, instruction_text, email_id=None, task=None,
         "role": "user",
         "content": content,
     }
-    if not _visual_context_allowed(task=task):
+    if allow_visual is False:
         return user_message
-    if not _html_requires_visual_context(email_data):
+    if allow_visual is None and not _visual_context_allowed(task=task):
+        return user_message
+    should_attach_visual = bool(allow_visual)
+    if allow_visual is None:
+        should_attach_visual = _html_requires_visual_context(email_data)
+    if not should_attach_visual:
         return user_message
 
-    rendered_pages = _render_email_image_pages(email_data, email_id=email_id)
+    rendered_pages = _render_email_image_pages(
+        email_data,
+        email_id=email_id,
+        force=bool(force_visual),
+    )
     if not rendered_pages:
         return user_message
     user_message["content"] += (
@@ -1466,7 +1775,7 @@ def _email_body_text(email_data):
 def _is_loopback_host(hostname):
     """Return whether loopback host.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     if not hostname:
         return False
     lowered = hostname.lower()
@@ -1481,7 +1790,7 @@ def _is_loopback_host(hostname):
 def _endpoint_allowed():
     """Endpoint allowed.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     parsed = urlparse(_api_url())
     if parsed.scheme != "http":
         return False
@@ -1491,14 +1800,14 @@ def _endpoint_allowed():
 def ai_enabled():
     """Ai enabled.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     return _endpoint_allowed()
 
 
 def should_summarize_email(email_data):
     """Return whether summarize email.
     """
-    # Return whether summarize email should run based on current message/context state.
+    # Decide whether summary generation should run for this message and context.
     body = _email_body_text(email_data).strip()
     return len(body) >= _summary_min_chars()
 
@@ -1506,7 +1815,7 @@ def should_summarize_email(email_data):
 def classification_to_email_type(classification):
     """Classification recipient email type.
     """
-    # Normalize to the fixed labels used by mailbox triage.
+    # Keep labels aligned with the mailbox triage buckets.
     if not isinstance(classification, dict):
         return "read-only"
     explicit_type = str(classification.get("email_type") or "").strip().lower()
@@ -1530,7 +1839,7 @@ def classification_to_email_type(classification):
 def _compact_text(value):
     """Compact text.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     return " ".join(str(value or "").split()).strip()
 
 
@@ -1549,7 +1858,7 @@ def _normalized_header_text(value):
 
 def _ensure_sentence_ending(text):
     """Return compacted text with terminal punctuation."""
-    # Keep generated copy readable by avoiding duplicate punctuation patterns.
+    # Keep generated copy readable by avoiding repeated punctuation patterns.
     value = _compact_text(text)
     if not value:
         return ""
@@ -1679,7 +1988,7 @@ def _merge_sentence_fragments(parts):
 
 def _strip_footer_noise_text(text):
     """Remove common newsletter/legal footer phrases from text."""
-    # Keep prompts and summaries focused on actionable content rather than boilerplate.
+    # Keep prompts and summaries focused on actionable content instead of boilerplate.
     cleaned = str(text or "")
     if not cleaned:
         return ""
@@ -1718,7 +2027,7 @@ def _strip_footer_noise_text(text):
 
 def _looks_footer_noise_fragment(text):
     """Return True when text appears to be newsletter/footer boilerplate."""
-    # Keep this rule in one place so behavior stays consistent.
+    # Keep this rule here so the behavior stays consistent.
     normalized = _compact_text(text).lower()
     if not normalized:
         return False
@@ -1769,7 +2078,7 @@ def _looks_source_signature_sentence(text):
     tokens = _text_tokens(lowered)
     if len(tokens) < 3 or len(tokens) > 10:
         return False
-    # Treat bare publication mastheads as non-content when no action verbs are present.
+    # Treat bare publication mastheads as non-content when there are no action verbs nearby.
     common_verbs = {
         "is",
         "are",
@@ -1810,7 +2119,7 @@ def _looks_source_signature_sentence(text):
 def _text_tokens(value):
     """Text tokens.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     text = str(value or "").lower()
     return [token for token in re.findall(r"[a-z0-9']+", text) if len(token) > 2]
 
@@ -1818,7 +2127,7 @@ def _text_tokens(value):
 def _token_overlap_ratio(left, right):
     """Token overlap ratio.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     left_tokens = set(_text_tokens(left))
     right_tokens = set(_text_tokens(right))
     if not left_tokens or not right_tokens:
@@ -1829,7 +2138,7 @@ def _token_overlap_ratio(left, right):
 def _is_noise_fragment(text):
     """Return whether noise fragment.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     normalized = _compact_text(text).lower()
     if not normalized or normalized == "[link]":
         return True
@@ -1845,7 +2154,7 @@ def _is_noise_fragment(text):
 def _is_near_subject_copy(candidate_text, title_text):
     """Return whether near subject copy.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     candidate = _compact_text(candidate_text)
     title = _compact_text(title_text)
     if not candidate or not title or title.lower() == "(no subject)":
@@ -1953,7 +2262,7 @@ def _strip_reply_chain(text):
     """
     content = str(text or "")
     cut_positions = []
-    # Trim quoted history so prompts focus on the newest message only.
+    # Trim quoted history so prompts stay focused on the newest message only.
     for pattern in REPLY_CHAIN_PATTERNS:
         match = re.search(
             pattern,
@@ -2145,7 +2454,7 @@ def _looks_numeric_scoreboard_line(line_text):
 def _clean_body_for_prompt(body, max_chars=8000):
     """Clean body for prompt.
     """
-    # Clean this value so the rest of the code gets predictable input.
+    # Clean this up so the rest of the code sees something predictable.
     title_text = ""
     if isinstance(body, dict):
         text = _email_body_text(body)
@@ -2167,11 +2476,11 @@ def _clean_body_for_prompt(body, max_chars=8000):
     for line in text.split("\n"):
         trimmed = line.strip()
         if not trimmed:
-            # Keep paragraph boundaries for downstream sentence splitting.
+            # Keep paragraph boundaries intact for later sentence splitting.
             cleaned_lines.append("")
             continue
         if trimmed.startswith(">"):
-            # Ignore quoted history from earlier messages in a thread.
+            # Ignore quoted history from earlier messages in the thread.
             continue
         if _looks_markup_noise_line(trimmed):
             continue
@@ -2205,7 +2514,7 @@ def _clean_body_for_prompt(body, max_chars=8000):
         normalized_line = _strip_footer_noise_text(normalized_line)
         normalized_line = _compact_text(normalized_line)
         if not normalized_line:
-            # Drop lines that collapse to empty after noise stripping.
+            # Drop lines that turn empty after noise stripping.
             continue
         lowered = normalized_line.lower()
         if _looks_credit_or_byline_line(normalized_line):
@@ -2272,7 +2581,7 @@ def _clean_body_for_prompt(body, max_chars=8000):
 def _extract_key_sentences(body_text, max_sentences=8):
     """Extract key sentences.
     """
-    # Read this field from payloads that may be missing keys.
+    # Some payloads leave this field out, so read it carefully.
     email_context = body_text if isinstance(body_text, dict) else None
     cleaned_body = _clean_body_for_prompt(body_text or "", max_chars=5000)
     if not cleaned_body:
@@ -2286,7 +2595,7 @@ def _extract_key_sentences(body_text, max_sentences=8):
 
     parts = _merge_sentence_fragments(re.split(r"(?<=[.!?])\s+", flattened))
     if len(parts) <= 1:
-        # Fallback splitter for emails with weak punctuation structure.
+        # Fallback splitter for emails that do not have much punctuation structure.
         parts = _merge_sentence_fragments(re.split(r";\s+|\.\s+", flattened))
 
     selected = []
@@ -2307,14 +2616,14 @@ def _extract_key_sentences(body_text, max_sentences=8):
             continue
         lowered = sentence.lower()
         if lowered.startswith(("from:", "to:", "cc:", "bcc:", "sent:", "date:", "subject:")):
-            # Skip copied header metadata that is not semantic body content.
+            # Skip copied header metadata that is not really body content.
             continue
         if _looks_source_signature_sentence(sentence):
             continue
         if _is_noise_fragment(sentence):
             continue
         if any(_token_overlap_ratio(sentence, existing) > 0.94 for existing in selected):
-            # Avoid retaining near-duplicate lines in extracted candidates.
+            # Drop near-duplicate lines from the extracted candidates.
             continue
         selected.append(sentence)
         if len(selected) >= max_sentences:
@@ -4133,7 +4442,7 @@ def _bulk_newsletter_summary(email_data):
 def _looks_summary_failure(summary_text):
     """Looks summary failure.
     """
-    # Override the earlier brittle mojibake regex with the shared detector.
+    # Replace the earlier brittle mojibake regex with the shared detector.
     normalized = _compact_text(summary_text).lower()
     if not normalized:
         return True
@@ -4171,14 +4480,14 @@ def _prepare_model_summary(summary_text, char_limit):
 
 def _content_tokens(value):
     """Return content-heavy tokens for grounding checks."""
-    # Used by other functions in this file.
+    # Shared helper for this file.
     tokens = _text_tokens(value)
     return [token for token in tokens if token not in SUMMARY_STOPWORDS]
 
 
 def _summary_support_ratio(sentence_text, reference_tokens):
     """Return how strongly sentence tokens are grounded in the source."""
-    # Keep hallucination filtering deterministic and cheap.
+    # Keep hallucination filtering deterministic and inexpensive.
     tokens = _content_tokens(sentence_text)
     if not tokens:
         return 0.0
@@ -4301,7 +4610,7 @@ def _summary_sentence_is_copied(
 
 def _sanitize_model_summary(summary_text, email_data, structured=False):
     """Normalize and ground model summary text against source content."""
-    # Keep only concise, source-supported sentences from model output.
+    # Keep only concise sentences that the source actually supports.
     profile = _summary_profile(email_data)
     parts = _summary_candidate_fragments(summary_text, structured=structured)
     if not parts:
@@ -4317,7 +4626,7 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
     source_tokens = set(_content_tokens(source))
     source_sentences = _extract_key_sentences(source, max_sentences=20)
 
-    # Split generated text into candidate sentences and filter for grounded facts only.
+    # Break generated text into candidate sentences and keep only the grounded ones.
     kept = []
     for sentence in parts:
         if _looks_newsletter_teaser_question(sentence, email_data=email_data):
@@ -4347,7 +4656,7 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
             continue
         if any(_token_overlap_ratio(cleaned, existing) > 0.93 for existing in kept):
             continue
-        # Require reasonable grounding in body/image evidence.
+        # Require a reasonable amount of grounding in the body text or images.
         support_ratio = _summary_support_ratio(cleaned, source_tokens)
         if support_ratio < 0.52:
             continue
@@ -4389,7 +4698,7 @@ def _looks_summary_call_to_action(summary_text, email_data):
 
 def _looks_summary_parrot(summary_text, email_data):
     """Return True when summary appears copied from the email body."""
-    # Keep model summaries readable by rejecting near-verbatim source echoes.
+    # Keep model summaries readable by rejecting near-verbatim echoes of the source.
     profile = _summary_profile(email_data)
     normalized_summary_text = _normalize_summary_layout(summary_text)
     summary = _compact_text(normalized_summary_text)
@@ -4573,7 +4882,7 @@ def _summary_evidence_block(email_data, max_points=8):
 
 def _rewrite_parroted_summary(summary_text, email_data, email_id=None, structured=False):
     """Attempt to rewrite a copied summary into original condensed wording."""
-    # Give the model one more chance to paraphrase before falling back.
+    # Give the model one more chance to paraphrase before we fall back.
     profile = _summary_profile(email_data)
     candidate = _normalize_summary_layout(summary_text)
     if not candidate:
@@ -4604,7 +4913,10 @@ def _rewrite_parroted_summary(summary_text, email_data, email_id=None, structure
         ],
         email_id=email_id,
         temperature=0.25,
-        num_predict=max(280, min(800, profile["num_predict"])),
+        num_predict=_num_predict_for_task(
+            "summarize_rewrite",
+            max(280, min(800, profile["num_predict"])),
+        ),
     )
     if not response_text:
         return None
@@ -4941,7 +5253,7 @@ def _select_fallback_summary_sentences(email_data, max_sentences=3):
 
     ranked_candidates = sorted(candidates, key=lambda item: (-item[0], item[1]))
     if len(candidates) >= 5 and max_sentences >= 4:
-        # Long newsletters need coverage across sections, not just the globally highest scores.
+        # Long newsletters need coverage across sections, not just the globally highest-scoring bits.
         segment_count = min(max_sentences, len(candidates))
         segment_size = max(1, (len(candidates) + segment_count - 1) // segment_count)
         segmented = []
@@ -5036,7 +5348,7 @@ def _extractive_summary_fallback(email_data):
     staff_summary = _staff_update_summary(email_data)
     if staff_summary:
         return staff_summary
-    # Prefer concrete extracted details from the body before generic prose.
+    # Prefer concrete details pulled from the body over generic prose.
     profile = _summary_profile(email_data)
     title = _compact_text(email_data.get("title") or "")
     actionable = _looks_actionable(email_data)
@@ -5131,7 +5443,7 @@ def _structured_summary_fallback(email_data):
 
 def _rewrite_summary_for_second_person(summary_text):
     """Normalize generated summaries to neutral paragraph-style wording."""
-    # Keep summary style predictable and avoid second-person address in the UI.
+    # Keep the summary style predictable and avoid second-person phrasing in the UI.
     summary = _normalize_summary_layout(summary_text)
     if not summary:
         return ""
@@ -5511,7 +5823,7 @@ def _normalize_owner_signature_in_draft(draft_text):
 def _normalized_email_for_classification(email_data):
     """Normalized email for classification.
     """
-    # Normalize to the fixed labels used by mailbox triage.
+    # Keep labels aligned with the mailbox triage buckets.
     return {
         "title": _normalized_header_text(email_data.get("title") or "(No subject)"),
         "sender": _normalized_header_text(email_data.get("sender")),
@@ -5524,7 +5836,7 @@ def _normalized_email_for_classification(email_data):
 def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14):
     """Email context block.
     """
-    # Build email context block text that is passed into model prompts.
+    # Build the email context block that gets passed into model prompts.
     owner_context = _mailbox_owner_context_block()
     title = _normalized_header_text(email_data.get("title") or "(No subject)")
     sender = _normalized_header_text(email_data.get("sender"))
@@ -5558,7 +5870,7 @@ def _email_context_block(email_data, body_max_chars=8000, body_max_sentences=14)
 def _sender_parts(sender_text):
     """Sender parts.
     """
-    # Split sender text into structured parts used by heuristic classification logic.
+    # Break sender text into structured parts for the heuristic classification logic.
     raw = _normalized_header_text(sender_text).lower()
     if not raw:
         return {
@@ -5571,7 +5883,7 @@ def _sender_parts(sender_text):
         }
 
     email = ""
-    # Prefer explicit addresses; fallback to bracketed sender forms when needed.
+    # Prefer explicit addresses, then fall back to bracketed sender forms if needed.
     email_match = EMAIL_ADDRESS_PATTERN.search(raw)
     if email_match:
         email = email_match.group(1)
@@ -5608,14 +5920,14 @@ def _sender_parts(sender_text):
 def _sender_address(sender_text):
     """Sender address.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     return _sender_parts(sender_text).get("email", "")
 
 
 def _has_any_pattern(text, patterns):
     """Return whether any pattern.
     """
-    # Check whether any pattern exists before running heavier work.
+    # Check for any pattern match before we do heavier work.
     value = str(text or "").lower()
     return any(pattern in value for pattern in patterns)
 
@@ -5629,7 +5941,7 @@ def _matching_patterns(text, patterns):
 def _sender_looks_automated(sender_info):
     """Sender looks automated.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     if not isinstance(sender_info, dict):
         return False
     identity = sender_info.get("identity", "")
@@ -5639,7 +5951,7 @@ def _sender_looks_automated(sender_info):
 def _sender_uses_personal_domain(sender_info):
     """Sender uses personal domain.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     if not isinstance(sender_info, dict):
         return False
     domain = str(sender_info.get("domain") or "").strip().lower()
@@ -5651,7 +5963,7 @@ def _sender_uses_personal_domain(sender_info):
 def _sender_hint_block(email_data):
     """Sender hint block.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     sender_info = _sender_parts(email_data.get("sender"))
     sender_automated = _sender_looks_automated(sender_info)
     sender_personal_domain = _sender_uses_personal_domain(sender_info)
@@ -5668,7 +5980,7 @@ def _sender_hint_block(email_data):
 def _classification_few_shot_block():
     """Classification few shot block.
     """
-    # Normalize to the fixed labels used by mailbox triage.
+    # Keep labels aligned with the mailbox triage buckets.
     return (
         "Few-shot examples:\n"
         "1) From: promotions@store-updates.example\n"
@@ -5709,7 +6021,7 @@ def _classification_few_shot_block():
 def _looks_bulk_or_newsletter(email_data):
     """Looks bulk or newsletter.
     """
-    # Keep this rule in one place so behavior stays consistent.
+    # Keep this rule here so the behavior stays consistent.
     sender_info = _sender_parts(email_data.get("sender"))
     sender = sender_info.get("email", "")
     body = _email_body_text(email_data).lower()
@@ -5860,7 +6172,7 @@ def _looks_actionable(email_data):
     body = _email_body_text(email_data).lower()
     combined = " ".join([title, body])
 
-    # Require stronger response-language cues when message resembles bulk mail.
+    # Require stronger response-language cues when the message looks like bulk mail.
     explicit_question = "?" in title or "?" in body
     direct_question_markers = (
         "can you",
@@ -5892,7 +6204,7 @@ def _looks_actionable(email_data):
         "for your records",
         "unless there is an issue",
     )
-    # Bulk messages are treated as non-actionable unless they contain explicit response language.
+    # Treat bulk messages as non-actionable unless they contain explicit response language.
     if _has_any_pattern(combined, non_actionable_markers):
         return False
     if _looks_bulk_or_newsletter(email_data) and not _has_any_pattern(
@@ -6092,8 +6404,8 @@ def _with_commercial_promotion_guardrail(result, junk_assessment):
 def _heuristic_classification(email_data):
     """Heuristic classification.
     """
-    # Normalize to the fixed labels used by mailbox triage.
-    # Heuristics provide deterministic fallback labels when model output is absent/uncertain.
+    # Keep labels aligned with the mailbox triage buckets.
+    # Heuristics give us a deterministic fallback when the model is missing or unsure.
     actionable = _looks_actionable(email_data)
     bulk_signal = _looks_bulk_or_newsletter(email_data)
     junk_assessment = _junk_signal_assessment(email_data)
@@ -6184,7 +6496,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
     heuristic_type = heuristic_classification.get("email_type")
     heuristic_guardrail = heuristic_classification.get("guardrail_reason") == "commercial_promotion"
 
-    # Nudge uncertain model outputs toward safer mailbox behavior.
+    # Nudge uncertain model outputs toward the safer mailbox behavior.
     if heuristic_type == "read-only":
         if bool(merged.get("needs_response")) and model_confidence < 0.9:
             merged["category"] = "informational"
@@ -6211,7 +6523,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
 
     if heuristic_type == "junk":
         model_is_junk = str(merged.get("category") or "").strip().lower() == "junk"
-        # If heuristics are strongly junk-like and the model is uncertain, trust heuristics.
+        # If heuristics strongly point to junk and the model is unsure, trust the heuristics.
         if not model_is_junk and model_confidence < 0.85:
             merged = dict(heuristic_classification)
             model_confidence = float(merged.get("confidence") or 0.0)
@@ -6233,7 +6545,7 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
 def _extract_json_block(text):
     """Extract JSON block.
     """
-    # Read this field from payloads that may be missing keys.
+    # Some payloads leave this field out, so read it carefully.
     stripped = str(text or "").strip()
     if stripped.startswith("{") and stripped.endswith("}"):
         return stripped
@@ -6247,7 +6559,7 @@ def _extract_json_block(text):
 def _parse_bool(value):
     """Parse bool.
     """
-    # Parse and validate this input before using it.
+    # Validate this before we trust it.
     if isinstance(value, bool):
         return value
     if value is None:
@@ -6263,7 +6575,7 @@ def _parse_bool(value):
 def _normalize_classification(raw_value):
     """Normalize classification.
     """
-    # Normalize classification to one format used across the app.
+    # Keep classification in a consistent format across the app.
     category = str(raw_value.get("category") or "").strip().lower()
     try:
         priority = int(raw_value.get("priority"))
@@ -6288,7 +6600,7 @@ def _normalize_classification(raw_value):
         else:
             category = "informational"
 
-    # Enforce category/type consistency so downstream DB writes stay canonical.
+    # Keep category and type consistent so downstream DB writes stay canonical.
     if email_type == "response-needed":
         needs_response = True
     elif email_type == "read-only":
@@ -6324,7 +6636,7 @@ def _normalize_classification(raw_value):
 
 def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320):
     """Call Ollama chat API and return response content or None on failure."""
-    # Send one non-streaming chat request to Ollama and return the model text payload.
+    # Send one non-streaming chat request to Ollama and return the model text.
     started_at = time.perf_counter()
     api_urls = _api_url_candidates()
     model_selection = _resolve_model_selection(task=task, api_urls=api_urls)
@@ -6447,7 +6759,8 @@ def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320
 def classify_email(email_data, email_id=None):
     """Classify email.
     """
-    # Normalize to the fixed labels used by mailbox triage.
+    started_at = time.perf_counter()
+    # Keep labels aligned with the mailbox triage buckets.
     normalized_email = _normalized_email_for_classification(email_data)
     body = (normalized_email.get("body") or "").strip()
     title = (normalized_email.get("title") or "").strip()
@@ -6456,61 +6769,32 @@ def classify_email(email_data, email_id=None):
 
     heuristic = _heuristic_classification(normalized_email)
     user_message = _vision_user_message(
-        email_data,
+        normalized_email,
         (
-            "Classify this email using the provided email source context. "
-            "Return JSON only."
+            "Classify this email for triage. Return JSON only."
         ),
         email_id=email_id,
         task="classify",
-        text_max_chars=2200,
+        text_max_chars=1200,
+        allow_visual=False,
     )
     if not user_message:
         return heuristic
 
     # Ask for strict JSON, then combine with deterministic heuristics for stability.
     system_prompt = (
-        "You classify emails for triage. Think step-by-step internally, but never output your chain-of-thought. "
-        "Return valid JSON only with exactly these keys: "
-        "category, needs_response, priority, confidence. "
-        "category must be one of: urgent, informational, junk. "
+        "You classify inbox emails for triage. "
+        "Return valid JSON only with exactly these keys: category, needs_response, priority, confidence. "
+        "category must be urgent, informational, or junk. "
         "needs_response must be true or false. "
-        "priority must be an integer 1 to 3. "
-        "confidence must be a float 0 to 1. "
-        "Weighted evidence order: email body content is highest, sender identity/domain is second highest, "
-        "and subject is third. "
-        "If the body content and sender conflict weakly, give sender extra weight unless the body clearly shows a direct response request. "
-        "Infer whether the sender appears to be a brand/company/news source or an individual from sender "
-        "name/domain using your general knowledge and context in this email. "
-        "Do not rely on a predefined hardcoded brand list. "
-        "For this app, junk means spam, scams/phishing, or unsolicited bulk mail whose main purpose is "
-        "advertising, promotion, sales conversion, list-building, or generic prospecting rather than an ongoing "
-        "relationship or transaction. "
-        "Permission-based editorial newsletters, news digests, and genuine transactional or relationship "
-        "notifications are usually informational with needs_response=false unless the email explicitly asks "
-        "the recipient to respond. "
-        "Do not keep a message informational merely because it comes from a legitimate company or recognizable "
-        "brand. If the email is mainly a commercial promotion, coupon, sale, upsell, marketing blast, or cold "
-        "lead-generation pitch, classify it as junk. "
-        "If the message is borderline promotional rather than fully obvious spam, still use category=junk and "
-        "lower confidence instead of informational so the app can route it to junk confirmation. "
-        "For routine retail promotions and brand advertising, prefer moderate junk confidence so they land in "
-        "junk confirmation unless the message also looks clearly malicious, deceptive, or scam-like. "
-        "Lean strongly toward junk when the email shows common spam or junk patterns such as aggressive sales "
-        "CTAs, discount or promo-code language, free-shipping or limited-time offers, urgency/scarcity bait, "
-        "prize/refund/investment promises, account-verification fear bait from automated senders, bulk footer "
-        "language paired with promotional copy, or unsolicited lead-gen outreach. "
-        "Keep informational for receipts, statements, shipping updates, appointment confirmations, direct "
-        "person-to-person messages, and legitimate account or service notifications that are primarily "
-        "transactional rather than promotional. "
-        "Generalize from these patterns instead of requiring an exact match to a prior example. "
-        "Use lower confidence only for borderline cases, such as mixed editorial/promotional mail, so uncertain "
-        "junk can be confirmed by the user. "
-        "Treat plain person names as names, not email addresses."
+        "priority must be an integer from 1 to 3. "
+        "confidence must be a float from 0 to 1. "
+        "Use the email body as primary evidence, sender second, subject third. "
+        "Treat ads, coupons, sales blasts, marketing promotions, scam/phishing mail, and unsolicited lead-gen pitches as junk. "
+        "Treat receipts, account notices, newsletters, and service updates as informational unless the sender clearly wants a reply."
     )
     user_message["content"] += (
         "\n\n"
-        f"{_classification_few_shot_block()}\n\n"
         f"{_sender_hint_block(normalized_email)}\n"
         f"{_junk_signal_block(normalized_email)}"
         "Return JSON only."
@@ -6523,23 +6807,55 @@ def classify_email(email_data, email_id=None):
         ],
         email_id=email_id,
         temperature=0.0,
-        num_predict=160,
+        num_predict=_num_predict_for_task("classify", CLASSIFY_NUM_PREDICT_DEFAULT),
     )
     if not response_text:
+        _log_performance(
+            "ollama_classification",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            used_model=_model_name(task="classify"),
+            used_model_response=0,
+        )
         return heuristic
     # Fall back cleanly when the model emits malformed/non-JSON output.
     json_block = _extract_json_block(response_text)
     if not json_block:
         _log_action(task="classify", status="error", email_id=email_id, detail="missing_json_block")
+        _log_performance(
+            "ollama_classification",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            used_model=_model_name(task="classify"),
+            used_model_response=1,
+            parsed_json=0,
+        )
         return heuristic
     try:
         parsed = json.loads(json_block)
     except json.JSONDecodeError as exc:
         _log_action(task="classify", status="error", email_id=email_id, detail=f"invalid_json: {exc}")
+        _log_performance(
+            "ollama_classification",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            used_model=_model_name(task="classify"),
+            used_model_response=1,
+            parsed_json=0,
+        )
         return heuristic
     normalized = _normalize_classification(parsed)
     merged = _merge_with_heuristics(normalized, heuristic)
-    return _normalize_classification(merged)
+    result = _normalize_classification(merged)
+    _log_performance(
+        "ollama_classification",
+        int((time.perf_counter() - started_at) * 1000),
+        email_id=email_id,
+        used_model=_model_name(task="classify"),
+        used_model_response=1,
+        parsed_json=1,
+    )
+    return result
 
 
 def _postprocess_model_summary(summary_text, email_data, email_id=None, structured=False):
@@ -6594,7 +6910,8 @@ def _postprocess_model_summary(summary_text, email_data, email_id=None, structur
 def summarize_email(email_data, email_id=None):
     """Summarize email.
     """
-    # Translate between API payloads and our local mailbox shape.
+    started_at = time.perf_counter()
+    # Convert API data into the mailbox shape the app uses locally.
     if not should_summarize_email(email_data):
         return None
     raw_body = _email_body_text(email_data)
@@ -6604,6 +6921,15 @@ def summarize_email(email_data, email_id=None):
             email_data,
         )
         if fast_article_summary:
+            _log_performance(
+                "ollama_summary",
+                int((time.perf_counter() - started_at) * 1000),
+                email_id=email_id,
+                model_attempts=0,
+                visual_escalated=0,
+                used_fallback=1,
+                path="fast_article",
+            )
             return fast_article_summary
     profile = _summary_profile(email_data)
     structured_summary = _should_use_structured_summary(email_data)
@@ -6624,7 +6950,7 @@ def summarize_email(email_data, email_id=None):
         if not _looks_generic_posture_summary(finalized_candidate):
             fallback_summary = finalized_candidate
             break
-    user_message = _vision_user_message(
+    text_user_message = _vision_user_message(
         email_data,
         (
             "Analyze the provided email source context and summarize the email. "
@@ -6633,9 +6959,20 @@ def summarize_email(email_data, email_id=None):
         email_id=email_id,
         task="summarize",
         text_max_chars=profile["context_chars"],
+        allow_visual=False,
     )
-    if not user_message:
+    if not text_user_message:
+        _log_performance(
+            "ollama_summary",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            model_attempts=0,
+            visual_escalated=0,
+            used_fallback=int(bool(fallback_summary)),
+            path="no_prompt",
+        )
         return fallback_summary
+    visual_decision = _summary_visual_decision(email_data)
 
     system_prompt = (
         "You summarize emails for the mailbox owner. "
@@ -6646,7 +6983,7 @@ def summarize_email(email_data, email_id=None):
         + f"Aim for {profile['prompt_target']}. "
         + "Return plain text only."
     )
-    user_message["content"] += (
+    text_user_message["content"] += (
         "\n\n"
         "Write the summary that best fits this email. "
         "Keep it grounded in the provided email content, concise, and readable. "
@@ -6656,43 +6993,102 @@ def summarize_email(email_data, email_id=None):
         task="summarize",
         messages=[
             {"role": "system", "content": system_prompt},
-            user_message,
+            text_user_message,
         ],
         email_id=email_id,
         temperature=0.2,
-        num_predict=profile["num_predict"],
+        num_predict=_num_predict_for_task("summarize", profile["num_predict"]),
     )
-    if not response_text:
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_no_model_response",
-            )
-        return fallback_summary
-
     summary = _postprocess_model_summary(
         response_text,
         email_data,
         email_id=email_id,
         structured=structured_summary,
-    )
-    if not summary:
-        if fallback_summary:
-            _log_action(
-                task="summarize",
-                status="fallback",
-                email_id=email_id,
-                detail="using_extractive_fallback_unusable_model_output",
+    ) if response_text else None
+    model_attempts = 1
+    visual_escalated = 0
+
+    if not summary and visual_decision.get("should_escalate"):
+        visual_escalated = 1
+        _log_action(
+            task="summarize",
+            status="fallback",
+            email_id=email_id,
+            detail=(
+                "escalating_to_visual_summary "
+                f"reason={visual_decision.get('reason')} "
+                f"plain_chars={visual_decision.get('plain_chars')} "
+                f"html_chars={visual_decision.get('html_chars')} "
+                f"complexity_hits={visual_decision.get('complexity_hits')} "
+                f"text_overlap={visual_decision.get('text_overlap')}"
+            ),
+        )
+        visual_user_message = _vision_user_message(
+            email_data,
+            (
+                "Analyze the provided email source context and summarize the email. "
+                "Use the email body text as the main source and the metadata only as support."
+            ),
+            email_id=email_id,
+            task="summarize",
+            text_max_chars=profile["context_chars"],
+            allow_visual=True,
+            force_visual=True,
+        )
+        if visual_user_message:
+            visual_user_message["content"] += (
+                "\n\n"
+                "Write the summary that best fits this email. "
+                "Keep it grounded in the provided email content, concise, and readable. "
+                "Mention any action item or deadline if there is one."
             )
-        return fallback_summary
-    return summary or fallback_summary
+            response_text = _call_ollama(
+                task="summarize",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    visual_user_message,
+                ],
+                email_id=email_id,
+                temperature=0.2,
+                num_predict=_num_predict_for_task("summarize", profile["num_predict"]),
+            )
+            model_attempts += 1
+            if response_text:
+                summary = _postprocess_model_summary(
+                    response_text,
+                    email_data,
+                    email_id=email_id,
+                    structured=structured_summary,
+                )
+
+    if not summary and fallback_summary:
+        detail = (
+            "using_extractive_fallback_no_model_response"
+            if not response_text
+            else "using_extractive_fallback_unusable_model_output"
+        )
+        _log_action(
+            task="summarize",
+            status="fallback",
+            email_id=email_id,
+            detail=detail,
+        )
+    final_summary = summary or fallback_summary
+    _log_performance(
+        "ollama_summary",
+        int((time.perf_counter() - started_at) * 1000),
+        email_id=email_id,
+        model_attempts=model_attempts,
+        visual_escalated=visual_escalated,
+        used_fallback=int(bool(final_summary and final_summary == fallback_summary and not summary)),
+        visual_reason=visual_decision.get("reason"),
+    )
+    return final_summary
 
 
 def _sender_display_name(sender_text):
     """Extract a readable sender name from the raw sender field."""
-    # Used by other functions in this file.
+    # Shared helper for this file.
     sender_raw = _normalized_header_text(sender_text)
     if not sender_raw:
         return ""
@@ -6705,7 +7101,7 @@ def _sender_display_name(sender_text):
 
 def _first_request_sentence(email_data):
     """Return the first sentence that looks like an explicit request."""
-    # Used by other functions in this file.
+    # Shared helper for this file.
     for sentence in _extract_key_sentences(_email_body_text(email_data), max_sentences=8):
         lowered = sentence.lower()
         if "?" in sentence:
@@ -6974,7 +7370,7 @@ def _extract_reply_plan(email_data, email_id=None):
         ],
         email_id=email_id,
         temperature=0.0,
-        num_predict=180,
+        num_predict=_num_predict_for_task("draft_plan", 180),
     )
     if not response_text:
         if isinstance(email_data, dict):
@@ -7031,7 +7427,7 @@ def _reply_guidance_block(email_data, reply_plan=None):
 
 def _draft_reply_fallback(email_data, reply_plan=None):
     """Build a safe contextual fallback draft when model output is missing or unusable."""
-    # Generate, revise, or validate draft reply fallback used by reply and draft workflows.
+    # Shared fallback for draft replies in the reply and draft flow.
     plan = reply_plan or _extract_reply_plan(email_data)
     sender_name = _compact_text(plan.get("sender_name")) or _sender_display_name(email_data.get("sender"))
     greeting = f"Hi {sender_name}," if sender_name else "Hi,"
@@ -7193,7 +7589,7 @@ def _sanitize_reply_output(draft_text):
 
 def _looks_draft_failure(draft_text, email_data, reply_plan=None):
     """Detect placeholder or low-quality drafts that should be replaced."""
-    # Keep this rule in one place so behavior stays consistent.
+    # Keep this rule here so the behavior stays consistent.
     cleaned = _compact_text(draft_text)
     if not cleaned:
         return True
@@ -7366,7 +7762,7 @@ def _rewrite_generic_draft(
         ],
         email_id=email_id,
         temperature=0.25,
-        num_predict=260,
+        num_predict=_num_predict_for_task("draft_rewrite", 260),
     )
     if not response_text:
         return None
@@ -7679,7 +8075,7 @@ def _revise_reply_fallback(email_data, current_draft_text, reply_plan=None):
 
 def _draft_preserves_user_context(original_text, revised_text):
     """Return True when revised draft still reflects user-provided context."""
-    # Keep revise behavior anchored to the user's current reply box content.
+    # Keep revise behavior anchored to whatever is already in the user's reply box.
     original = _compact_text(original_text).lower()
     revised = _compact_text(revised_text).lower()
     if not original or not revised:
@@ -7693,7 +8089,7 @@ def _draft_preserves_user_context(original_text, revised_text):
         return False
     overlap = len(original_tokens & revised_tokens) / float(len(original_tokens))
 
-    # Short user drafts need lighter overlap checks; long drafts should retain more substance.
+    # Short user drafts need lighter overlap checks; long drafts should keep more of their substance.
     if len(original_tokens) <= 12:
         return overlap >= 0.24
     return overlap >= 0.34
@@ -7723,14 +8119,14 @@ def can_generate_reply_draft(email_data, current_draft_text=""):
 def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     """Draft reply.
     """
-    # Generate, revise, or validate draft reply used by reply and draft workflows.
+    # Shared draft-reply helper for the reply and draft flow.
     body = _email_body_text(email_data).strip()
     title = _compact_text(email_data.get("title") or "(No subject)")
     if not body and not title:
         return None
     reply_plan = _extract_reply_plan(email_data, email_id=email_id)
 
-    # Generate a complete send-ready draft; fallback template keeps UX functional on failure.
+    # Generate a complete send-ready draft; the fallback template keeps the UX working on failure.
     system_prompt = (
         "You write send-ready email replies from a structured reply plan. "
         "Write as the mailbox owner using I/we and never as an observer or 'the user'. "
@@ -7761,7 +8157,7 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         ],
         email_id=email_id,
         temperature=0.2,
-        num_predict=280,
+        num_predict=_num_predict_for_task("draft", 280),
     )
     if not response_text:
         fallback_draft = _draft_reply_fallback(email_data, reply_plan=reply_plan)
@@ -7806,7 +8202,7 @@ def revise_reply(
 ):
     """Revise reply.
     """
-    # Generate, revise, or validate revise reply used by reply and draft workflows.
+    # Shared revise-reply helper for the reply and draft flow.
     current_draft_text = str(current_draft_text or "").strip()
     if not current_draft_text:
         return None
@@ -7822,7 +8218,7 @@ def revise_reply(
         reply_plan=reply_plan,
     ) or _looks_generic_draft(current_draft_text, email_data, reply_plan=reply_plan)
 
-    # Preserve user-provided intent while improving clarity/completeness against source context.
+    # Preserve the user's intent while improving clarity and completeness against the source context.
     system_prompt = (
         "You revise email drafts using a structured reply plan. "
         "Write as the mailbox owner using I/we and never as an observer or 'the user'. "
@@ -7858,10 +8254,10 @@ def revise_reply(
         ],
         email_id=email_id,
         temperature=0.1,
-        num_predict=280,
+        num_predict=_num_predict_for_task("revise", 280),
     )
     if not response_text:
-        # Prefer a deterministic local rewrite over a pure no-op when the model is down.
+        # Prefer a deterministic local rewrite over doing nothing when the model is down.
         _log_action(
             task="revise",
             status="fallback",
@@ -7882,7 +8278,7 @@ def revise_reply(
         if rewritten and not _drafts_too_similar(current_draft_text, rewritten):
             cleaned = rewritten
     if _looks_draft_failure(cleaned, email_data, reply_plan=reply_plan):
-        # Recover from unusable revisions by forcing a fresh draft generation pass.
+        # Recover from unusable revisions by forcing one fresh draft-generation pass.
         regenerated = draft_reply(
             email_data=email_data,
             to_value=to_value,
@@ -7919,7 +8315,7 @@ def revise_reply(
             reply_plan=reply_plan,
         ):
             return cleaned or fallback_revision or current_draft_text
-        # Never replace user-provided context with unrelated model content.
+        # Never replace user-provided context with unrelated model output.
         if fallback_revision and _draft_preserves_user_context(current_draft_text, fallback_revision):
             return fallback_revision
         return current_draft_text
@@ -7946,8 +8342,8 @@ def generate_reply_draft(
 ):
     """Generate reply draft.
     """
-    # Backward-compatible adapter for legacy AI client consumers.
-    # Support both old and new parameter names.
+    # Backward-compatible adapter for older AI client callers.
+    # Support both the old and new parameter names.
     if not current_draft_text and current_reply_text:
         current_draft_text = current_reply_text
     current_draft_text = str(current_draft_text or "").strip()
@@ -8000,7 +8396,7 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
     if not _email_body_text(email_data).strip():
         return False
 
-    # Trigger when either triage fields or long-email summary is missing.
+    # Run this when triage fields or the long-email summary are missing.
     missing_classification = (
         not str(email_data.get("ai_category") or "").strip()
         or email_data.get("ai_needs_response") is None
@@ -8015,6 +8411,7 @@ def should_auto_analyze_email(email_data, non_main_types=frozenset({"sent", "dra
 
 def run_ai_analysis(email_data, force=False):
     """Run classification + summary, then save updated fields."""
+    started_at = time.perf_counter()
     changed = False
     missing_classification = (
         not str(email_data.get("ai_category") or "").strip()
@@ -8022,7 +8419,7 @@ def run_ai_analysis(email_data, force=False):
         or email_data.get("ai_confidence") is None
     )
 
-    # Classification and summary are saved independently, so partial success is allowed.
+    # Save classification and summary independently so partial success still counts.
     if force or missing_classification:
         classification = classify_email(email_data, email_id=email_data.get("id"))
         if classification:
@@ -8044,12 +8441,21 @@ def run_ai_analysis(email_data, force=False):
         if summary:
             update_email_ai_fields(email_id=email_data["id"], summary=summary)
             changed = True
+    _log_performance(
+        "analysis_total",
+        int((time.perf_counter() - started_at) * 1000),
+        email_id=email_data.get("id"),
+        force=int(bool(force)),
+        classification_attempted=int(bool(force or missing_classification)),
+        summary_attempted=int(bool(should_make_summary)),
+        changed=int(bool(changed)),
+    )
     return changed
 
 
 AI_TASK_MAX_ITEMS = 200
 AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
-# In-memory async task registry used by polling endpoints; kept bounded by cleanup.
+# In-memory async task registry for polling endpoints; cleanup keeps it bounded.
 AI_TASKS = {}
 AI_TASK_INDEX = {}
 AI_TASK_LOCK = threading.Lock()
@@ -8060,11 +8466,11 @@ def _cleanup_tasks_locked():
     if len(AI_TASKS) <= AI_TASK_MAX_ITEMS:
         return
 
-    # Keep only recent tasks in memory to avoid unbounded growth.
+    # Keep only recent tasks in memory so this list does not grow forever.
     done_tasks = [
         task for task in AI_TASKS.values() if task.get("status") not in AI_TASK_ACTIVE_STATUSES
     ]
-    # Remove oldest completed items first; active tasks stay pinned.
+    # Drop the oldest completed items first and leave active tasks alone.
     done_tasks.sort(key=lambda task: float(task.get("created_at") or 0))
     while len(AI_TASKS) > AI_TASK_MAX_ITEMS and done_tasks:
         task = done_tasks.pop(0)
@@ -8081,7 +8487,7 @@ def _create_or_get_ai_task(task_type, email_id, force=False):
     with AI_TASK_LOCK:
         existing_id = AI_TASK_INDEX.get(key)
         existing_task = AI_TASKS.get(existing_id) if existing_id else None
-        # Reuse active task so frontend polling has one task id per action.
+        # Reuse an active task so the frontend sees one task id per action.
         if existing_task and existing_task.get("status") in AI_TASK_ACTIVE_STATUSES:
             return dict(existing_task), False
 
@@ -8116,7 +8522,7 @@ def _set_ai_task_status(task_id, status, result=None, error=None):
         if error is not None:
             task["error"] = error
         if status not in AI_TASK_ACTIVE_STATUSES:
-            # Release dedupe slot so a new task of the same type/email can be scheduled.
+            # Release the dedupe slot so the next task of this type can be scheduled.
             key = (task["type"], task["email_id"], bool(task.get("force")))
             if AI_TASK_INDEX.get(key) == task_id:
                 AI_TASK_INDEX.pop(key, None)
@@ -8152,7 +8558,7 @@ def _analysis_task_worker(task_id, email_id, force=False):
         if not email_data:
             raise ValueError("Email not found.")
 
-        # Force mode guarantees a fresh pass for explicit user-triggered analysis.
+        # Force mode guarantees a fresh pass when the user explicitly asks for one.
         run_ai_analysis(email_data, force=bool(force))
         refreshed = fetch_email_by_id(email_id) or email_data
         _set_ai_task_status(
@@ -8188,7 +8594,7 @@ def _draft_task_worker(task_id, email_id, to_value, cc_value, current_reply_text
         if not can_generate_reply_draft(email_data, current_draft_text=current_reply_text):
             raise ValueError("AI draft is only available for emails that need a response.")
 
-        # Draft generation supports both blank and user-edited starting text.
+        # Draft generation works with both blank replies and user-edited starting text.
         draft_text = generate_reply_draft(
             email_data=email_data,
             to_value=to_value or "",

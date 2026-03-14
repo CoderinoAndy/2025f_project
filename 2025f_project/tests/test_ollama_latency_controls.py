@@ -125,6 +125,17 @@ class OllamaLatencyControlTests(unittest.TestCase):
                 "mistral-small3.2:24b",
             )
 
+    def test_classify_model_defaults_to_fast_model_when_env_is_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                ollama_client._model_name(task="classify"),
+                "qwen2.5:7b-instruct",
+            )
+            self.assertEqual(
+                ollama_client._model_name(task="summarize"),
+                "mistral-small3.2:24b",
+            )
+
     def test_classify_model_uses_explicit_override_when_configured(self):
         with mock.patch.dict(
             os.environ,
@@ -142,6 +153,20 @@ class OllamaLatencyControlTests(unittest.TestCase):
                 ollama_client._model_name(task="summarize"),
                 "mistral-small3.2:24b",
             )
+
+    def test_num_predict_can_be_overridden_per_task(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OLLAMA_CLASSIFY_NUM_PREDICT": "77",
+                "OLLAMA_SUMMARY_NUM_PREDICT": "210",
+                "OLLAMA_DRAFT_NUM_PREDICT": "340",
+            },
+            clear=True,
+        ):
+            self.assertEqual(ollama_client._num_predict_for_task("classify", 96), 77)
+            self.assertEqual(ollama_client._num_predict_for_task("summarize", 120), 210)
+            self.assertEqual(ollama_client._num_predict_for_task("draft", 280), 340)
 
     def test_call_ollama_logs_model_substitution_when_requested_model_missing(self):
         captured = {}

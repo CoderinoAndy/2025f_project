@@ -1,4 +1,4 @@
--- MVC: Model
+-- Model-layer schema.
 -- Local mailbox schema plus starter seed data used on first run.
 PRAGMA foreign_keys = ON; -- Ensure foreign key constraints are enforced.
 

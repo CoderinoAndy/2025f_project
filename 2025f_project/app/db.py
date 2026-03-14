@@ -1,4 +1,4 @@
-# MVC: Model
+# Model layer.
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -12,7 +12,7 @@ from .email_content import (
     normalize_outgoing_text,
 )
 
-# Central DB path and allowed enum-like values used by validation/query code.
+# Central DB path and enum-like values shared by validation and query code.
 APP_ROOT = Path(__file__).resolve().parent.parent
 DB_DEFAULT = str(APP_ROOT / "instance" / "app.sqlite")
 LOCAL_USER_EMAIL = "you@example.com"
@@ -127,7 +127,7 @@ def db_session(db_path):
 def init_db(db_path=DB_DEFAULT):
     """Initialize database.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     schema_path = Path(__file__).resolve().parent / "sql" / "schema.sql"
     if not schema_path.exists():
         raise FileNotFoundError("schema.sql not found in app/sql/")
@@ -430,7 +430,7 @@ def _row_to_dict(row):
 def _split_addresses(raw_value):
     """Split addresses.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     if raw_value is None:
         return []
     text = str(raw_value).replace(";", ",")
@@ -513,7 +513,7 @@ def _resolve_mailbox_sort_sql(sort_code):
 def _insert_recipients(conn, email_id, recipient_type, raw_value):
     """Insert recipients.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     for address in _split_addresses(raw_value):
         conn.execute(
             """
@@ -987,7 +987,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
 def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
     """Set email type.
     """
-    # Set email type while keeping local and provider state aligned when possible.
+    # Update email type and keep local and provider state in sync when we can.
     if new_type not in ALLOWED_TYPES:
         raise ValueError("Invalid email type.")
     with db_session(db_path) as conn:
@@ -997,7 +997,7 @@ def set_email_type(email_id, new_type, db_path=DB_DEFAULT):
 def set_email_archived(email_id, archived=True, db_path=DB_DEFAULT):
     """Set email archived.
     """
-    # Set email archived while keeping local and provider state aligned when possible.
+    # Update the archived flag and keep local and provider state in sync when we can.
     with db_session(db_path) as conn:
         conn.execute(
             "UPDATE email_messages SET is_archived = ? WHERE id = ?",
@@ -1068,7 +1068,7 @@ def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_D
 def delete_email(email_id, db_path=DB_DEFAULT):
     """Delete email.
     """
-    # Delete email and clean dependent state where required.
+    # Delete the email and clean up anything that depends on it.
     with db_session(db_path) as conn:
         conn.execute("DELETE FROM email_messages WHERE id = ?", (email_id,))
 

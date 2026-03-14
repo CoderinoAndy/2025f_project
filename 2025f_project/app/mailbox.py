@@ -1,4 +1,4 @@
-# MVC: Model
+# Model layer.
 import os
 import threading
 import time
@@ -18,7 +18,7 @@ VALID_SORTS = {
     "unread_first",
     "read_first",
 }
-# Per-tab data rules for live mailbox pages and API views.
+# Per-tab rules for live mailbox pages and API views.
 LIVE_LIST_CONFIGS = {
     "all": {
         "exclude_types": HIDDEN_FROM_MAIN_LIST_TYPES,
@@ -75,7 +75,7 @@ def _env_int(name, default):
         return int(default)
 
 
-# Environment-tunable polling/sync knobs; each value is clamped to safe minimums.
+# Polling and sync knobs from the environment, each clamped to a safe minimum.
 LIVE_EMAIL_POLL_INTERVAL_MS = max(1000, _env_int("LIVE_EMAIL_POLL_INTERVAL_MS", 2000))
 LIVE_EMAIL_SYNC_MAX_RESULTS = max(5, _env_int("LIVE_EMAIL_SYNC_MAX_RESULTS", 15))
 LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS = max(
@@ -107,7 +107,7 @@ def maybe_get_live_sync_max_results(sync_requested):
         return None
 
     now = time.time()
-    # Most polls use a small sync; every N seconds we run a deeper pass.
+    # Most polls do a small sync; every N seconds we run a deeper pass.
     batch_size = LIVE_EMAIL_SYNC_MAX_RESULTS
     if now - MAILBOX_SYNC_STATE.last_deep_live_sync_at >= LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS:
         batch_size = LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS
@@ -123,11 +123,11 @@ def trigger_draft_sync_async(max_results=40, force=False):
     if not MAILBOX_SYNC_STATE.draft_sync_lock.acquire(blocking=False):
         return False
 
-    # Clamp user/config input so worker always receives a valid positive count.
+    # Clamp user or config input so the worker always gets a valid positive count.
     target = max(1, int(max_results or 40))
 
     def _worker():
-        # Always release lock, even if Gmail sync fails.
+        # Always release the lock, even if Gmail sync fails.
         try:
             sync_drafts_from_gmail(max_results=target)
             MAILBOX_SYNC_STATE.last_draft_sync_at = time.time()
@@ -212,7 +212,7 @@ def _email_sort_key(email, sort_code):
     priority = int(email.get("priority") or 0)
     is_read = bool(email.get("is_read"))
 
-    # Convert requested sort mode into one tuple so merge-sort can stay generic.
+    # Turn the requested sort mode into one tuple so merge sort can stay generic.
     if sort_code == "date_asc":
         return (date_num,)
     if sort_code == "priority_desc":
@@ -231,7 +231,7 @@ def _merge_sorted_pairs(left_pairs, right_pairs):
     merged = []
     left_i = 0
     right_i = 0
-    # Standard stable merge: equal keys keep left-side order.
+    # Standard stable merge: equal keys stay in left-side order.
     while left_i < len(left_pairs) and right_i < len(right_pairs):
         if left_pairs[left_i][1] <= right_pairs[right_i][1]:
             merged.append(left_pairs[left_i])
@@ -261,7 +261,7 @@ def sort_emails(emails, sort_code):
     if sort_code not in VALID_SORTS:
         sort_code = "date_desc"
 
-    # Precompute keys once; merge-sort compares tuples only.
+    # Precompute keys once so merge sort only compares tuples.
     pairs = []
     for email in emails:
         pairs.append((email, _email_sort_key(email, sort_code)))
@@ -309,7 +309,7 @@ def build_mailbox_context(
     live_polling_enabled=True,
 ):
     """Build the template context used by mailbox pages."""
-    # All mailbox templates receive the same core fields for consistency.
+    # Give every mailbox template the same core fields for consistency.
     emails_sorted = emails if presorted else sort_emails(emails, sort_code)
     context = {
         "emails": emails_sorted,
@@ -344,7 +344,7 @@ def fetch_live_list_emails(
     if not config:
         return None, None, 0, 1
 
-    # Draft tab asks Gmail for fresh drafts before reading local DB.
+    # The draft tab asks Gmail for fresh drafts before reading the local DB.
     if config.get("sync_drafts"):
         trigger_draft_sync_async(max_results=40)
 

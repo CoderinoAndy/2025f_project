@@ -83,6 +83,7 @@ class EmailHtmlRenderingTests(unittest.TestCase):
         self.assertIn("device-width", html)
         self.assertIn("id=a6c0f428df8a482783edf43edfd36891", html)
         self.assertNotIn('<script>alert("x")</script>', html)
+        _mock_background_sync.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-// MVC: Controller
-// Polls live mailbox rows and swaps in fresh server-rendered HTML.
-(() => { // Keep mailbox rows synchronized with server updates.
+// Controller-side behavior.
+// Poll the mailbox list and swap in fresh server-rendered HTML.
+(() => { // Keep the mailbox rows in sync with the server.
   const pageRoot = document.body; // Page root stores list metadata in data-* attributes.
   const shell = document.querySelector(".list-shell"); // Row container to replace on each refresh.
   if (!pageRoot || !shell) { // Exit when this page is not a live list view.

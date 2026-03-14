@@ -1,4 +1,4 @@
-# MVC: Controller
+# Controller layer.
 # Flask routes for mailbox pages, compose flows, and lightweight JSON action APIs.
 from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 import os
@@ -61,7 +61,7 @@ from .mailbox import (
 main = Blueprint("main", __name__)
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 
-# App-level mailbox type rules reused by multiple routes.
+# Mailbox type rules shared by several routes.
 NON_MAIN_TYPES = {"sent", "draft"}
 ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
 
@@ -74,7 +74,7 @@ def inject_user_display_name():
 def _normalize_addresses(raw_value):
     """Normalize addresses.
     """
-    # Normalize addresses to one format used across the app.
+    # Keep addresses in a consistent format across the app.
     if raw_value is None:
         return None
     text = str(raw_value).replace(";", ",")
@@ -85,7 +85,7 @@ def _normalize_addresses(raw_value):
 def _parse_optional_int(raw_value):
     """Parse optional int.
     """
-    # Parse and validate this input before using it.
+    # Validate this before we trust it.
     try:
         return int(raw_value) if raw_value else None
     except (TypeError, ValueError):
@@ -95,7 +95,7 @@ def _parse_optional_int(raw_value):
 def _collect_compose_fields():
     """Collect compose fields.
     """
-    # Collect compose fields from request/context and normalize the result.
+    # Pull compose fields out of the request/context and normalize them.
     return {
         "to": _normalize_addresses(request.form.get("to")) or "",
         "cc": _normalize_addresses(request.form.get("cc")) or "",
@@ -108,7 +108,7 @@ def _collect_compose_fields():
 
 
 def _has_compose_content(fields):
-    # Check whether compose content exists before running heavier work.
+    # Make sure there is compose content before we do heavier work.
     return bool(
         fields.get("to")
         or fields.get("cc")
@@ -120,7 +120,7 @@ def _has_compose_content(fields):
 def _collect_attachment_payloads():
     """Collect attachment payloads.
     """
-    # Collect attachment payloads from request/context and normalize the result.
+    # Pull attachment payloads out of the request/context and normalize them.
     payloads = []
     for item in request.files.getlist("attachments"):
         if item is None:
@@ -144,7 +144,7 @@ def _collect_attachment_payloads():
 def _collect_reply_fields(email_data):
     """Collect reply fields.
     """
-    # Collect reply fields from request/context and normalize the result.
+    # Pull reply fields out of the request/context and normalize them.
     to_value = _normalize_addresses(request.form.get("to"))
     if not to_value:
         sender = _normalize_addresses(email_data.get("sender"))
@@ -161,7 +161,7 @@ def _collect_reply_fields(email_data):
 def _set_message_read_state_async(external_id, read=True):
     """Set message read state async.
     """
-    # Set message read state async and keep local/provider state aligned when possible.
+    # Update read state asynchronously and keep local and provider state aligned when we can.
     if not external_id:
         return
     threading.Thread(
@@ -174,14 +174,14 @@ def _set_message_read_state_async(external_id, read=True):
 def _current_list_url():
     """Current list url.
     """
-    # Resolve current list url with configured values and a safe fallback.
+    # Resolve the current list URL, with a safe fallback if config is missing.
     return request.full_path[:-1] if request.full_path.endswith("?") else request.full_path
 
 
 def _list_query_state():
     """List query state.
     """
-    # Apply list query state rules to shape list output for the active mailbox view.
+    # Apply the active list-query rules before rendering this mailbox view.
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
     page = max(1, _parse_optional_int(request.args.get("page")) or 1)
@@ -197,12 +197,12 @@ def _safe_next_url(raw_next):
     if not candidate.startswith("/"):
         return fallback
 
-    # Parse once and reject external/absolute targets.
+    # Parse this once and reject external or absolute targets.
     parsed = urlsplit(candidate)
     if parsed.scheme or parsed.netloc:
         return fallback
     if parsed.path.startswith("/email/"):
-        # Keep users on list-style pages after POST actions.
+        # Keep people on list-style pages after POST actions.
         return fallback
     return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
 
@@ -210,7 +210,7 @@ def _safe_next_url(raw_next):
 def _next_url_from_request():
     """Next url from request.
     """
-    # Resolve next url from request with configured values and a safe fallback.
+    # Resolve the next URL from the request, with a safe fallback if needed.
     return _safe_next_url(request.form.get("next") or request.args.get("next"))
 
 
@@ -222,7 +222,7 @@ def _render_mailbox_page(
 ):
     """Render mailbox page.
     """
-    # Shared mailbox renderer used by /allemails, /junk, /archive, etc.
+    # Shared mailbox renderer for /allemails, /junk, /archive, and friends.
     sort_code, search_query, page, current_list_url = _list_query_state()
     emails, empty_message, total_count, current_page = _fetch_live_list_emails(
         list_view,
@@ -262,7 +262,7 @@ def _render_mailbox_page(
 def _persist_compose_draft(fields, attachments=None):
     """Persist compose draft.
     """
-    # Persist compose form state to provider + local DB and return the local draft id.
+    # Save the compose form to the provider and local DB, then return the local draft id.
     draft_info = upsert_gmail_draft(
         to_value=fields["to"],
         cc_value=fields["cc"],
@@ -296,8 +296,8 @@ def _set_email_type_with_fallback(email_id, email_data, new_type):
         return
     external_id = email_data.get("external_id")
     if external_id:
-        # Update provider labels first, then persist the user's explicit mailbox move
-        # locally because provider sync preserves existing triage for older rows.
+        # Update provider labels first, then save the user's explicit mailbox move
+        # locally because provider sync preserves existing triage on older rows.
         set_message_type(external_id, new_type)
     db_set_email_type(email_id, new_type)
 
@@ -307,7 +307,7 @@ def _set_read_state_with_fallback(email_id, email_data, target_read_state):
     """
     external_id = email_data.get("external_id")
     if external_id:
-        # Fall back to local DB when provider update fails to keep the UI responsive.
+        # Fall back to the local DB if the provider update fails so the UI stays responsive.
         if not set_message_read_state(external_id, read=target_read_state):
             mark_read(email_id, target_read_state)
         return
@@ -317,7 +317,7 @@ def _set_read_state_with_fallback(email_id, email_data, target_read_state):
 def _parse_bulk_email_ids(raw_ids):
     """Parse bulk email IDs.
     """
-    # Parse and validate this input before using it.
+    # Validate this before we trust it.
     seen = set()
     parsed = []
     for token in str(raw_ids or "").split(","):
@@ -339,7 +339,7 @@ def _parse_bulk_email_ids(raw_ids):
 def list_emails_api():
     """List emails api.
     """
-    # Live list polls this endpoint every few seconds.
+    # The live list polls this endpoint every few seconds.
     list_view = (request.args.get("view") or "").strip()
     sort_code = request.args.get("sort", "date_desc")
     search_query = (request.args.get("q") or "").strip()
@@ -347,7 +347,7 @@ def list_emails_api():
     sync_requested = (request.args.get("sync") or "1").strip() != "0"
     current_list_url = _safe_next_url(request.args.get("next"))
 
-    # Keep mailbox views fresh while throttling provider sync work.
+    # Keep mailbox views fresh without letting provider sync run wild.
     sync_max_results = maybe_get_live_sync_max_results(sync_requested)
     if sync_max_results is not None:
         trigger_background_sync(max_results=sync_max_results)
@@ -394,7 +394,7 @@ def list_emails_api():
 def start_ai_analyze(id):
     """Start AI analyze.
     """
-    # Start ai analyze in background and return metadata for API polling.
+    # Start AI analysis in the background and return metadata for polling.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -410,7 +410,7 @@ def start_ai_analyze(id):
 def start_ai_draft(id):
     """Start AI draft.
     """
-    # Start ai draft in background and return metadata for API polling.
+    # Start AI draft generation in the background and return metadata for polling.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -419,7 +419,7 @@ def start_ai_draft(id):
     if email_data.get("type") in NON_MAIN_TYPES:
         abort(400)
 
-    # Request body is optional; defaults keep API backward-compatible.
+    # The request body is optional so older callers still work.
     payload = request.get_json(silent=True) or {}
     to_value = _normalize_addresses(payload.get("to")) or ""
     cc_value = _normalize_addresses(payload.get("cc")) or ""
@@ -434,7 +434,7 @@ def start_ai_draft(id):
 def ai_task_status(task_id):
     """Ai task status.
     """
-    # Manage ai task status lifecycle so asynchronous UI polling stays consistent.
+    # Keep the AI task lifecycle tidy so async UI polling stays consistent.
     task = _get_ai_task(task_id)
     if not task:
         abort(404)
@@ -458,7 +458,7 @@ def save_display_name():
 def sync_from_gmail():
     """Sync from Gmail.
     """
-    # Sync from gmail between Gmail and the local database.
+    # Sync Gmail state into the local database.
     if request.endpoint == "static":
         return
     if request.method != "GET":
@@ -477,14 +477,14 @@ def sync_from_gmail():
 def index():
     """Index.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return redirect(url_for("main.about"))
 
 @main.route("/about")
 def about():
     """About.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return render_template("about.html")
 
 
@@ -492,7 +492,7 @@ def about():
 def allemails():
     """Allemails.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "allemails.html",
         list_view="all",
@@ -502,7 +502,7 @@ def allemails():
 def readonly():
     """Readonly.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "readonly.html",
         list_view="read-only",
@@ -512,7 +512,7 @@ def readonly():
 def responseneeded():
     """Responseneeded.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "responseneeded.html",
         list_view="response-needed",
@@ -522,7 +522,7 @@ def responseneeded():
 def junkmailconfirm():
     """Junkmailconfirm.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "junkmailconfirm.html",
         list_view="junk-uncertain",
@@ -532,7 +532,7 @@ def junkmailconfirm():
 def junk():
     """Junk.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "junk.html",
         list_view="junk",
@@ -543,7 +543,7 @@ def junk():
 def sent():
     """Sent.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "sent.html",
         list_view="sent",
@@ -554,7 +554,7 @@ def sent():
 def drafts():
     """Drafts.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "drafts.html",
         list_view="draft",
@@ -565,7 +565,7 @@ def drafts():
 def archive():
     """Archive.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     return _render_mailbox_page(
         "archive.html",
         list_view="archived",
@@ -575,7 +575,7 @@ def archive():
 def email(id):
     """Email.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -585,7 +585,7 @@ def email(id):
         refreshed = sync_message_by_external_id(external_id)
         if refreshed:
             email_data = fetch_email_by_id(id) or email_data
-    # Opening a normal inbox email marks it as read in local DB and provider.
+    # Opening a normal inbox email marks it read both locally and at the provider.
     if email_data.get("type") not in NON_MAIN_TYPES and not bool(email_data.get("is_archived")):
         if external_id:
             _set_message_read_state_async(external_id, read=True)
@@ -604,7 +604,7 @@ def email(id):
     ai_analysis_task_id = None
     ai_summary_expected = should_summarize_email(email_data)
     ai_draft_available = _can_generate_reply_draft(email_data)
-    # Start analysis asynchronously so page render is still fast.
+    # Start analysis asynchronously so the page still renders quickly.
     if _should_auto_analyze_email(email_data, non_main_types=NON_MAIN_TYPES):
         ai_analysis_needed = True
         task = _start_analysis_task(id, force=False)
@@ -653,7 +653,7 @@ def set_email_type(id):
     if bool(email_data.get("is_archived")):
         set_email_archived(id, archived=False)
 
-    # Return the user back to wherever they were.
+    # Send the user back to where they came from.
     next_url = _next_url_from_request()
     return redirect(next_url)
 
@@ -662,7 +662,7 @@ def set_email_type(id):
 def bulk_email_action():
     """Bulk email action.
     """
-    # Translate between API payloads and our local mailbox shape.
+    # Convert API data into the mailbox shape the app uses locally.
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
     email_ids = _parse_bulk_email_ids(request.form.get("ids"))
@@ -683,7 +683,7 @@ def bulk_email_action():
     if not email_ids:
         return redirect(next_url)
 
-    # Process each selected row independently so one failure does not block others.
+    # Process each selected row on its own so one failure does not block the rest.
     for email_id in email_ids:
         email_data = fetch_email_by_id(email_id)
         if email_data is None:
@@ -736,7 +736,7 @@ def bulk_email_action():
 def archive_email(id):
     """Archive email.
     """
-    # Translate between API payloads and our local mailbox shape.
+    # Convert API data into the mailbox shape the app uses locally.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -751,7 +751,7 @@ def archive_email(id):
 def unarchive_email(id):
     """Unarchive email.
     """
-    # Translate between API payloads and our local mailbox shape.
+    # Convert API data into the mailbox shape the app uses locally.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -764,7 +764,7 @@ def unarchive_email(id):
 def search():
     """Search.
     """
-    # Route handler: validate request inputs, then render or redirect.
+    # Thin route wrapper that validates input, then renders or redirects.
     q = (request.args.get("q") or "").strip()
     if not q:
         return redirect(url_for("main.allemails"))
@@ -775,7 +775,7 @@ def search():
 def analyze_email_route(id):
     """Analyze email route.
     """
-    # Translate between API payloads and our local mailbox shape.
+    # Convert API data into the mailbox shape the app uses locally.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -823,7 +823,7 @@ def compose():
     """Compose.
     """
     next_candidate = request.args.get("next")
-    # If caller did not supply next=..., use the referrer list page.
+    # If the caller did not send next=..., fall back to the referring list page.
     if not next_candidate:
         referrer = request.referrer or ""
         parsed_referrer = urlsplit(referrer)
@@ -852,7 +852,7 @@ def compose():
         provider_draft_id = (draft_email.get("provider_draft_id") or "").strip()
         external_id = (draft_email.get("external_id") or "").strip()
         if not provider_draft_id and external_id:
-            # Backfill provider draft id for legacy local rows.
+            # Backfill the provider draft id on older local rows.
             sync_drafts_from_gmail(max_results=80)
             refreshed = fetch_email_by_id(draft_email.get("id"))
             if refreshed and refreshed.get("type") == "draft":
@@ -877,7 +877,7 @@ def compose():
 def compose_save():
     """Compose save.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     next_url = _next_url_from_request()
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
@@ -892,7 +892,7 @@ def compose_save():
 def compose_autosave():
     """Compose autosave.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     fields = _collect_compose_fields()
     if not _has_compose_content(fields):
         return Response(status=204)
@@ -907,8 +907,8 @@ def compose_send():
     """
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
-    # Reattach files that already exist in the provider draft/local sent message before sending.
-    # Rehydrate existing draft attachments before sending a final message.
+    # Reattach files that already exist on the provider draft or local sent message before sending.
+    # Rehydrate existing draft attachments before sending the final message.
     if fields["provider_draft_id"]:
         attachments = fetch_draft_attachments(fields["provider_draft_id"]) + attachments
     elif fields["local_draft_id"]:
@@ -919,7 +919,7 @@ def compose_send():
     if not fields["to"]:
         abort(400)
 
-    # Try provider send first; local fallback keeps app usable offline.
+    # Try the provider send first; the local fallback keeps the app usable offline.
     sent_external_id = send_compose_message(
         to_value=fields["to"],
         cc_value=fields["cc"],
@@ -952,7 +952,7 @@ def compose_send():
 def generate_draft(id):
     """Generate draft.
     """
-    # Generate, revise, or validate generate draft used by reply and draft workflows.
+    # Shared generate-draft helper for the reply and draft flow.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -977,7 +977,7 @@ def generate_draft(id):
 def delete_email(id):
     """Delete email.
     """
-    # Delete email and clean dependent state where required.
+    # Delete the email and clean up anything that depends on it.
     email_data = fetch_email_by_id(id)
     if email_data:
         if email_data.get("type") == "draft" and email_data.get("provider_draft_id"):
@@ -992,7 +992,7 @@ def delete_email(id):
 def toggle_read(id):
     """Toggle read.
     """
-    # Used by other functions in this file.
+    # Shared helper for this file.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)

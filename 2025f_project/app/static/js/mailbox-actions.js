@@ -1,6 +1,6 @@
-// MVC: Controller
-// Submits per-row mailbox actions with fetch and refreshes the list on success.
-(() => { // Submit row action forms asynchronously to avoid full-page reloads.
+// Controller-side behavior.
+// Submit per-row mailbox actions with fetch and refresh the list on success.
+(() => { // Submit row-action forms asynchronously so the page does not fully reload.
   const shell = document.querySelector(".list-shell"); // List container where action forms live.
   if (!shell) { // Exit on pages that do not render mailbox rows.
     return;

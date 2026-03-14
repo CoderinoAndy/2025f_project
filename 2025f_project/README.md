@@ -27,6 +27,7 @@ Manual fallback without `make` (Windows):
 
 - App imports recent Gmail messages automatically into `instance/app.sqlite`.
 - Auto-sync runs in a background thread so pages stay responsive.
+- Request-triggered Gmail sync is throttled so mailbox navigation and email open views do less background work.
 - Read/unread state is mirrored with Gmail labels (`UNREAD`).
 - Junk/inbox moves are mirrored with Gmail labels (`SPAM`/`INBOX`).
 - Sending a reply uses Gmail API when the source email has a Gmail `external_id`.
@@ -39,22 +40,32 @@ Manual fallback without `make` (Windows):
 ## Optional env vars
 
 - `GMAIL_CREDENTIALS_FILE`: custom path to `credentials.json`
-- `GMAIL_SYNC_INTERVAL_SECONDS`: minimum sync interval (default `20`)
-- `GMAIL_SYNC_MAX_RESULTS`: recent messages to pull per sync (default `25`)
-- `LIVE_EMAIL_POLL_INTERVAL_MS`: mailbox live-refresh interval in ms (default `2000`)
-- `LIVE_EMAIL_SYNC_MAX_RESULTS`: messages fetched by each live-refresh sync (default `15`)
-- `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `30`)
-- `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `60`)
+- `GMAIL_SYNC_INTERVAL_SECONDS`: minimum background sync interval (default `60`)
+- `GMAIL_SYNC_MAX_RESULTS`: recent messages to pull per sync (default `15`)
+- `GMAIL_BEFORE_REQUEST_SYNC_INTERVAL_SECONDS`: throttle for request-triggered sync on mailbox pages (default `120`)
+- `GMAIL_BEFORE_REQUEST_SYNC_MAX_RESULTS`: messages fetched by request-triggered sync (default `10`)
+- `LIVE_EMAIL_POLL_INTERVAL_MS`: mailbox live-refresh interval in ms (default `7000`)
+- `LIVE_EMAIL_SYNC_MAX_RESULTS`: messages fetched by each live-refresh sync (default `8`)
+- `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `120`)
+- `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `30`)
 - `GMAIL_AI_TRIAGE_PER_SYNC`: max newly-synced emails to auto-classify per sync (default `0`)
-- `OLLAMA_MODEL`: defaults to `mistral-small3.2:24b`
-- `OLLAMA_CLASSIFY_MODEL`: optional override for classification requests
-- `OLLAMA_DRAFT_MODEL`: optional override for draft/revise requests
-- `OLLAMA_SUMMARY_MODEL`: optional override for summary requests
+- `OLLAMA_MODEL`: shared fallback model for tasks without a task-specific default
+- `OLLAMA_CLASSIFY_MODEL`: classification model (default `qwen2.5:7b-instruct`)
+- `OLLAMA_DRAFT_MODEL`: draft/revise model (default `mistral-small3.2:24b`)
+- `OLLAMA_SUMMARY_MODEL`: summary model (default `mistral-small3.2:24b`)
+- `OLLAMA_CLASSIFY_NUM_PREDICT`: token budget for classification calls (default `96`)
+- `OLLAMA_DRAFT_NUM_PREDICT`: token budget for draft/revise calls
+- `OLLAMA_SUMMARY_NUM_PREDICT`: token budget for summary calls
 - `OLLAMA_STRICT_MODEL_RESOLUTION`: when truthy, missing requested models fail instead of silently substituting
 - `OLLAMA_API_URL`: defaults to `http://127.0.0.1:11434/api/chat`
 - `OLLAMA_TIMEOUT_SECONDS`: base AI request timeout in seconds (default `45`)
 - `OLLAMA_LONG_TASK_TIMEOUT_SECONDS`: timeout for draft/revise/summarize requests (default `180`)
 - `OLLAMA_SUMMARY_MIN_CHARS`: summary threshold (default `200`)
+- `OLLAMA_VISUAL_SUMMARY_ENABLED`: allow summary escalation to Playwright screenshots (default `1`)
+- `OLLAMA_VISUAL_SUMMARY_TEXT_FAILURE_CHARS`: text length below this counts as failed extraction (default `120`)
+- `OLLAMA_VISUAL_SUMMARY_MIN_HTML_CHARS`: minimum HTML-derived text size before visual fallback is considered (default `180`)
+- `OLLAMA_VISUAL_SUMMARY_COMPLEXITY_THRESHOLD`: layout-signal count required before a visual summary is considered (default `2`)
+- `OLLAMA_VISUAL_SUMMARY_TEXT_OVERLAP_THRESHOLD`: HTML/text overlap below this can trigger visual escalation (default `0.72`)
 - `OLLAMA_VISION_MAX_CHARS`: max cleaned body chars included in the text prompt (default `6000`)
 - `OLLAMA_VISION_MAX_PAGES`: max real HTML screenshot pages attached to a model call (default `2`)
 - `OLLAMA_VISION_PAGE_HEIGHT`: max pixel height per attached screenshot page (default `1800`)
@@ -72,7 +83,8 @@ AI calls are local-only and go to Ollama chat API (`http://127.0.0.1:11434/api/c
 
 1. Start Ollama:
    - `ollama serve`
-2. Confirm model is available:
+2. Confirm the main models are available:
+   - `ollama pull qwen2.5:7b-instruct`
    - `ollama pull mistral-small3.2:24b`
 3. Optional: enable real HTML screenshots for visually complex emails:
    - `pip install -r requirements.txt`
@@ -93,10 +105,12 @@ AI calls are local-only and go to Ollama chat API (`http://127.0.0.1:11434/api/c
   - classification JSON (`category`, `needs_response`, `priority`, `confidence`)
   - summary generation only for long emails
   - category mapping into app type (`response-needed`, `read-only`, `junk`)
-- Ollama requests are now vision-first: the app renders screenshot-like pages of the full email, attaches those images to the model call, and includes sender/subject metadata as support.
+- Classification now defaults to the faster `qwen2.5:7b-instruct` model and stays text-only.
+- Summary generation is text-first and only escalates to Playwright screenshots when text extraction clearly fails or the HTML layout materially changes the message.
 - AI analysis and draft generation now run in background tasks, so opening an email does not block on model inference.
 - Email page shows loading indicators while AI is running and types generated text into the UI when complete.
 - Draft generation is restricted to response-needed emails.
 - Every AI call/error is appended to `instance/ai_actions.txt` (or `AI_ACTION_LOG_PATH`).
+- Timing logs now include Gmail sync, Playwright render, classification, summary, and total analysis durations.
 - Summary panel has a manual re-analyze button (`stars` icon).
 - Archive is local-only: archived emails are hidden from main mailboxes and moved to Archive without deleting from Gmail.

@@ -1,21 +1,21 @@
-{# MVC: View #}
-<!doctype html> <!-- Standard document shell for this page. -->
+{# View template. #}
+<!doctype html> <!-- Standard page shell. -->
 <!--
-  Template: about.html
-  Purpose:
+  Page: about.html
+  What this does:
   - Standalone introduction/help page describing app capabilities and usage flow.
   - Uses custom visual styling while still sharing top navigation and compose shortcut.
   - Serves as a non-mailbox route, so mailbox-specific sidebar/search is hidden in navbar partial.
-  Expected context:
+  This template expects:
   - none beyond standard request context used inside _navbar.html.
 -->
 <html lang="en">
-  <head> <!-- Page metadata, title, and style links. -->
+  <head> <!-- Head metadata, title, and styles. -->
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>About</title>
 
-    <!-- Bootstrap 5 (CDN) -->
+    <!-- Bootstrap 5 from the CDN. -->
     <link
       href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}"
       rel="stylesheet"
@@ -180,10 +180,10 @@
     </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   </head>
-  <body class="about-page"> <!-- Visible page content and interactive controls. -->
-    {% include "_navbar.html" %} <!-- Reusable top navigation shared by mailbox pages. -->
+  <body class="about-page"> <!-- Main page content and controls. -->
+    {% include "_navbar.html" %} <!-- Shared top nav for the mailbox pages. -->
 
-    <div class="container about-shell"> <!-- Main page content area. -->
+    <div class="container about-shell"> <!-- Main content area. -->
       <section class="about-card">
         <img
           class="about-logo"
@@ -219,6 +219,6 @@
       <span>Compose</span>
     </a>
 
-    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Page scripts. -->
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script> <!-- Page-specific scripts. -->
   </body>
 </html>

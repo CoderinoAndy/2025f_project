@@ -1,4 +1,4 @@
-/* MVC: View */
+/* View-layer styles. */
 /* Shared visual system for mailbox pages and reusable UI elements. */
 :root{ /* Theme tokens reused across the app. */
   --bg: #15121a;
@@ -329,7 +329,7 @@ body.mailbox-list-page .list-shell{
   border-color: var(--accent-2) !important;
 }
 
-/* Utilities used across templates */
+/* Small utility helpers shared across templates. */
 .muted{ color: var(--muted) !important; }
 .wrap-ellipsis{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .priority{
@@ -343,7 +343,7 @@ body.mailbox-list-page .list-shell{
 .priority-2{ color: #facc15; }
 .priority-3{ color: #ef4444; }
 
-/* Full-width Gmail-like list frame */
+/* Full-width list frame with a Gmail-like feel. */
 .list-shell{
   background: var(--panel);
   border: 1px solid var(--list-border);
@@ -353,7 +353,7 @@ body.mailbox-list-page .list-shell{
 }
 
 
-/* Gmail-like rows: flat bars, separators, hover highlight */
+/* Gmail-style rows with flat bars, separators, and hover feedback. */
 .email-row{ /* Mailbox row visuals, hover behavior, and action controls. */
   position: relative;
   display: flex;
@@ -455,12 +455,12 @@ body.mailbox-list-page .list-shell{
   outline-offset: 2px;
 }
 
-/* Unread = bold (Gmail behavior) */
+/* Keep unread rows bold, like Gmail does. */
 .email-row.unread .mail-title{
   font-weight: 700;
 }
 
-/* Make the whole row clickable using stretched-link */
+/* Stretch the link so the whole row feels clickable. */
 .email-row .stretched-link::after{ z-index: 1; }
 .row-actions{
   margin-left: auto;
@@ -481,10 +481,10 @@ body.mailbox-list-page .list-shell{
   display: none;
 }
 
-/* Action buttons */
+/* Row action buttons. */
 .row-action-btn{
   position: relative;
-  z-index: 2;                 /* must be above stretched-link */
+  z-index: 2;                 /* Keep this above the stretched link. */
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -496,7 +496,7 @@ body.mailbox-list-page .list-shell{
   background: rgba(255,255,255,0.06);
 }
 
-/* Dropdown should sit above the stretched-link too */
+/* Keep the dropdown above the stretched link too. */
 
 .email-row{ z-index: 0; }
 

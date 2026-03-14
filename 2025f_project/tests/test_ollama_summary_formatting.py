@@ -584,6 +584,58 @@ class OllamaSummaryFormattingTests(unittest.TestCase):
         self.assertNotIn("images", user_message)
         mock_render.assert_not_called()
 
+    @mock.patch(
+        "app.ollama_client._call_ollama",
+        side_effect=["text-summary-pass", "vision-summary-pass"],
+    )
+    @mock.patch(
+        "app.ollama_client._postprocess_model_summary",
+        side_effect=[None, "Visual summary from screenshots."],
+    )
+    @mock.patch("app.ollama_client._render_email_image_pages", return_value=["fake-vision-image"])
+    def test_summarize_email_escalates_to_visual_only_after_text_pass_fails(
+        self,
+        mock_render,
+        _mock_postprocess,
+        mock_call,
+    ):
+        email = {
+            "sender": "Retail Brand <offers@retail.example>",
+            "title": "Weekend offers",
+            "body": (
+                "Weekend offers are available now. "
+                "This plain-text fallback says there are featured deals and a call to browse the sale. "
+                "Weekend offers are available now. "
+                "This plain-text fallback says there are featured deals and a call to browse the sale."
+            ),
+            "body_html": (
+                "<html><body><table>"
+                "<tr><td><img src='cid:hero-banner'></td></tr>"
+                "<tr><td><div style='display:grid'>"
+                "<div>Kitchen bundle with cookware, utensils, and prep tools.</div>"
+                "<div>Bedroom refresh package with bedding, lamps, and storage bins.</div>"
+                "<div>Office setup featuring standing desk accessories and organizers.</div>"
+                "<div>Shop the weekend sale before the featured inventory rotates out.</div>"
+                "</div></td></tr>"
+                "</table></body></html>"
+            ),
+            "recipients": "",
+            "cc": "",
+        }
+
+        summary = ollama_client.summarize_email(email, email_id="summary-visual-escalation-1")
+
+        self.assertEqual(summary, "Visual summary from screenshots.")
+        summarize_calls = [
+            call.kwargs["messages"][1]
+            for call in mock_call.call_args_list
+            if call.kwargs.get("task") == "summarize"
+        ]
+        self.assertEqual(len(summarize_calls), 2)
+        self.assertNotIn("images", summarize_calls[0])
+        self.assertEqual(summarize_calls[1]["images"], ["fake-vision-image"])
+        mock_render.assert_called_once()
+
     @mock.patch("app.ollama_client._render_email_image_pages", return_value=["fake-vision-image"])
     def test_vision_user_message_keeps_images_for_html_heavy_email(self, mock_render):
         user_message = ollama_client._vision_user_message(

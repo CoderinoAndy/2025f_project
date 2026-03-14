@@ -1,11 +1,11 @@
-{# MVC: View #}
+{# View template. #}
 <!--
-  Template Partial: _navbar.html
-  Purpose:
+  Partial: _navbar.html
+  What this does:
   - Shared navigation shell injected at the top of mailbox pages.
   - Renders desktop sidebar links plus the mobile dropdown menu.
   - Hosts the global search form and keeps it scoped to the active mailbox tab.
-  Expected context:
+  This template expects:
   - request.endpoint and request.args for active state + search persistence.
 -->
 <div class="topbar d-flex align-items-center justify-content-between"> <!-- Top bar with brand, menu toggle, and About link. -->

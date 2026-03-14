@@ -2,12 +2,10 @@
 import atexit
 import base64
 import hashlib
-import io
 import ipaddress
 import json
 import os
 import re
-import textwrap
 import threading
 import time
 import urllib.error
@@ -16,12 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except ImportError:  # Optional until the extra requirements are installed.
-    Image = None
-    ImageDraw = None
-    ImageFont = None
 try:
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -53,8 +45,6 @@ SUMMARY_MIN_CHARS_DEFAULT = 200
 CLASSIFY_NUM_PREDICT_DEFAULT = 96
 VISION_RENDER_MAX_CHARS_DEFAULT = 6000
 VISION_RENDER_MAX_PAGES_DEFAULT = 2
-VISION_RENDER_WRAP_WIDTH_DEFAULT = 92
-VISION_RENDER_MAX_LINES_DEFAULT = 44
 VISION_BROWSER_TIMEOUT_SECONDS_DEFAULT = 12.0
 VISION_BROWSER_WAIT_MS_DEFAULT = 750
 VISION_RENDER_VIEWPORT_WIDTH_DEFAULT = 1365
@@ -1029,26 +1019,6 @@ def _vision_render_max_pages():
     )
 
 
-def _vision_render_wrap_width():
-    """Return the wrap width used by rendered email pages."""
-    return _env_int(
-        "OLLAMA_VISION_WRAP_WIDTH",
-        VISION_RENDER_WRAP_WIDTH_DEFAULT,
-        minimum=40,
-        maximum=140,
-    )
-
-
-def _vision_render_max_lines():
-    """Return the number of content lines rendered on each email image page."""
-    return _env_int(
-        "OLLAMA_VISION_MAX_LINES",
-        VISION_RENDER_MAX_LINES_DEFAULT,
-        minimum=18,
-        maximum=70,
-    )
-
-
 def _vision_render_available():
     """Return True when true HTML screenshot dependencies are available."""
     return sync_playwright is not None
@@ -1431,36 +1401,6 @@ def _encode_png_bytes(image_bytes):
     return base64.b64encode(image_bytes).decode("ascii")
 
 
-def _split_rendered_email_pages(image_bytes):
-    """Split a tall HTML screenshot into multiple page images."""
-    if not image_bytes:
-        return []
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            screenshot = image.convert("RGB")
-            width, height = screenshot.size
-            page_height = _vision_render_page_height()
-            max_pages = _vision_render_max_pages()
-            if height <= page_height:
-                return [_encode_png_bytes(image_bytes)]
-
-            pages = []
-            for index in range(max_pages):
-                top = index * page_height
-                if top >= height:
-                    break
-                bottom = min(height, top + page_height)
-                cropped = screenshot.crop((0, top, width, bottom))
-                buffer = io.BytesIO()
-                cropped.save(buffer, format="PNG", optimize=True, compress_level=9)
-                pages.append(_encode_png_bytes(buffer.getvalue()))
-                if bottom >= height:
-                    break
-            return pages
-    except OSError:
-        return [_encode_png_bytes(image_bytes)]
-
-
 def _capture_html_email_pages(page, *, viewport_width, segment_height, max_pages, wait_ms):
     """Capture only the visible HTML segments we may attach to the vision model."""
     full_height = int(
@@ -1606,77 +1546,6 @@ def _render_html_email_pages(email_data, email_id=None):
         rendered_pages=len(rendered_pages),
     )
     return rendered_pages
-
-
-def _vision_wrap_lines(text, width=None):
-    """Wrap multiline email text into deterministic image-friendly lines."""
-    wrap_width = width or _vision_render_wrap_width()
-    wrapped_lines = []
-    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        normalized = raw_line.rstrip()
-        if not normalized:
-            if wrapped_lines and wrapped_lines[-1] == "":
-                continue
-            wrapped_lines.append("")
-            continue
-        line_indent = ""
-        line_body = normalized
-        if normalized.startswith(("- ", "* ")):
-            line_indent = normalized[:2]
-            line_body = normalized[2:].strip()
-        current_width = max(20, wrap_width - len(line_indent))
-        pieces = textwrap.wrap(
-            line_body or normalized,
-            width=current_width,
-            break_long_words=True,
-            break_on_hyphens=False,
-            replace_whitespace=False,
-        ) or [line_body or normalized]
-        for index, piece in enumerate(pieces):
-            prefix = line_indent if index == 0 else (" " * len(line_indent) if line_indent else "")
-            wrapped_lines.append(f"{prefix}{piece}".rstrip())
-    return wrapped_lines or ["(No usable email body text was available.)"]
-
-
-def _vision_render_page_chunks(content_lines):
-    """Split wrapped content into page-sized chunks for multimodal analysis."""
-    max_lines = _vision_render_max_lines()
-    chunks = []
-    remaining = list(content_lines or [])
-    while remaining:
-        chunk = remaining[:max_lines]
-        remaining = remaining[max_lines:]
-        chunks.append(chunk)
-    return chunks or [["(No usable email body text was available.)"]]
-
-
-def _render_text_page_png(page_lines, page_number, page_count, email_data):
-    """Render one page of email text into a PNG and return base64 bytes."""
-    font = ImageFont.load_default()
-    image = Image.new("L", (1200, 1600), color=255)
-    draw = ImageDraw.Draw(image)
-    sample_bbox = draw.textbbox((0, 0), "Ag", font=font)
-    line_height = max(18, (sample_bbox[3] - sample_bbox[1]) + 6)
-    margin_x = 48
-    y = 48
-    header_lines = [
-        "Rendered email page for multimodal analysis",
-        f"Page {page_number} of {page_count}",
-        f"From: {_truncate_compact_text(email_data.get('sender') or '(unknown sender)', max_chars=180)}",
-        f"Subject: {_truncate_compact_text(email_data.get('title') or '(No subject)', max_chars=180)}",
-    ]
-    for line in header_lines:
-        draw.text((margin_x, y), str(line or ""), fill=20, font=font)
-        y += line_height
-    y += 8
-    draw.line((margin_x, y, 1152, y), fill=160, width=1)
-    y += 18
-    for line in page_lines:
-        draw.text((margin_x, y), str(line or ""), fill=28, font=font)
-        y += line_height
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=True, compress_level=9)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def _render_email_image_pages(email_data, email_id=None, force=False):

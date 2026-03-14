@@ -50,7 +50,7 @@ SCOPES = [
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TOKEN_PATH = PROJECT_ROOT / "instance" / "gmail_token.json"
 DB_DEFAULT = str(PROJECT_ROOT / "instance" / "app.sqlite")
-SYNC_INTERVAL_SECONDS = int(os.getenv("GMAIL_SYNC_INTERVAL_SECONDS", "20"))
+SYNC_INTERVAL_SECONDS = int(os.getenv("GMAIL_SYNC_INTERVAL_SECONDS", "10"))
 SYNC_MAX_RESULTS = int(os.getenv("GMAIL_SYNC_MAX_RESULTS", "25"))
 AI_TRIAGE_PER_SYNC = int(os.getenv("GMAIL_AI_TRIAGE_PER_SYNC", "0"))
 BULK_SENDER_MARKERS = (
@@ -786,6 +786,7 @@ def _triage_email_with_ai(email_data, db_path):
     update_email_ai_fields(
         email_id=email_data["id"],
         email_type=ai_type,
+        priority=classification.get("priority"),
         ai_category=classification.get("category"),
         ai_needs_response=classification.get("needs_response"),
         ai_confidence=classification.get("confidence"),

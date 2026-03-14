@@ -18,10 +18,19 @@
   selectToggleButton.textContent = "Select"; // Default label before entering selection mode.
   selectToggleButton.setAttribute("aria-pressed", "false"); // Accessibility: initial toggle state.
   selectToggleButton.setAttribute("aria-label", "Toggle selection mode"); // Accessibility: clear control purpose.
+  const selectAllButton = document.createElement("button"); // Secondary control appears only in selection mode.
+  selectAllButton.type = "button"; // Prevent form submission when clicked.
+  selectAllButton.className = "list-select-toggle-btn"; // Match the Select/Done button styling.
+  selectAllButton.textContent = "Select all"; // Copy requested by the user.
+  selectAllButton.hidden = true; // Only reveal this button while selection mode is active.
+  selectAllButton.setAttribute("aria-label", "Select all emails in this view"); // Accessibility: clarify scope.
+  selectAllButton.setAttribute("aria-pressed", "false"); // Accessibility: explicit toggle semantics.
   if (sortForm) { // Place next to sort controls when available.
     sortForm.appendChild(selectToggleButton);
+    sortForm.appendChild(selectAllButton);
   } else if (listHeader) { // Fallback mount point if sort form is not present.
     listHeader.appendChild(selectToggleButton);
+    listHeader.appendChild(selectAllButton);
   } else { // No valid mount point means this view cannot support selection.
     return;
   }
@@ -32,6 +41,9 @@
   const idsInput = sideMenu.querySelector("[data-selected-ids-input]"); // Hidden comma-separated selected IDs.
   const actionInput = sideMenu.querySelector("[data-selected-action-input]"); // Hidden selected action code.
   const typeInput = sideMenu.querySelector("[data-selected-type-input]"); // Hidden destination type for moves.
+  const scopeInput = sideMenu.querySelector("[data-selection-scope-input]"); // Hidden selection scope for all-vs-explicit behavior.
+  const listViewInput = sideMenu.querySelector("[data-list-view-input]"); // Hidden mailbox-view identifier for server-side select-all resolution.
+  const searchQueryInput = sideMenu.querySelector("[data-search-query-input]"); // Hidden search filter so select-all honors the current query.
   const actionButtons = Array.from( // All buttons that trigger a bulk action.
     sideMenu.querySelectorAll("[data-bulk-action-btn]")
   );
@@ -43,12 +55,22 @@
     !form ||
     !idsInput ||
     !actionInput ||
-    !typeInput
+    !typeInput ||
+    !scopeInput ||
+    !listViewInput
   ) {
     return;
   }
 
   const selectedIds = new Set(); // Single source of truth for selected email IDs.
+  const listView = (document.body?.dataset.liveEmailView || "").trim(); // Stable mailbox view code used by the server for whole-view actions.
+  const pageSearchQuery = document.body?.dataset.searchQuery || ""; // Current search filter that whole-view actions must preserve.
+  let allMatchingSelected = false; // True after "Select all" chooses every email in the current mailbox view.
+
+  listViewInput.value = listView; // Keep the bulk form aligned with the current mailbox tab.
+  if (searchQueryInput) {
+    searchQueryInput.value = pageSearchQuery;
+  }
 
   const requestRefresh = () => { // Ask live list script to refresh rows in place.
     if (typeof window.mailboxRefreshList === "function") {
@@ -78,7 +100,50 @@
   const selectedRows = () => // Resolve selected rows from IDs right before each capability check.
     listRows().filter((row) => selectedIds.has(row.dataset.emailId));
 
+  const totalMatchingCount = () => { // Read the full mailbox count so select-all spans every page in this view.
+    const rawCount = document
+      .querySelector("[data-mailbox-pagination]")
+      ?.dataset.totalCount;
+    const parsedCount = Number.parseInt(rawCount || "", 10);
+    if (Number.isFinite(parsedCount) && parsedCount >= 0) {
+      return parsedCount;
+    }
+    return listRows().length;
+  };
+
+  const currentSelectionCount = () => // One place to read the active selection size for guards and UI.
+    (allMatchingSelected ? totalMatchingCount() : selectedIds.size);
+
+  const isRowSelected = (row) => // Whole-view selection treats every currently rendered row as selected.
+    allMatchingSelected || selectedIds.has(row.dataset.emailId);
+
+  const fixedTypeView = () => { // Views tied to a single mailbox type should hide "move to same type" when all are selected.
+    if (
+      listView === "read-only" ||
+      listView === "response-needed" ||
+      listView === "junk" ||
+      listView === "junk-uncertain"
+    ) {
+      return listView;
+    }
+    return "";
+  };
+
+  const adoptVisibleSelection = () => { // Dropping out of whole-view mode falls back to the currently rendered checkbox state.
+    allMatchingSelected = false;
+    selectedIds.clear();
+    listRows().forEach((row) => {
+      const checkbox = row.querySelector(".email-select-checkbox");
+      if (checkbox?.checked) {
+        selectedIds.add(row.dataset.emailId);
+      }
+    });
+  };
+
   const sanitizeSelection = () => { // Drop IDs that are no longer present after live refreshes.
+    if (allMatchingSelected) {
+      return;
+    }
     const visibleIds = new Set(listRows().map((row) => row.dataset.emailId)); // Fast lookup of visible row IDs.
     Array.from(selectedIds).forEach((id) => { // Iterate snapshot so deletion is safe during traversal.
       if (!visibleIds.has(id)) {
@@ -90,7 +155,7 @@
   const syncCheckboxes = () => { // Mirror Set state into row checkboxes and visual row highlight.
     listRows().forEach((row) => {
       // Read selection state from the Set so row replacements from live polling stay consistent.
-      const isSelected = selectedIds.has(row.dataset.emailId);
+      const isSelected = isRowSelected(row);
       const checkbox = row.querySelector(".email-select-checkbox"); // Checkbox shown only in selection mode.
       if (checkbox) {
         checkbox.checked = isSelected; // Keep checkbox UI in sync with Set.
@@ -121,20 +186,59 @@
     return state;
   };
 
+  const computeAllMatchingCapabilities = () => { // Whole-view select-all can infer capabilities from the active mailbox tab.
+    const hasRows = totalMatchingCount() > 0;
+    const state = {
+      delete: hasRows,
+      archive: false,
+      unarchive: false,
+      markRead: false,
+      markUnread: false,
+      move: false,
+    };
+    if (!hasRows) {
+      return state;
+    }
+    if (listView === "sent" || listView === "draft") {
+      return state;
+    }
+    state.move = true;
+    state.markRead = true;
+    state.markUnread = true;
+    if (listView === "archived") {
+      state.unarchive = true;
+    } else {
+      state.archive = true;
+    }
+    return state;
+  };
+
   const refreshMenu = () => { // Recompute visible state whenever selection or rows change.
     sanitizeSelection(); // Remove stale IDs first.
     syncCheckboxes(); // Then update visual selection state.
 
-    const count = selectedIds.size; // Number of selected rows drives visibility/labels.
-    idsInput.value = Array.from(selectedIds).join(","); // Persist selected IDs for form submission.
+    const count = currentSelectionCount(); // Number of selected rows drives visibility/labels.
+    idsInput.value = allMatchingSelected ? "" : Array.from(selectedIds).join(","); // Whole-view selection lets the server resolve the matching IDs.
+    scopeInput.value = allMatchingSelected ? "all" : "explicit"; // Tell the server whether it should expand the current view.
+    listViewInput.value = listView; // Keep form metadata in sync even after live list refreshes.
+    if (searchQueryInput) {
+      searchQueryInput.value = pageSearchQuery;
+    }
     selectedCount.textContent = String(count); // Update counter in side menu header.
+    selectAllButton.classList.toggle("active", selectionMode && allMatchingSelected); // Show whether the whole view is selected.
+    selectAllButton.textContent = allMatchingSelected ? "All selected" : "Select all"; // Give the user clear feedback about current scope.
+    selectAllButton.setAttribute("aria-pressed", allMatchingSelected ? "true" : "false"); // Keep ARIA state aligned with the scope toggle.
+    selectAllButton.disabled =
+      bulkRequestInFlight || !selectionMode || totalMatchingCount() === 0; // Prevent empty or concurrent select-all requests.
 
     const menuVisible = selectionMode && count > 0; // Show menu only in mode + with active selection.
     sideMenu.classList.toggle("visible", menuVisible); // Toggle open/closed menu styles.
     sideMenu.setAttribute("aria-hidden", menuVisible ? "false" : "true"); // Keep ARIA visibility accurate.
 
     const rows = selectedRows(); // Selected row nodes used for capability checks.
-    const capabilities = computeCapabilities(rows); // Aggregated server-allowed actions.
+    const capabilities = allMatchingSelected
+      ? computeAllMatchingCapabilities()
+      : computeCapabilities(rows); // Whole-view selection uses the mailbox view rules instead of the current page only.
     const movableRows = rows.filter((row) => parseBool(row.dataset.canMove)); // Rows that allow set-type moves.
     actionButtons.forEach((button) => {
       let enabled = false; // Default disabled until action-specific rules pass.
@@ -152,9 +256,15 @@
           enabled = capabilities.markUnread;
         } else if (action === "set-type") {
           const targetType = button.dataset.newType || ""; // Destination folder/type for move action.
-          enabled =
-            capabilities.move && // At least one selected row can move.
-            movableRows.some((row) => row.dataset.emailType !== targetType); // Only show move if it changes type.
+          if (allMatchingSelected) {
+            enabled =
+              capabilities.move &&
+              targetType !== fixedTypeView(); // Type-specific tabs should not offer a no-op move target.
+          } else {
+            enabled =
+              capabilities.move && // At least one selected row can move.
+              movableRows.some((row) => row.dataset.emailType !== targetType); // Only show move if it changes type.
+          }
         }
       }
       button.disabled = bulkRequestInFlight || !enabled; // Disable invalid operations and while request is in flight.
@@ -180,6 +290,11 @@
     }
     const row = checkbox.closest(".email-row[data-email-id]"); // Resolve row metadata for this checkbox.
     if (!row) {
+      return;
+    }
+    if (allMatchingSelected) { // Any per-row adjustment exits whole-view mode and keeps the visible page selection.
+      adoptVisibleSelection();
+      refreshMenu();
       return;
     }
     const emailId = row.dataset.emailId; // Stable ID used by backend bulk endpoint.
@@ -210,6 +325,11 @@
       return;
     }
     checkbox.checked = !checkbox.checked; // Mirror row click into checkbox state.
+    if (allMatchingSelected) { // Row tweaks after select-all revert to explicit page-local selection.
+      adoptVisibleSelection();
+      refreshMenu();
+      return;
+    }
     const emailId = row.dataset.emailId;
     if (checkbox.checked) {
       selectedIds.add(emailId);
@@ -220,13 +340,23 @@
   });
 
   clearButton.addEventListener("click", () => { // Manual reset from side menu header.
+    allMatchingSelected = false;
+    selectedIds.clear();
+    refreshMenu();
+  });
+
+  selectAllButton.addEventListener("click", () => { // One-click helper for selecting every email in the current mailbox view.
+    if (!selectionMode || totalMatchingCount() === 0) {
+      return;
+    }
+    allMatchingSelected = true;
     selectedIds.clear();
     refreshMenu();
   });
 
   actionButtons.forEach((button) => {
     button.addEventListener("click", async () => { // Submit selected action and IDs to backend.
-      if (button.disabled || selectedIds.size === 0) { // Guard against invalid/empty submissions.
+      if (button.disabled || currentSelectionCount() === 0) { // Guard against invalid/empty submissions.
         return;
       }
       if (bulkRequestInFlight) { // Ignore repeated clicks while a request is active.
@@ -248,6 +378,7 @@
         bulkRequestInFlight = false;
       }
       if (requestSucceeded) {
+        allMatchingSelected = false;
         selectedIds.clear();
       }
       refreshMenu();
@@ -263,7 +394,9 @@
     selectToggleButton.classList.toggle("active", enabled); // Visual state for the Select/Done button.
     selectToggleButton.textContent = enabled ? "Done" : "Select"; // Keep button label in sync with mode.
     selectToggleButton.setAttribute("aria-pressed", enabled ? "true" : "false"); // ARIA toggle semantics.
+    selectAllButton.hidden = !enabled; // "Select all" should only appear after entering selection mode.
     if (!enabled) {
+      allMatchingSelected = false; // Exiting mode also clears whole-view selection state.
       selectedIds.clear(); // Exiting mode clears selection so row navigation feels normal.
     }
     refreshMenu();

@@ -7,7 +7,7 @@
   - pagination.
 -->
 {% if pagination %}
-  <div class="mailbox-pagination">
+  <div class="mailbox-pagination" data-mailbox-pagination data-total-count="{{ pagination.total_count }}">
     <div class="mailbox-pagination-summary muted">
       {% if pagination.total_count > 0 %}
         Showing {{ pagination.start_index }}-{{ pagination.end_index }} of {{ pagination.total_count }}

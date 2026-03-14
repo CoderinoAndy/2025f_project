@@ -40,11 +40,11 @@ Manual fallback without `make` (Windows):
 ## Optional env vars
 
 - `GMAIL_CREDENTIALS_FILE`: custom path to `credentials.json`
-- `GMAIL_SYNC_INTERVAL_SECONDS`: minimum background sync interval (default `60`)
+- `GMAIL_SYNC_INTERVAL_SECONDS`: minimum background sync interval (default `10`)
 - `GMAIL_SYNC_MAX_RESULTS`: recent messages to pull per sync (default `15`)
 - `GMAIL_BEFORE_REQUEST_SYNC_INTERVAL_SECONDS`: throttle for request-triggered sync on mailbox pages (default `120`)
 - `GMAIL_BEFORE_REQUEST_SYNC_MAX_RESULTS`: messages fetched by request-triggered sync (default `10`)
-- `LIVE_EMAIL_POLL_INTERVAL_MS`: mailbox live-refresh interval in ms (default `7000`)
+- `LIVE_EMAIL_POLL_INTERVAL_MS`: mailbox live-refresh interval in ms (default `10000`)
 - `LIVE_EMAIL_SYNC_MAX_RESULTS`: messages fetched by each live-refresh sync (default `8`)
 - `LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS`: how often live polling runs a deeper sync pass (default `120`)
 - `LIVE_EMAIL_DEEP_SYNC_MAX_RESULTS`: messages fetched by each deeper live sync pass (default `30`)

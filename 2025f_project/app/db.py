@@ -640,6 +640,36 @@ def fetch_mailbox_page(
         return [_row_to_dict(r) for r in cur.fetchall()]
 
 
+def fetch_mailbox_ids(
+    *,
+    email_type=None,
+    exclude_types=None,
+    include_archived=False,
+    archived_only=False,
+    search_query=None,
+    db_path=DB_DEFAULT,
+):
+    """Fetch all email IDs that match a mailbox list query."""
+    clause, params = _build_mailbox_filter_clause(
+        email_type=email_type,
+        exclude_types=exclude_types,
+        include_archived=include_archived,
+        archived_only=archived_only,
+        search_query=search_query,
+    )
+    with db_session(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT m.id
+            FROM email_messages m
+            {clause}
+            ORDER BY m.id ASC
+            """,
+            params,
+        )
+        return [int(row["id"]) for row in cur.fetchall() if row and row["id"] is not None]
+
+
 def get_app_setting(key, default=None, db_path=DB_DEFAULT):
     """Fetch a single app setting value."""
     setting_key = str(key or "").strip()
@@ -717,6 +747,46 @@ def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
         )
         row = cur.fetchone()
         return _row_to_dict(row) if row else None
+
+
+def fetch_emails_by_ids(email_ids, db_path=DB_DEFAULT):
+    """Fetch multiple emails by ID while preserving the requested order."""
+    seen = set()
+    normalized_ids = []
+    for raw_id in email_ids or []:
+        try:
+            email_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if email_id <= 0 or email_id in seen:
+            continue
+        seen.add(email_id)
+        normalized_ids.append(email_id)
+
+    if not normalized_ids:
+        return []
+
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    with db_session(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            {EMAIL_SELECT_SQL}
+            WHERE m.id IN ({placeholders})
+            """,
+            normalized_ids,
+        )
+        rows_by_id = {}
+        for row in cur.fetchall():
+            row_dict = _row_to_dict(row)
+            rows_by_id[row_dict["id"]] = row_dict
+
+    ordered_rows = []
+    for email_id in normalized_ids:
+        row_dict = rows_by_id.get(email_id)
+        if row_dict is not None:
+            ordered_rows.append(row_dict)
+    return ordered_rows
+
 
 def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
     """Fetch email by provider draft ID.

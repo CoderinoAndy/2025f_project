@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from .db import count_mailbox_emails, fetch_mailbox_page
+from .db import count_mailbox_emails, fetch_mailbox_ids, fetch_mailbox_page
 from .gmail_service import sync_drafts_from_gmail
 
 # Helpers for live mailbox tabs: filtering, sorting, and sync throttling.
@@ -76,7 +76,7 @@ def _env_int(name, default):
 
 
 # Polling and sync knobs from the environment, each clamped to a safe minimum.
-LIVE_EMAIL_POLL_INTERVAL_MS = max(1000, _env_int("LIVE_EMAIL_POLL_INTERVAL_MS", 2000))
+LIVE_EMAIL_POLL_INTERVAL_MS = max(1000, _env_int("LIVE_EMAIL_POLL_INTERVAL_MS", 10000))
 LIVE_EMAIL_SYNC_MAX_RESULTS = max(5, _env_int("LIVE_EMAIL_SYNC_MAX_RESULTS", 15))
 LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS = max(
     5, _env_int("LIVE_EMAIL_DEEP_SYNC_INTERVAL_SECONDS", 30)
@@ -184,6 +184,18 @@ def mailbox_live_polling_enabled(list_view, search_query="", page=1):
     if (search_query or "").strip():
         return False
     return max(1, int(page or 1)) == 1
+
+
+def _live_list_query_filters(list_view):
+    """Resolve mailbox query filters for a list-view code."""
+    config = LIVE_LIST_CONFIGS.get(list_view)
+    if not config:
+        return None
+    return {
+        "email_type": config.get("email_type"),
+        "exclude_types": config.get("exclude_types"),
+        "archived_only": bool(config.get("archived_only")),
+    }
 
 
 def _parse_date(date_text):
@@ -341,30 +353,28 @@ def fetch_live_list_emails(
 ):
     """Fetch one mailbox page plus empty-state and count metadata."""
     config = LIVE_LIST_CONFIGS.get(list_view)
-    if not config:
+    filters = _live_list_query_filters(list_view)
+    if not config or not filters:
         return None, None, 0, 1
 
     # The draft tab asks Gmail for fresh drafts before reading the local DB.
     if config.get("sync_drafts"):
         trigger_draft_sync_async(max_results=40)
 
-    email_type = config.get("email_type")
-    exclude_types = config.get("exclude_types")
-    archived_only = bool(config.get("archived_only"))
     safe_page_size = max(1, int(page_size or MAILBOX_PAGE_SIZE))
     total_count = count_mailbox_emails(
-        email_type=email_type,
-        exclude_types=exclude_types,
-        archived_only=archived_only,
+        email_type=filters["email_type"],
+        exclude_types=filters["exclude_types"],
+        archived_only=filters["archived_only"],
         search_query=search_query,
     )
     total_pages = max(1, (total_count + safe_page_size - 1) // safe_page_size) if total_count else 1
     current_page = min(max(1, int(page or 1)), total_pages)
     offset = (current_page - 1) * safe_page_size
     emails = fetch_mailbox_page(
-        email_type=email_type,
-        exclude_types=exclude_types,
-        archived_only=archived_only,
+        email_type=filters["email_type"],
+        exclude_types=filters["exclude_types"],
+        archived_only=filters["archived_only"],
         search_query=search_query,
         sort_code=sort_code,
         limit=safe_page_size,
@@ -378,3 +388,16 @@ def fetch_live_list_emails(
             current_page,
         )
     return emails, config["empty_message"], total_count, current_page
+
+
+def fetch_live_list_email_ids(list_view, search_query=""):
+    """Fetch all email IDs that belong to a mailbox list view/search."""
+    filters = _live_list_query_filters(list_view)
+    if not filters:
+        return None
+    return fetch_mailbox_ids(
+        email_type=filters["email_type"],
+        exclude_types=filters["exclude_types"],
+        archived_only=filters["archived_only"],
+        search_query=search_query,
+    )

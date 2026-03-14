@@ -6,6 +6,7 @@ import threading
 from urllib.parse import urlsplit
 from .db import (
     fetch_email_by_id,
+    fetch_emails_by_ids,
     fetch_email_by_provider_draft_id,
     fetch_thread_emails,
     get_user_display_name,
@@ -53,6 +54,7 @@ from .mailbox import (
     build_mailbox_pagination,
     build_mailbox_context,
     emails_fingerprint as _emails_fingerprint,
+    fetch_live_list_email_ids as _fetch_live_list_email_ids,
     fetch_live_list_emails as _fetch_live_list_emails,
     mailbox_live_polling_enabled,
     maybe_get_live_sync_max_results,
@@ -333,6 +335,20 @@ def _parse_bulk_email_ids(raw_ids):
         seen.add(email_id)
         parsed.append(email_id)
     return parsed
+
+
+def _resolve_bulk_email_ids_from_request():
+    """Resolve explicit or whole-view bulk selection IDs from the current request."""
+    selection_scope = (request.form.get("selection_scope") or "").strip().lower()
+    if selection_scope != "all":
+        return _parse_bulk_email_ids(request.form.get("ids"))
+
+    list_view = (request.form.get("list_view") or "").strip()
+    search_query = (request.form.get("search_query") or "").strip()
+    email_ids = _fetch_live_list_email_ids(list_view, search_query=search_query)
+    if email_ids is None:
+        abort(400)
+    return email_ids
 
 
 @main.route("/api/list-emails")
@@ -665,7 +681,7 @@ def bulk_email_action():
     # Convert API data into the mailbox shape the app uses locally.
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
-    email_ids = _parse_bulk_email_ids(request.form.get("ids"))
+    email_ids = _resolve_bulk_email_ids_from_request()
     next_url = _next_url_from_request()
 
     allowed_actions = {
@@ -683,9 +699,13 @@ def bulk_email_action():
     if not email_ids:
         return redirect(next_url)
 
+    emails_by_id = {
+        email_data["id"]: email_data for email_data in fetch_emails_by_ids(email_ids)
+    }
+
     # Process each selected row on its own so one failure does not block the rest.
     for email_id in email_ids:
-        email_data = fetch_email_by_id(email_id)
+        email_data = emails_by_id.get(email_id)
         if email_data is None:
             continue
 

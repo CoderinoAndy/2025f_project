@@ -8471,9 +8471,11 @@ def run_ai_analysis(email_data, force=False):
             update_email_ai_fields(
                 email_id=email_data["id"],
                 email_type=classification_to_email_type(classification),
+                priority=classification.get("priority"),
                 ai_category=classification.get("category"),
                 ai_needs_response=classification.get("needs_response"),
                 ai_confidence=classification.get("confidence"),
+                lock_existing_classification=not force,
             )
             changed = True
 

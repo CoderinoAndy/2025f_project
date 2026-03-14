@@ -827,6 +827,8 @@ def sync_recent_emails(db_path=DB_DEFAULT, max_results=None):
     synced = 0
     visited = 0
 
+    # We page through lightweight message ids first, then spend the heavier work on
+    # fetching and triaging only the rows that actually make it through sync.
     # Pull message IDs page-by-page and stop on either budget exhaustion, empty pages,
     # or list API errors (logged and treated as a graceful early exit).
     while visited < target:

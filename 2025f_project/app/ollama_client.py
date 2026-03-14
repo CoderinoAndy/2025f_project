@@ -1524,6 +1524,9 @@ def _render_html_email_pages(email_data, email_id=None):
 
     try:
         with VISION_BROWSER_RENDER_LOCK:
+            # Visual rendering is one of the pricier paths in the app, so we reuse a
+            # single browser and serialize access instead of spinning up a fresh one
+            # for every email that wants a screenshot-based summary.
             browser, launch_errors = _get_or_launch_vision_browser()
             if browser is None:
                 _log_action(
@@ -6539,6 +6542,8 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
     heuristic_type = heuristic_classification.get("email_type")
     heuristic_guardrail = heuristic_classification.get("guardrail_reason") == "commercial_promotion"
 
+    # The model gets first pass, but these guardrails keep low-confidence mailbox moves
+    # from doing something a human would likely find reckless or surprising.
     # Nudge uncertain model outputs toward the safer mailbox behavior.
     if heuristic_type == "read-only":
         if bool(merged.get("needs_response")) and model_confidence < 0.9:
@@ -6984,6 +6989,8 @@ def summarize_email(email_data, email_id=None):
         else [structured_fallback, extractive_fallback]
     )
     fallback_summary = None
+    # We build the local fallback before talking to the model so there is always a
+    # decent summary waiting in the wings if the model stalls, rambles, or returns noise.
     for candidate in fallback_candidates:
         finalized_candidate = _finalize_summary_text(candidate, email_data) or None
         if not finalized_candidate:

@@ -129,6 +129,8 @@ def _repair_common_mojibake(text):
     best = value
     best_marker_count = marker_count
     best_score = _text_quality_score(value) - (best_marker_count * 0.04)
+    # Mojibake repair is a small search, not a single guess: we try the common bad
+    # decode paths and keep the version that actually looks more readable overall.
     for _ in range(2):
         improved = False
         next_best = best
@@ -178,6 +180,8 @@ def _decode_bytes(content_bytes, charset=""):
 
 
 def _normalize_visible_text(text):
+    # Most callers want this "make it readable but keep paragraphs" cleanup pass
+    # after decoding HTML or MIME parts from mail providers.
     cleaned = _repair_common_mojibake(str(text or "")).replace("\xa0", " ")
     cleaned = _replace_common_email_symbols(cleaned)
     cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)

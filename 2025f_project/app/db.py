@@ -926,6 +926,9 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             existing = cur.fetchone()
 
         if existing:
+            # Provider sync is allowed to refresh source-of-truth mailbox state like
+            # bodies and read flags, but it should not casually wipe out local summary,
+            # draft, or AI work that the app has already produced for this row.
             # Keep locally generated summary/draft/classification unless provider has newer explicit values.
             summary_value = existing["summary"] if existing["summary"] else normalized["summary"]
             draft_value = existing["draft"] if existing["draft"] else normalized["draft"]

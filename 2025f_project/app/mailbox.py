@@ -120,6 +120,8 @@ def trigger_draft_sync_async(max_results=40, force=False):
     now = time.time()
     if not force and now - MAILBOX_SYNC_STATE.last_draft_sync_at < DRAFT_SYNC_INTERVAL_SECONDS:
         return False
+    # Draft views can trigger refreshes repeatedly, so this stays single-flight and
+    # quietly skips overlapping runs instead of letting Gmail draft syncs stack up.
     if not MAILBOX_SYNC_STATE.draft_sync_lock.acquire(blocking=False):
         return False
 

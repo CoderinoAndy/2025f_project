@@ -479,6 +479,8 @@ def sync_from_gmail():
         return
     if request.method != "GET":
         return
+    # This hook covers the ordinary page-load case, while pages that already poll or
+    # run their own async work are skipped so we do not pile duplicate sync pressure on the backend.
     if request.endpoint in {
         "main.about",
         "main.compose",

@@ -63,8 +63,9 @@
   }
 
   const selectedIds = new Set(); // Single source of truth for selected email IDs.
-  const listView = (document.body?.dataset.liveEmailView || "").trim(); // Stable mailbox view code used by the server for whole-view actions.
-  const pageSearchQuery = document.body?.dataset.searchQuery || ""; // Current search filter that whole-view actions must preserve.
+  const bodyDataset = document.body ? document.body.dataset : {}; // Read page-level mailbox metadata once on load.
+  const listView = (bodyDataset.liveEmailView || "").trim(); // Stable mailbox view code used by the server for whole-view actions.
+  const pageSearchQuery = bodyDataset.searchQuery || ""; // Current search filter that whole-view actions must preserve.
   let allMatchingSelected = false; // True after "Select all" chooses every email in the current mailbox view.
 
   listViewInput.value = listView; // Keep the bulk form aligned with the current mailbox tab.
@@ -101,9 +102,8 @@
     listRows().filter((row) => selectedIds.has(row.dataset.emailId));
 
   const totalMatchingCount = () => { // Read the full mailbox count so select-all spans every page in this view.
-    const rawCount = document
-      .querySelector("[data-mailbox-pagination]")
-      ?.dataset.totalCount;
+    const pagination = document.querySelector("[data-mailbox-pagination]");
+    const rawCount = pagination && pagination.dataset ? pagination.dataset.totalCount : "";
     const parsedCount = Number.parseInt(rawCount || "", 10);
     if (Number.isFinite(parsedCount) && parsedCount >= 0) {
       return parsedCount;
@@ -134,7 +134,7 @@
     selectedIds.clear();
     listRows().forEach((row) => {
       const checkbox = row.querySelector(".email-select-checkbox");
-      if (checkbox?.checked) {
+      if (checkbox && checkbox.checked) {
         selectedIds.add(row.dataset.emailId);
       }
     });

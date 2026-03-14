@@ -3404,6 +3404,8 @@ def _clean_offer_phrase(offer_text):
     candidate = re.sub(r"^(?:save|get|enjoy)\s+", "", candidate, flags=re.IGNORECASE)
     candidate = re.sub(r"\bfree\s+for\s+(\d+)\s+weeks?\b", lambda match: f"{match.group(1)}-week free trial", candidate, flags=re.IGNORECASE)
     candidate = candidate.rstrip(" -:;,.>")
+    if candidate.lower() in {"free shipping", "lifetime warranty"}:
+        candidate = candidate.lower()
     return candidate
 
 
@@ -3595,6 +3597,7 @@ def _promotion_summary(email_data):
     """Build a compact deterministic summary for commercial bulk promotions."""
     if not _looks_bulk_or_newsletter(email_data):
         return None
+    profile = _summary_profile(email_data)
     sender_name = _summary_sender_name(email_data)
     context = _promotion_source_context(email_data, max_chars=5000)
     title = context["title"]
@@ -3635,8 +3638,8 @@ def _promotion_summary(email_data):
     detail_sentence = ""
     if featured_items and offer_phrases:
         detail_sentence = (
-            f"The message promotes {_natural_join(featured_items[:2])} "
-            f"with {_natural_join(offer_phrases[:2])}"
+            f"The message promotes {_natural_join(featured_items[:3])} "
+            f"with {_natural_join(offer_phrases[:3])}"
         )
     elif offer_phrases:
         detail_sentence = f"The message advertises {_natural_join(offer_phrases[:3])}"
@@ -3651,7 +3654,11 @@ def _promotion_summary(email_data):
     if detail_sentence:
         sentences.append(_ensure_sentence_ending(detail_sentence))
     summary = _compact_text(" ".join(sentences))
-    return summary[:SUMMARY_MAX_CHARS] if summary else None
+    if not summary:
+        return None
+    if len(summary) > profile["char_limit"]:
+        summary = f"{summary[: profile['char_limit'] - 3].rstrip()}..."
+    return summary
 
 
 def _staff_update_summary(email_data):
@@ -5332,6 +5339,42 @@ def _merge_summary_with_fallback_coverage(summary_text, email_data):
     if _looks_summary_parrot(merged_summary, email_data):
         return summary
     return merged_summary
+
+
+def _prefer_richer_promotional_fallback(summary_text, fallback_summary):
+    """Prefer a richer promo fallback when the model only returns a thin lead sentence."""
+    summary = _compact_text(summary_text)
+    fallback = _compact_text(fallback_summary)
+    if not summary or not fallback or summary == fallback:
+        return summary or fallback
+    if "\n" in summary:
+        return summary
+    if not fallback.lower().startswith("a promotional update from "):
+        return summary
+
+    summary_sentences = _summary_candidate_fragments(summary)
+    if len(summary_sentences) > 1 and len(summary) >= 220:
+        return summary
+
+    ignored_tokens = {"advertises", "message", "promotes", "promotional", "update"}
+    summary_tokens = {
+        token for token in _content_tokens(summary)
+        if token not in ignored_tokens
+    }
+    fallback_tokens = {
+        token for token in _content_tokens(fallback)
+        if token not in ignored_tokens
+    }
+    extra_tokens = fallback_tokens - summary_tokens
+    if len(summary_tokens) > 12:
+        return summary
+    if len(fallback) <= len(summary) + 35:
+        return summary
+    if len(fallback_tokens) <= len(summary_tokens) + 2:
+        return summary
+    if len(extra_tokens) < 5:
+        return summary
+    return fallback
 
 
 def _extractive_summary_fallback(email_data):
@@ -7073,6 +7116,8 @@ def summarize_email(email_data, email_id=None):
             email_id=email_id,
             detail=detail,
         )
+    if summary and fallback_summary:
+        summary = _prefer_richer_promotional_fallback(summary, fallback_summary)
     final_summary = summary or fallback_summary
     _log_performance(
         "ollama_summary",

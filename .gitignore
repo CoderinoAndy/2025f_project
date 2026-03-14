@@ -211,3 +211,6 @@ instance/
 
 # Secrets / local credentials
 credentials.json
+
+# Project-local tests kept out of version control
+/2025f_project/tests/

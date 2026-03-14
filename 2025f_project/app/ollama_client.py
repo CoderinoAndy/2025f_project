@@ -1075,6 +1075,15 @@ def _source_text_limit(task=None, text_max_chars=None):
 
 def _source_text_for_user_message(email_data, task=None, text_max_chars=None):
     """Return cleaned source text for model prompts."""
+    task_name = str(task or "").strip().lower()
+    if task_name == "summarize":
+        summary_context = _body_for_context(
+            email_data,
+            max_chars=_source_text_limit(task=task, text_max_chars=text_max_chars),
+            max_sentences=10,
+        )
+        if summary_context:
+            return summary_context
     return _clean_body_for_prompt(
         email_data,
         max_chars=_source_text_limit(task=task, text_max_chars=text_max_chars),
@@ -2322,36 +2331,36 @@ def _summary_profile(email_data):
             "char_limit": 2200,
             "output_sentences": 8,
             "context_sentences": 32,
-            "context_chars": 6400,
+            "context_chars": 3200,
             "prompt_target": "up to 8 sentences when the email needs it",
-            "num_predict": 460,
+            "num_predict": 320,
         }
     elif body_length >= 1800:
         profile = {
             "char_limit": 1700,
             "output_sentences": 6,
             "context_sentences": 26,
-            "context_chars": 5200,
+            "context_chars": 2800,
             "prompt_target": "up to 6 sentences when the email needs it",
-            "num_predict": 320,
+            "num_predict": 240,
         }
     elif body_length >= 900:
         profile = {
             "char_limit": 1200,
             "output_sentences": 5,
             "context_sentences": 18,
-            "context_chars": 3600,
+            "context_chars": 2200,
             "prompt_target": "up to 5 sentences when the email needs it",
-            "num_predict": 220,
+            "num_predict": 180,
         }
     else:
         profile = {
             "char_limit": 750,
             "output_sentences": 3,
             "context_sentences": 12,
-            "context_chars": 2200,
+            "context_chars": 1600,
             "prompt_target": "up to 3 sentences when the email needs it",
-            "num_predict": 140,
+            "num_predict": 120,
         }
     return profile
 

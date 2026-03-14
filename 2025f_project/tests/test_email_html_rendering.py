@@ -6,6 +6,29 @@ from app import create_app
 
 class EmailHtmlRenderingTests(unittest.TestCase):
     @mock.patch("app.routes.trigger_background_sync")
+    @mock.patch("app.routes._get_ai_task")
+    def test_ai_task_status_does_not_trigger_background_sync(
+        self,
+        mock_get_ai_task,
+        mock_background_sync,
+    ):
+        mock_get_ai_task.return_value = {
+            "id": "task-123",
+            "type": "analyze",
+            "email_id": 123,
+            "status": "running",
+        }
+
+        app = create_app()
+        client = app.test_client()
+
+        response = client.get("/api/ai-task/task-123")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "running")
+        mock_background_sync.assert_not_called()
+
+    @mock.patch("app.routes.trigger_background_sync")
     @mock.patch("app.routes.fetch_thread_emails", return_value=[])
     @mock.patch("app.routes._should_auto_analyze_email", return_value=False)
     @mock.patch("app.routes._can_generate_reply_draft", return_value=False)

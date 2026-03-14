@@ -5,6 +5,8 @@ PRAGMA foreign_keys = ON; -- Ensure foreign key constraints are enforced.
 -- Normalized email message table (one row per message)
 CREATE TABLE IF NOT EXISTS email_messages ( -- Primary message table (one row per email or draft).
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_id TEXT UNIQUE,
+  provider_draft_id TEXT UNIQUE,
   thread_id TEXT,                               -- conversation/thread identifier
   title TEXT NOT NULL,                      -- subject line
   sender TEXT NOT NULL,                      -- single sender address

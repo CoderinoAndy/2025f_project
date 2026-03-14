@@ -817,7 +817,7 @@
         const draftUrl = String(pageConfig.draftUrl || "");
         const taskStatusBase = "/api/ai-task/";
         const autoAnalyzeNeeded = Boolean(pageConfig.autoAnalyzeNeeded);
-        const draftAvailable = Boolean(pageConfig.draftAvailable);
+        let draftAvailable = Boolean(pageConfig.draftAvailable);
         const summaryExpected = Boolean(pageConfig.summaryExpected);
         const initialAnalyzeTaskId = String(pageConfig.initialAnalyzeTaskId || "");
         const initialSummaryText = String(pageConfig.initialSummaryText || "");
@@ -839,6 +839,8 @@
         let drafting = false;
         let draftLoadingBaseValue = null;
         const aiTaskPollMaxWaitMs = 240000;
+        const aiTaskPollInitialDelayMs = 750;
+        const aiTaskPollMaxDelayMs = 4000;
 
         // Small delay helper used by polling and typing animations.
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -865,6 +867,17 @@
           draftButton.title = enabled
             ? "Generate or revise draft"
             : (draftButtonDefaultTitle || "Type a draft first, or use AI on emails that need a response");
+        };
+
+        const updateDraftAvailabilityFromAnalysis = (result = {}) => {
+          const analyzedType = String(result.type || "").trim().toLowerCase();
+          const analyzedNeedsResponse = result.ai_needs_response;
+          if (analyzedType) {
+            draftAvailable = analyzedType === "response-needed";
+          } else if (analyzedNeedsResponse !== null && analyzedNeedsResponse !== undefined) {
+            draftAvailable = Boolean(analyzedNeedsResponse);
+          }
+          syncDraftButtonState();
         };
 
         // Toggle temporary draft-loading text inside the textarea.
@@ -954,7 +967,17 @@
             ...options,
           });
           if (!response.ok) {
-            throw new Error(`Request failed (${response.status})`);
+            let message = `Request failed (${response.status})`;
+            try {
+              const payload = await response.json();
+              const payloadMessage = String((payload && payload.error) || "").trim();
+              if (payloadMessage) {
+                message = payloadMessage;
+              }
+            } catch (_error) {
+              // Keep the generic status message when the response is not JSON.
+            }
+            throw new Error(message);
           }
           return response.json();
         };
@@ -962,6 +985,7 @@
         // Poll task status until completed/error/timeout.
         const pollTask = async (taskId, maxWaitMs = aiTaskPollMaxWaitMs) => {
           const startedAt = Date.now();
+          let delayMs = aiTaskPollInitialDelayMs;
           // Poll server-side task state until completion/error to drive async UI updates.
           while (Date.now() - startedAt < maxWaitMs) {
             const task = await requestJson(`${taskStatusBase}${taskId}`);
@@ -971,7 +995,11 @@
             if (task.status === "error") {
               throw new Error(task.error || "AI task failed.");
             }
-            await sleep(500);
+            await sleep(delayMs);
+            delayMs = Math.min(
+              aiTaskPollMaxDelayMs,
+              Math.round(delayMs * 1.35)
+            );
           }
           throw new Error("AI task timed out.");
         };
@@ -996,6 +1024,7 @@
             }
             const completed = await pollTask(taskId);
             const result = completed.result || {};
+            updateDraftAvailabilityFromAnalysis(result);
             if (summaryExpected) {
               const summary = String(result.summary || "").trim();
               if (summary) {
@@ -1054,11 +1083,15 @@
           } catch (error) {
             console.error(error);
             const errorMessage = String((error && error.message) || "");
+            if (errorMessage.includes("need a response")) {
+              draftAvailable = false;
+              syncDraftButtonState();
+            }
             setDraftLoading(
               true,
               errorMessage.includes("timed out")
                 ? "Draft generation is taking longer than expected."
-                : "Draft generation failed."
+                : (errorMessage || "Draft generation failed.")
             );
             await sleep(1100);
             setDraftLoading(false);

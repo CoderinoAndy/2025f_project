@@ -467,6 +467,7 @@ def sync_from_gmail():
         "main.about",
         "main.compose",
         "main.list_emails_api",
+        "main.ai_task_status",
     }:
         return
     trigger_background_sync(max_results=30)

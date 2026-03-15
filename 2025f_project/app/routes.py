@@ -484,6 +484,7 @@ def sync_from_gmail():
     if request.endpoint in {
         "main.about",
         "main.compose",
+        "main.email",
         "main.list_emails_api",
         "main.ai_task_status",
     }:

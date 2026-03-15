@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -39,7 +40,7 @@ OLLAMA_SUMMARY_MODEL_DEFAULT = "mistral-small3.2:24b"
 OLLAMA_DRAFT_MODEL_DEFAULT = OLLAMA_SUMMARY_MODEL_DEFAULT
 OLLAMA_MODEL_DEFAULT = OLLAMA_SUMMARY_MODEL_DEFAULT
 OLLAMA_TIMEOUT_SECONDS_DEFAULT = 45
-OLLAMA_LONG_TASK_TIMEOUT_SECONDS_DEFAULT = 180
+OLLAMA_LONG_TASK_TIMEOUT_SECONDS_DEFAULT = 240
 OLLAMA_KEEP_ALIVE_DEFAULT = "15m"
 SUMMARY_MIN_CHARS_DEFAULT = 200
 CLASSIFY_NUM_PREDICT_DEFAULT = 96
@@ -92,13 +93,17 @@ OLLAMA_TAGS_CACHE = {"fetched_at": 0.0, "models": ()}
 OLLAMA_TAGS_LOCK = threading.Lock()
 VISION_RENDER_CACHE = {}
 VISION_RENDER_CACHE_LOCK = threading.Lock()
+VISION_RENDER_REQUEST_QUEUE = queue.Queue()
+VISION_RENDER_WORKER_STATE = {
+    "thread": None,
+}
+VISION_RENDER_WORKER_LOCK = threading.Lock()
 VISION_BROWSER_STATE = {
     "playwright": None,
     "browser": None,
     "launch_options_key": None,
 }
 VISION_BROWSER_STATE_LOCK = threading.Lock()
-VISION_BROWSER_RENDER_LOCK = threading.Lock()
 VISION_BROWSER_CHANNEL_CANDIDATES = ("msedge", "chrome")
 VISUAL_SUMMARY_TEXT_FAILURE_CHARS_DEFAULT = 120
 VISUAL_SUMMARY_MIN_HTML_CHARS_DEFAULT = 180
@@ -229,6 +234,20 @@ SUMMARY_UTILITY_MARKERS = (
     "data is provided by",
     "want to keep receiving",
     "clicking on newsletter links",
+    "edit your profile",
+    "update your profile",
+    "manage notifications",
+    "notification settings",
+    "email settings",
+    "manage alerts",
+    "manage settings",
+    "stop receiving these emails",
+    "stop receiving these messages",
+    "why am i getting this email",
+    "why did i get this email",
+    "why you're receiving this email",
+    "may earn affiliate commissions",
+    "affiliate commissions from ticket sales",
 )
 # Common model-inserted lines that are not grounded in the source email.
 SUMMARY_HALLUCINATION_MARKERS = (
@@ -333,6 +352,15 @@ FOOTER_NOISE_REGEX_PATTERNS = (
     r"\bfor\s+further\s+assistance\b",
     r"\byou\s+are\s+currently\s+subscribed(?:\s+as)?\b",
     r"\bsponsored\s+by\b",
+    r"\bedit\s+(?:your|the\s+recipient'?s)\s+profile\b",
+    r"\bupdate\s+(?:your|the\s+recipient'?s)\s+profile\b",
+    r"\b(?:manage|update)\s+(?:your|the\s+recipient'?s)\s+(?:email\s+)?(?:settings|notifications?|subscriptions?|alerts?)\b",
+    r"\bnotification\s+settings\b",
+    r"\bemail\s+settings\b",
+    r"\bstop\s+receiving\s+(?:these|this)\s+(?:emails?|messages?)\b",
+    r"\b(?:why\s+am\s+i\s+getting|why\s+did\s+i\s+get|why\s+you(?:'re| are)\s+receiving)\s+this\s+email\b",
+    r"\b(?:may|might)\s+earn\s+affiliate\s+commissions?\b",
+    r"\baffiliate\s+commissions?\s+from\s+ticket\s+sales\b",
 )
 # Draft-quality failure markers plus request-language cues for actionable detection.
 DRAFT_FAILURE_MARKERS = (
@@ -633,7 +661,8 @@ TRANSACTIONAL_HAM_MARKERS = (
 )
 EMAIL_ADDRESS_PATTERN = re.compile(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})")
 SUMMARY_LIST_MARKER_PATTERN = re.compile(r"^(?:[-*]|\d+[.)])\s+")
-SUMMARY_MAX_CHARS = 720
+# Keep deterministic summaries from being clipped; sentence-count controls still keep them readable.
+SUMMARY_MAX_CHARS = 4800
 DRAFT_MIN_CHARS = 20
 DRAFT_MIN_ACTIONABLE_CHARS = 60
 READ_TIME_PREFIX_PATTERN = re.compile(
@@ -1170,7 +1199,7 @@ def _source_text_limit(task=None, text_max_chars=None):
 
     task_name = str(task or "").strip().lower()
     if task_name == "summarize":
-        return 5200
+        return 9000
     if task_name == "draft_plan":
         return 2600
     if task_name == "classify":
@@ -1182,10 +1211,14 @@ def _source_text_for_user_message(email_data, task=None, text_max_chars=None):
     """Return cleaned source text for model prompts."""
     task_name = str(task or "").strip().lower()
     if task_name == "summarize":
+        profile = _summary_profile(email_data)
         summary_context = _body_for_context(
             email_data,
-            max_chars=_source_text_limit(task=task, text_max_chars=text_max_chars),
-            max_sentences=10,
+            max_chars=max(
+                _source_text_limit(task=task, text_max_chars=text_max_chars),
+                profile["context_chars"],
+            ),
+            max_sentences=profile["context_sentences"],
         )
         if summary_context:
             return summary_context
@@ -1360,10 +1393,92 @@ def _close_vision_browser_locked():
             pass
 
 
+def _vision_render_worker_loop():
+    """Run all Playwright work on a single worker thread."""
+    current_thread = threading.current_thread()
+    shutdown_done = None
+    try:
+        while True:
+            task = VISION_RENDER_REQUEST_QUEUE.get()
+            if task.get("action") == "shutdown":
+                shutdown_done = task.get("done")
+                break
+
+            try:
+                task["result"] = task["callable"](*task.get("args", ()), **task.get("kwargs", {}))
+            except Exception as exc:
+                task["error"] = exc
+            finally:
+                done = task.get("done")
+                if done is not None:
+                    done.set()
+    finally:
+        with VISION_BROWSER_STATE_LOCK:
+            _close_vision_browser_locked()
+        if shutdown_done is not None:
+            shutdown_done.set()
+        with VISION_RENDER_WORKER_LOCK:
+            if VISION_RENDER_WORKER_STATE.get("thread") is current_thread:
+                VISION_RENDER_WORKER_STATE["thread"] = None
+
+
+def _ensure_vision_render_worker():
+    """Return the worker thread that owns all Playwright state."""
+    with VISION_RENDER_WORKER_LOCK:
+        worker = VISION_RENDER_WORKER_STATE.get("thread")
+        if worker is not None and worker.is_alive():
+            return worker
+
+        worker = threading.Thread(
+            target=_vision_render_worker_loop,
+            name="vision-render-worker",
+            daemon=True,
+        )
+        VISION_RENDER_WORKER_STATE["thread"] = worker
+        worker.start()
+        return worker
+
+
+def _run_vision_render_task(func, *args, timeout_seconds=None, **kwargs):
+    """Run a Playwright task on the dedicated render worker and wait for the result."""
+    _ensure_vision_render_worker()
+    done = threading.Event()
+    task = {
+        "action": "call",
+        "callable": func,
+        "args": args,
+        "kwargs": kwargs,
+        "done": done,
+        "result": None,
+        "error": None,
+    }
+    VISION_RENDER_REQUEST_QUEUE.put(task)
+    if timeout_seconds is None or timeout_seconds <= 0:
+        completed = done.wait()
+    else:
+        completed = done.wait(timeout_seconds)
+    if not completed:
+        raise TimeoutError("Timed out waiting for the vision render worker.")
+    if task.get("error") is not None:
+        raise task["error"]
+    return task.get("result")
+
+
 def _shutdown_vision_browser():
-    """Best-effort process shutdown hook for the persistent screenshot browser."""
-    with VISION_BROWSER_STATE_LOCK:
-        _close_vision_browser_locked()
+    """Best-effort process shutdown hook for the persistent screenshot worker/browser."""
+    with VISION_RENDER_WORKER_LOCK:
+        worker = VISION_RENDER_WORKER_STATE.get("thread")
+        if worker is None or not worker.is_alive():
+            return
+        done = threading.Event()
+        VISION_RENDER_REQUEST_QUEUE.put(
+            {
+                "action": "shutdown",
+                "done": done,
+            }
+        )
+    done.wait(timeout=3.0)
+    worker.join(timeout=1.0)
 
 
 atexit.register(_shutdown_vision_browser)
@@ -1394,6 +1509,67 @@ def _get_or_launch_vision_browser():
                 launch_errors.append(f"{option or {'default': True}}:{exc}")
         _close_vision_browser_locked()
         return None, launch_errors
+
+
+def _render_html_email_pages_worker(
+    document_html,
+    *,
+    timeout_ms,
+    viewport_width,
+    viewport_height,
+    wait_ms,
+    max_pages,
+):
+    """Render HTML screenshots while staying on the worker thread that owns Playwright."""
+    launch_errors = []
+    try:
+        browser, launch_errors = _get_or_launch_vision_browser()
+        if browser is None:
+            return {
+                "rendered_pages": [],
+                "launch_errors": launch_errors,
+                "launch_failed": True,
+                "error": None,
+            }
+
+        context = None
+        try:
+            context = browser.new_context(
+                viewport={"width": viewport_width, "height": viewport_height}
+            )
+            page = context.new_page()
+            page.set_content(
+                document_html,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            rendered_pages = _capture_html_email_pages(
+                page,
+                viewport_width=viewport_width,
+                segment_height=viewport_height,
+                max_pages=max_pages,
+                wait_ms=wait_ms,
+            )
+            return {
+                "rendered_pages": rendered_pages,
+                "launch_errors": launch_errors,
+                "launch_failed": False,
+                "error": None,
+            }
+        finally:
+            if context is not None:
+                context.close()
+    except Exception as exc:
+        with VISION_BROWSER_STATE_LOCK:
+            _close_vision_browser_locked()
+        return {
+            "rendered_pages": [],
+            "launch_errors": launch_errors,
+            "launch_failed": False,
+            "error": str(exc),
+        }
 
 
 def _encode_png_bytes(image_bytes):
@@ -1461,62 +1637,25 @@ def _render_html_email_pages(email_data, email_id=None):
     viewport_height = _vision_render_page_height()
     wait_ms = _vision_browser_wait_ms()
     max_pages = _vision_render_max_pages()
+    worker_timeout_seconds = max(
+        15.0,
+        _vision_browser_timeout_seconds() + 5.0,
+    )
 
     try:
-        with VISION_BROWSER_RENDER_LOCK:
-            # Visual rendering is one of the pricier paths in the app, so we reuse a
-            # single browser and serialize access instead of spinning up a fresh one
-            # for every email that wants a screenshot-based summary.
-            browser, launch_errors = _get_or_launch_vision_browser()
-            if browser is None:
-                _log_action(
-                    task="vision",
-                    status="fallback",
-                    email_id=email_id,
-                    detail="visual_render_browser_launch_failed",
-                )
-                if launch_errors:
-                    _log_action(
-                        task="vision",
-                        status="error",
-                        email_id=email_id,
-                        detail=" | ".join(launch_errors[:3]),
-                    )
-                _log_performance(
-                    "playwright_render",
-                    int((time.perf_counter() - started_at) * 1000),
-                    email_id=email_id,
-                    rendered_pages=0,
-                    launch_failed=1,
-                )
-                return []
-
-            context = None
-            try:
-                context = browser.new_context(
-                    viewport={"width": viewport_width, "height": viewport_height}
-                )
-                page = context.new_page()
-                page.set_content(
-                    document_html,
-                    wait_until="domcontentloaded",
-                    timeout=timeout_ms,
-                )
-                if wait_ms:
-                    page.wait_for_timeout(wait_ms)
-                rendered_pages = _capture_html_email_pages(
-                    page,
-                    viewport_width=viewport_width,
-                    segment_height=viewport_height,
-                    max_pages=max_pages,
-                    wait_ms=wait_ms,
-                )
-            finally:
-                if context is not None:
-                    context.close()
-    except (PlaywrightTimeoutError, PlaywrightError, OSError) as exc:
-        with VISION_BROWSER_STATE_LOCK:
-            _close_vision_browser_locked()
+        # Keep browser startup amortized, but route every Playwright call through
+        # one dedicated worker thread so sync Playwright objects never cross threads.
+        render_result = _run_vision_render_task(
+            _render_html_email_pages_worker,
+            document_html,
+            timeout_seconds=worker_timeout_seconds,
+            timeout_ms=timeout_ms,
+            viewport_width=viewport_width,
+            viewport_height=viewport_height,
+            wait_ms=wait_ms,
+            max_pages=max_pages,
+        )
+    except (PlaywrightTimeoutError, PlaywrightError, OSError, TimeoutError) as exc:
         _log_action(
             task="vision",
             status="fallback",
@@ -1531,6 +1670,48 @@ def _render_html_email_pages(email_data, email_id=None):
             failed=1,
         )
         return []
+
+    launch_errors = list(render_result.get("launch_errors") or [])
+    if render_result.get("launch_failed"):
+        _log_action(
+            task="vision",
+            status="fallback",
+            email_id=email_id,
+            detail="visual_render_browser_launch_failed",
+        )
+        if launch_errors:
+            _log_action(
+                task="vision",
+                status="error",
+                email_id=email_id,
+                detail=" | ".join(launch_errors[:3]),
+            )
+        _log_performance(
+            "playwright_render",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            rendered_pages=0,
+            launch_failed=1,
+        )
+        return []
+
+    if render_result.get("error"):
+        _log_action(
+            task="vision",
+            status="fallback",
+            email_id=email_id,
+            detail=f"visual_render_failed: {render_result['error']}",
+        )
+        _log_performance(
+            "playwright_render",
+            int((time.perf_counter() - started_at) * 1000),
+            email_id=email_id,
+            rendered_pages=0,
+            failed=1,
+        )
+        return []
+
+    rendered_pages = list(render_result.get("rendered_pages") or [])
 
     if rendered_pages:
         _log_action(
@@ -1931,6 +2112,75 @@ def _looks_utility_sentence(text):
         r"\b[a-z]{2}\s+\d{5}(?:-\d{4})?\b",
         normalized,
     ):
+        return True
+    return False
+
+
+def _footer_marker_hit_count(text):
+    """Return how many strong footer/utility markers appear in the text."""
+    normalized = _compact_text(text).lower()
+    if not normalized:
+        return 0
+    patterns = (
+        r"\bmanage\s+(?:email\s+)?preferences\b",
+        r"\bunsubscribe\b",
+        r"\bprivacy\s+(?:policy|notice)\b",
+        r"\bterms\s+of\s+(?:service|use)\b",
+        r"\bview\s+(?:in|online)\b",
+        r"\bopen\s+in\s+browser\b",
+        r"\byou\s+are\s+receiving\s+this\s+email\b",
+        r"\bthis\s+email\s+was\s+sent\s+to\b",
+        r"\bedit\s+(?:your|the\s+recipient'?s)\s+profile\b",
+        r"\bupdate\s+(?:your|the\s+recipient'?s)\s+profile\b",
+        r"\b(?:manage|update)\s+(?:your|the\s+recipient'?s)\s+(?:email\s+)?(?:settings|notifications?|subscriptions?|alerts?)\b",
+        r"\bnotification\s+settings\b",
+        r"\bemail\s+settings\b",
+        r"\bstop\s+receiving\s+(?:these|this)\s+(?:emails?|messages?)\b",
+        r"\b(?:why\s+am\s+i\s+getting|why\s+did\s+i\s+get|why\s+you(?:'re| are)\s+receiving)\s+this\s+email\b",
+        r"\b(?:may|might)\s+earn\s+affiliate\s+commissions?\b",
+        r"\baffiliate\s+commissions?\s+from\s+ticket\s+sales\b",
+    )
+    return sum(
+        1 for pattern in patterns if re.search(pattern, normalized, flags=re.IGNORECASE)
+    )
+
+
+def _looks_irrelevant_footer_text(text):
+    """Return True when text looks like footer/legal boilerplate instead of email content."""
+    normalized = _compact_text(text)
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    marker_hits = _footer_marker_hit_count(normalized)
+    if _looks_footer_noise_fragment(normalized):
+        return True
+    if marker_hits >= 2:
+        return True
+    if marker_hits >= 1 and _looks_utility_sentence(normalized):
+        return True
+    if marker_hits >= 1 and len(_content_tokens(normalized)) <= 16:
+        return True
+    if "affiliate" in lowered and "ticket sales" in lowered:
+        return True
+    return False
+
+
+def _email_has_non_footer_content(email_data):
+    """Return True when the email contains substantive content beyond footer boilerplate."""
+    cleaned = _clean_body_for_prompt(email_data, max_chars=2000)
+    if not cleaned:
+        return False
+    fragments = []
+    for part in cleaned.split("\n"):
+        fragments.extend(re.split(r"(?<=[.!?])\s+", part))
+    for fragment in fragments:
+        normalized = _compact_text(fragment).strip(" -:")
+        if not normalized:
+            continue
+        if len(_content_tokens(normalized)) < 5:
+            continue
+        if _looks_irrelevant_footer_text(normalized):
+            continue
         return True
     return False
 
@@ -2388,6 +2638,10 @@ def _clean_body_for_prompt(body, max_chars=8000):
         if not normalized_line:
             # Drop lines that turn empty after noise stripping.
             continue
+        substantive_chars = sum(len(item) for item in cleaned_lines if item)
+        if _looks_irrelevant_footer_text(normalized_line) and substantive_chars >= 60:
+            # Once the real message has started, treat strong footer/legal copy as the end.
+            break
         lowered = normalized_line.lower()
         if _looks_credit_or_byline_line(normalized_line):
             continue
@@ -2458,6 +2712,7 @@ def _extract_key_sentences(body_text, max_sentences=8):
     cleaned_body = _clean_body_for_prompt(body_text or "", max_chars=5000)
     if not cleaned_body:
         return []
+    has_non_footer_content = _email_has_non_footer_content(email_context) if email_context else False
 
     flattened = _compact_text(cleaned_body)
     if not flattened:
@@ -2486,6 +2741,8 @@ def _extract_key_sentences(body_text, max_sentences=8):
             continue
         if _looks_utility_sentence(sentence):
             continue
+        if has_non_footer_content and _looks_irrelevant_footer_text(sentence):
+            continue
         lowered = sentence.lower()
         if lowered.startswith(("from:", "to:", "cc:", "bcc:", "sent:", "date:", "subject:")):
             # Skip copied header metadata that is not really body content.
@@ -2507,41 +2764,41 @@ def _summary_profile(email_data):
     """Return summary length settings based on email body size."""
     body = _clean_body_for_prompt(email_data, max_chars=20000)
     body_length = len(body)
-    if body_length >= 4000:
+    if body_length >= 5500:
+        profile = {
+            "char_limit": 4800,
+            "output_sentences": 10,
+            "context_sentences": 40,
+            "context_chars": 9000,
+            "prompt_target": "up to 10 sentences when the email needs it",
+            "num_predict": 720,
+        }
+    elif body_length >= 2600:
+        profile = {
+            "char_limit": 3200,
+            "output_sentences": 8,
+            "context_sentences": 30,
+            "context_chars": 7000,
+            "prompt_target": "up to 8 sentences when the email needs it",
+            "num_predict": 520,
+        }
+    elif body_length >= 1200:
         profile = {
             "char_limit": 2200,
-            "output_sentences": 8,
-            "context_sentences": 32,
-            "context_chars": 3200,
-            "prompt_target": "up to 8 sentences when the email needs it",
-            "num_predict": 320,
-        }
-    elif body_length >= 1800:
-        profile = {
-            "char_limit": 1700,
             "output_sentences": 6,
-            "context_sentences": 26,
-            "context_chars": 2800,
+            "context_sentences": 22,
+            "context_chars": 5200,
             "prompt_target": "up to 6 sentences when the email needs it",
-            "num_predict": 240,
-        }
-    elif body_length >= 900:
-        profile = {
-            "char_limit": 1200,
-            "output_sentences": 5,
-            "context_sentences": 18,
-            "context_chars": 2200,
-            "prompt_target": "up to 5 sentences when the email needs it",
-            "num_predict": 180,
+            "num_predict": 360,
         }
     else:
         profile = {
-            "char_limit": 750,
-            "output_sentences": 3,
-            "context_sentences": 12,
-            "context_chars": 1600,
-            "prompt_target": "up to 3 sentences when the email needs it",
-            "num_predict": 120,
+            "char_limit": 1400,
+            "output_sentences": 4,
+            "context_sentences": 16,
+            "context_chars": 3200,
+            "prompt_target": "up to 4 sentences when the email needs it",
+            "num_predict": 220,
         }
     return profile
 
@@ -2550,20 +2807,24 @@ def _body_for_context(email_data, max_chars=8000, max_sentences=14):
     """Body for context.
     """
     # Build body for context text that is passed into model prompts.
-    effective_max_chars = max(240, min(int(max_chars or 8000), 3200))
-    effective_max_sentences = max(1, min(int(max_sentences or 14), 8))
+    effective_max_chars = max(600, min(int(max_chars or 8000), 12000))
+    effective_max_sentences = max(2, min(int(max_sentences or 14), 40))
+    cleaned_body = _clean_body_for_prompt(email_data, max_chars=effective_max_chars)
     key_sentences = _extract_key_sentences(
         email_data,
         max_sentences=effective_max_sentences,
     )
     if key_sentences:
-        title = _compact_text(email_data.get("title") or "")
-        text = " ".join(
+        title = _compact_text(email_data.get("title") or "") if isinstance(email_data, dict) else ""
+        summarized_text = " ".join(
             _compact_text(_strip_title_prefix(sentence, title)) or _compact_text(sentence)
             for sentence in key_sentences
         )
+        text = summarized_text
+        if cleaned_body and len(cleaned_body) > len(summarized_text) + 320:
+            text = cleaned_body
     else:
-        text = _clean_body_for_prompt(email_data, max_chars=effective_max_chars)
+        text = cleaned_body
         for marker in SUMMARY_NOISE_MARKERS:
             text = re.sub(re.escape(marker), " ", text, flags=re.IGNORECASE)
     text = _strip_footer_noise_text(text)
@@ -3086,6 +3347,18 @@ def _extract_bullet_item_names(raw_body, max_items=3):
         lowered = candidate.lower()
         if not candidate or _looks_digest_scaffold_line(candidate) or _is_digest_call_to_action_line(candidate):
             continue
+        if (
+            lowered.startswith(
+                (
+                    "terms and conditions",
+                    "subject to change",
+                    "view the renewable membership",
+                    "this is a promotional email",
+                )
+            )
+            or lowered in {"help centre", "help center", "unsubscribe", "terms", "privacy", "email preferences"}
+        ):
+            continue
         if re.match(r"^(?:see|shop|learn|read|explore)\b", lowered) and len(_text_tokens(candidate)) <= 4:
             continue
         if any(marker in lowered for marker in ("free shipping", "lifetime warranty", "read now", "save now")):
@@ -3275,6 +3548,12 @@ def _clean_offer_phrase(offer_text):
     candidate = re.sub(r"\s+\d+\s*$", "", candidate)
     candidate = re.sub(r"^(?:save|get|enjoy)\s+", "", candidate, flags=re.IGNORECASE)
     candidate = re.sub(r"\bfree\s+for\s+(\d+)\s+weeks?\b", lambda match: f"{match.group(1)}-week free trial", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(
+        r"\byour next ((?:\d+\s+)?orders?)\b",
+        r"the next \1",
+        candidate,
+        flags=re.IGNORECASE,
+    )
     candidate = candidate.rstrip(" -:;,.>")
     if candidate.lower() in {"free shipping", "lifetime warranty"}:
         candidate = candidate.lower()
@@ -3331,7 +3610,11 @@ def _extract_offer_phrases(raw_text, max_items=4):
         ),
         (r"\b((?:\$0|\$\d+(?:\.\d{2})?)\s+Delivery Fee(?:\s+on\s+eligible\s+orders)?)\b", None),
         (r"\b(\d+%\s+Uber One credits on eligible rides)\b", None),
-        (r"\b(?:get|enjoy)\s+((?:up to\s+)?\d+%\s+off(?:\s+your)?\s+next\s+\d+\s+orders?(?:\s+of\s+\$\d+\s+or\s+more)?)\b", None),
+        (
+            r"\b(?:get|enjoy|use)\s+((?:up to\s+)?\d+%\s+off(?:\s+your)?\s+next\s+(?:\d+\s+)?orders?"
+            r"(?:\s+of\s+\$\d+(?:\+|\s+or\s+more)?)?)\b",
+            None,
+        ),
         (r"\b(all for\s+\$\d+(?:\.\d{2})?\s+off)\b", None),
         (r"\b(\$\d+(?:\.\d{2})?\s+off)\b", None),
         (r"\b(free shipping)\b", None),
@@ -4491,6 +4774,7 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
     """Normalize and ground model summary text against source content."""
     # Keep only concise sentences that the source actually supports.
     profile = _summary_profile(email_data)
+    has_non_footer_content = _email_has_non_footer_content(email_data)
     parts = _summary_candidate_fragments(summary_text, structured=structured)
     if not parts:
         return None
@@ -4521,6 +4805,8 @@ def _sanitize_model_summary(summary_text, email_data, structured=False):
             continue
         lowered = cleaned.lower()
         if any(marker in lowered for marker in SUMMARY_HALLUCINATION_MARKERS):
+            continue
+        if has_non_footer_content and _looks_irrelevant_footer_text(cleaned):
             continue
         if _summary_uses_subject_content(cleaned, email_data):
             continue
@@ -4675,6 +4961,7 @@ def _usable_summary_candidate(summary_text, email_data):
     summary = _finalize_summary_text(summary_text, email_data)
     if not summary:
         return None
+    has_non_footer_content = _email_has_non_footer_content(email_data)
     digest_like_summary = bool(
         re.match(
             r"^(?:a|an)\s+(?:newsletter|news digest|question digest|article alert|promotional update|job alert|activity update|reminder)\s+from\b",
@@ -4688,6 +4975,8 @@ def _usable_summary_candidate(summary_text, email_data):
         )
     )
     if _looks_summary_failure(summary):
+        return None
+    if has_non_footer_content and _looks_irrelevant_footer_text(summary):
         return None
     if _looks_summary_call_to_action(summary, email_data):
         return None
@@ -5107,12 +5396,18 @@ def _select_fallback_summary_sentences(email_data, max_sentences=3):
         return []
     newsletter_like = _looks_bulk_or_newsletter(email_data)
     actionable = _looks_actionable(email_data)
+    has_non_footer_content = _email_has_non_footer_content(email_data)
 
     candidates = []
     overview = None
     for position, sentence in enumerate(key_sentences):
         rewritten = _rewrite_fallback_summary_sentence(sentence, email_data)
         if not rewritten or _is_noise_fragment(rewritten):
+            continue
+        if has_non_footer_content and (
+            _looks_irrelevant_footer_text(sentence)
+            or _looks_irrelevant_footer_text(rewritten)
+        ):
             continue
         score = _summary_sentence_score(sentence, position)
         candidates.append((score, position, rewritten))
@@ -5396,6 +5691,8 @@ def _rewrite_summary_for_second_person(summary_text):
             stripped = SUMMARY_LIST_MARKER_PATTERN.sub("", stripped, count=1)
         for pattern, replacement in replacements:
             stripped = re.sub(pattern, replacement, stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\bthe\s+the\s+recipient's\b", "the recipient's", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\bthe\s+the\s+recipient\b", "the recipient", stripped, flags=re.IGNORECASE)
         stripped = _normalized_header_text(stripped)
         if not stripped:
             continue
@@ -6551,12 +6848,19 @@ def _normalize_classification(raw_value):
     return normalized
 
 
-def _call_ollama(task, messages, email_id=None, temperature=0.1, num_predict=320):
+def _call_ollama(
+    task,
+    messages,
+    email_id=None,
+    temperature=0.1,
+    num_predict=320,
+    model_task=None,
+):
     """Call Ollama chat API and return response content or None on failure."""
     # Send one non-streaming chat request to Ollama and return the model text.
     started_at = time.perf_counter()
     api_urls = _api_url_candidates()
-    model_selection = _resolve_model_selection(task=task, api_urls=api_urls)
+    model_selection = _resolve_model_selection(task=model_task or task, api_urls=api_urls)
     requested_model_name = model_selection["requested_model"]
     model_name = model_selection["resolved_model"]
     request_timeout = _timeout_seconds(task=task)
@@ -6778,6 +7082,7 @@ def classify_email(email_data, email_id=None):
 def _postprocess_model_summary(summary_text, email_data, email_id=None, structured=False):
     """Sanitize and finalize model output before returning it to the UI."""
     profile = _summary_profile(email_data)
+    has_non_footer_content = _email_has_non_footer_content(email_data)
     prepared = _prepare_model_summary(summary_text, profile["char_limit"])
     if not prepared:
         return None
@@ -6803,6 +7108,8 @@ def _postprocess_model_summary(summary_text, email_data, email_id=None, structur
     if not finalized:
         return None
     if _looks_summary_failure(finalized):
+        return None
+    if has_non_footer_content and _looks_irrelevant_footer_text(finalized):
         return None
     if _looks_generic_posture_summary(finalized):
         return None
@@ -6892,6 +7199,14 @@ def summarize_email(email_data, email_id=None):
         )
         return fallback_summary
     visual_decision = _summary_visual_decision(email_data)
+    bulk_summary_guidance = ""
+    if _looks_bulk_or_newsletter(email_data):
+        bulk_summary_guidance = (
+            " For newsletter or promotional emails, lead with the main story, offer, or concrete deal details "
+            "such as the discount, free trial, featured item, or expiry when present. "
+            "Do not lead with legal disclaimers, terms and conditions, membership fine print, button text, "
+            "or support/unsubscribe copy."
+        )
 
     system_prompt = (
         "You summarize emails for the mailbox owner. "
@@ -6899,6 +7214,10 @@ def summarize_email(email_data, email_id=None):
         "Use the email content as the source of truth and use the sender and subject metadata only as support. "
         "Capture the main topic, important details, and any requested action or deadline when present. "
         "If the email has multiple sections or updates, cover the main ones. "
+        "Ignore footer boilerplate such as unsubscribe links, manage-preferences text, browser-view links, "
+        "profile-management instructions, affiliate disclosures, and legal/support copy unless that is the actual purpose of the email. "
+        "Prefer a complete grounded summary over an incomplete one that drops major details. "
+        + bulk_summary_guidance
         + f"Aim for {profile['prompt_target']}. "
         + "Return plain text only."
     )
@@ -6906,6 +7225,9 @@ def summarize_email(email_data, email_id=None):
         "\n\n"
         "Write the summary that best fits this email. "
         "Keep it grounded in the provided email content, concise, and readable. "
+        "Do not summarize footer or subscription-management text unless it is the real subject of the email. "
+        "For promotional emails, summarize the primary offer or deal rather than legal disclaimers, button text, "
+        "or subscription fine print. "
         "Mention any action item or deadline if there is one."
     )
     response_text = _call_ollama(
@@ -6959,6 +7281,7 @@ def summarize_email(email_data, email_id=None):
                 "\n\n"
                 "Write the summary that best fits this email. "
                 "Keep it grounded in the provided email content, concise, and readable. "
+                "Do not summarize footer or subscription-management text unless it is the real subject of the email. "
                 "Mention any action item or deadline if there is one."
             )
             response_text = _call_ollama(
@@ -7684,6 +8007,7 @@ def _rewrite_generic_draft(
         email_id=email_id,
         temperature=0.25,
         num_predict=_num_predict_for_task("draft_rewrite", 260),
+        model_task=_draft_model_task(email_data),
     )
     if not response_text:
         return None
@@ -7694,6 +8018,11 @@ def _rewrite_generic_draft(
     if _looks_generic_draft(cleaned, email_data, reply_plan=plan):
         return None
     return cleaned
+
+
+def _draft_model_task(email_data):
+    """Return the model tier to use for draft generation."""
+    return "draft" if _html_requires_visual_context(email_data) else "classify"
 
 
 def _drafts_too_similar(original_text, revised_text):
@@ -8079,6 +8408,7 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         email_id=email_id,
         temperature=0.2,
         num_predict=_num_predict_for_task("draft", 280),
+        model_task=_draft_model_task(email_data),
     )
     if not response_text:
         fallback_draft = _draft_reply_fallback(email_data, reply_plan=reply_plan)
@@ -8176,6 +8506,7 @@ def revise_reply(
         email_id=email_id,
         temperature=0.1,
         num_predict=_num_predict_for_task("revise", 280),
+        model_task=_draft_model_task(email_data),
     )
     if not response_text:
         # Prefer a deterministic local rewrite over doing nothing when the model is down.
@@ -8301,7 +8632,10 @@ def summary_looks_unusable(email_data):
     for phrase in bad_phrases:
         if phrase in summary:
             return True
-    if _looks_utility_sentence(raw_summary):
+    has_non_footer_content = _email_has_non_footer_content(email_data)
+    if has_non_footer_content and _looks_irrelevant_footer_text(raw_summary):
+        return True
+    if has_non_footer_content and _looks_utility_sentence(raw_summary):
         return True
     return _looks_summary_failure(raw_summary)
 

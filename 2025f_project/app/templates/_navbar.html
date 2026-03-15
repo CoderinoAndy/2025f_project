@@ -38,6 +38,7 @@
     {% endif %}
   </div>
   <div class="topbar-right">
+    {% if request.endpoint != "main.about" %}
     <form
       class="topbar-name-form"
       method="post"
@@ -60,6 +61,7 @@
       >
       <span class="topbar-name-status" data-display-name-status aria-live="polite"></span>
     </form>
+    {% endif %}
     <a class="topbar-about-link" href="{{ url_for('main.about') }}" aria-label="About">
       <i class="bi bi-info-circle-fill" aria-hidden="true"></i>
     </a>

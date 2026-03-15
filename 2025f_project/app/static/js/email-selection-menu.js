@@ -83,7 +83,11 @@
 
   const submitBulkAction = async () => { // Post bulk action without leaving the current page.
     const method = (form.getAttribute("method") || "post").toUpperCase();
-    const response = await fetch(form.action, {
+    const actionUrl = form.getAttribute("action") || (typeof form.action === "string" ? form.action : "");
+    if (!actionUrl) {
+      return false;
+    }
+    const response = await fetch(actionUrl, {
       method,
       body: new FormData(form),
       headers: {

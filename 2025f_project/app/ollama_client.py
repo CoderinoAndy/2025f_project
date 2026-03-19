@@ -120,8 +120,8 @@ TASK_NUM_CTX_MAP = {
     "draft": 2048,             # ~600 token input + 320 output
     "draft_rewrite": 2048,
     "revise": 2048,            # ~700 token input + 320 output
-    "summarize": 4096,         # up to ~2500 token input + 720 output
-    "summarize_rewrite": 4096,
+    "summarize": 3072,         # up to ~1750 token input + 580 output (profiles reduced)
+    "summarize_rewrite": 3072,
 }
 # Lower top_k speeds up sampling for tasks that require constrained structured output (JSON).
 TASK_TOP_K_MAP = {
@@ -1234,7 +1234,7 @@ def _source_text_limit(task=None, text_max_chars=None):
 
     task_name = str(task or "").strip().lower()
     if task_name == "summarize":
-        return 9000
+        return 7000
     if task_name == "draft_plan":
         return 2600
     if task_name == "classify":
@@ -2803,37 +2803,37 @@ def _summary_profile(email_data):
         profile = {
             "char_limit": 4800,
             "output_sentences": 10,
-            "context_sentences": 40,
-            "context_chars": 9000,
+            "context_sentences": 32,
+            "context_chars": 7000,
             "prompt_target": "up to 10 sentences when the email needs it",
-            "num_predict": 720,
+            "num_predict": 580,
         }
     elif body_length >= 2600:
         profile = {
             "char_limit": 3200,
             "output_sentences": 8,
-            "context_sentences": 30,
-            "context_chars": 7000,
+            "context_sentences": 24,
+            "context_chars": 5500,
             "prompt_target": "up to 8 sentences when the email needs it",
-            "num_predict": 520,
+            "num_predict": 420,
         }
     elif body_length >= 1200:
         profile = {
             "char_limit": 2200,
             "output_sentences": 6,
-            "context_sentences": 22,
-            "context_chars": 5200,
+            "context_sentences": 18,
+            "context_chars": 4000,
             "prompt_target": "up to 6 sentences when the email needs it",
-            "num_predict": 360,
+            "num_predict": 300,
         }
     else:
         profile = {
             "char_limit": 1400,
             "output_sentences": 4,
-            "context_sentences": 16,
-            "context_chars": 3200,
+            "context_sentences": 12,
+            "context_chars": 2400,
             "prompt_target": "up to 4 sentences when the email needs it",
-            "num_predict": 220,
+            "num_predict": 180,
         }
     return profile
 
@@ -7074,24 +7074,17 @@ def classify_email(email_data, email_id=None):
     # Ask for strict JSON, then combine with deterministic heuristics for stability.
     system_prompt = (
         "You classify inbox emails for triage. "
-        "Return valid JSON only with exactly these keys: category, needs_response, priority, confidence. "
-        "category rules: "
-        "'urgent' = requires prompt action or response (deadline within 48 h, critical issue, personal sender explicitly requesting action); "
-        "'informational' = receipts, order confirmations, account notices, newsletters, digests, automated service updates, shipping notifications; "
-        "'junk' = ads, coupons, sales blasts, marketing promotions, scam/phishing, unsolicited lead-gen pitches, cold outreach. "
-        "needs_response: true only when a real person is explicitly asking a question or requesting a specific reply; "
-        "false for automated mail, newsletters, marketing, and one-way informational notices. "
-        "priority: 1 = highest (time-sensitive, explicit deadline ≤48 h, or critical issue); "
-        "2 = moderate (action needed but not time-critical); "
-        "3 = low (FYI, newsletters, junk, or no action required). "
-        "confidence: float 0–1 reflecting certainty; use lower values when signals conflict. "
-        "Use the email body as primary evidence, sender second, subject third. "
-        "Do not classify as urgent unless there is a clear, explicit time-pressure or critical issue stated in the body."
+        "Return valid JSON with keys: category, needs_response, priority, confidence. "
+        "category: urgent (action needed, deadline ≤48h), informational (receipts, notices, newsletters), junk (ads, spam, cold pitches). "
+        "needs_response: true only if a real person explicitly asks for a reply. "
+        "priority: 1=urgent/time-sensitive, 2=moderate, 3=low/FYI. "
+        "confidence: 0–1. "
+        "Body is primary evidence; sender and subject are secondary. "
+        "Do not classify as urgent without explicit time-pressure in the body."
     )
     user_message["content"] += (
         "\n\n"
-        f"{_sender_hint_block(normalized_email)}\n"
-        f"{_junk_signal_block(normalized_email)}"
+        f"{_compact_classification_signals(normalized_email)}\n"
         "Return JSON only."
     )
     response_text = _call_ollama(

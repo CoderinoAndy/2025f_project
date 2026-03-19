@@ -542,7 +542,7 @@ body.mailbox-list-page .list-shell{
 .mailbox-pagination{
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   flex-wrap: wrap;
   padding: 14px 16px 4px;
@@ -558,6 +558,13 @@ body.mailbox-list-page .list-shell{
 .mailbox-page-indicator{
   color: var(--muted);
   font-size: 0.92rem;
+}
+
+.mailbox-pagination-summary{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .list-select-toggle-btn{
@@ -582,8 +589,8 @@ body.mailbox-list-page .list-shell{
 
 .compose-fab{ /* Floating compose button placement and appearance. */
   position: fixed;
-  right: 18px;
-  bottom: 18px;
+  right: 28px;
+  bottom: 28px;
   z-index: 1200;
   display: inline-flex;
   align-items: center;
@@ -723,8 +730,8 @@ body.mailbox-list-page .list-shell{
     padding: 4px 10px;
   }
   .compose-fab{
-    right: 12px;
-    bottom: 12px;
+    right: 20px;
+    bottom: 20px;
     padding: 12px 18px;
     border-radius: 22px;
     font-size: 0.98rem;

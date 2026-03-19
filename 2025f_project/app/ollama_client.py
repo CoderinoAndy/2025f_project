@@ -110,6 +110,24 @@ VISUAL_SUMMARY_MIN_HTML_CHARS_DEFAULT = 180
 VISUAL_SUMMARY_COMPLEXITY_THRESHOLD_DEFAULT = 2
 VISUAL_SUMMARY_TEXT_OVERLAP_THRESHOLD_DEFAULT = 0.72
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
+# Per-task context window limits sent to Ollama.
+# Bounding num_ctx to match actual input size prevents models from allocating large KV caches,
+# which is the primary source of latency on local inference.  Values are padded generously
+# so truncation never occurs even with the largest allowed inputs for each task.
+TASK_NUM_CTX_MAP = {
+    "classify": 1024,          # ~300 token input + 96 output → 1024 is comfortably safe
+    "draft_plan": 2048,        # ~650 token input + 180 output
+    "draft": 2048,             # ~600 token input + 320 output
+    "draft_rewrite": 2048,
+    "revise": 2048,            # ~700 token input + 320 output
+    "summarize": 4096,         # up to ~2500 token input + 720 output
+    "summarize_rewrite": 4096,
+}
+# Lower top_k speeds up sampling for tasks that require constrained structured output (JSON).
+TASK_TOP_K_MAP = {
+    "classify": 20,
+    "draft_plan": 20,
+}
 LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() or "you@example.com"
 MAILBOX_OWNER_NAME_ENV = "LOCAL_USER_NAME"
 # Sender/domain heuristics used to separate person-to-person mail from automated mail.
@@ -1173,12 +1191,29 @@ def _vision_render_cache_key(email_data):
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _vision_metadata_block(email_data):
-    """Return compact sender/subject metadata for multimodal prompts."""
+def _vision_metadata_block(email_data, task=None):
+    """Return compact sender/subject metadata for multimodal prompts.
+
+    For classification, only From and Subject are included to minimize prompt
+    tokens—everything else is covered by the signal blocks appended later.
+    For summarization, To is added (helps understand who the email targets).
+    Draft tasks get the full block for reply context.
+    """
+    sender = _normalized_header_text(email_data.get('sender') or '(unknown sender)')
+    subject = _normalized_header_text(email_data.get('title') or '(No subject)')
+    task_name = str(task or "").strip().lower()
+    if task_name == "classify":
+        return f"From: {sender}\nSubject: {subject}"
+    if task_name in ("summarize", "summarize_rewrite"):
+        return (
+            f"From: {sender}\n"
+            f"Subject: {subject}\n"
+            f"To: {_normalized_header_text(email_data.get('recipients') or '(unknown)')}"
+        )
     return (
         "Sender and subject metadata:\n"
-        f"- From: {_normalized_header_text(email_data.get('sender') or '(unknown sender)')}\n"
-        f"- Subject: {_normalized_header_text(email_data.get('title') or '(No subject)')}\n"
+        f"- From: {sender}\n"
+        f"- Subject: {subject}\n"
         f"- To: {_normalized_header_text(email_data.get('recipients') or '(unknown)')}\n"
         f"- Cc: {_normalized_header_text(email_data.get('cc') or '(none)')}\n"
         f"- Mailbox type: {_compact_text(email_data.get('type') or '(unknown)')}\n"
@@ -1776,7 +1811,7 @@ def _vision_user_message(
         return None
     content = (
         f"{instruction_text}\n\n"
-        f"{_vision_metadata_block(email_data)}\n\n"
+        f"{_vision_metadata_block(email_data, task=task)}\n\n"
         "Source email text:\n"
         "---BEGIN EMAIL TEXT---\n"
         f"{source_text}\n"
@@ -6590,6 +6625,32 @@ def _junk_signal_block(email_data):
     )
 
 
+def _compact_classification_signals(email_data):
+    """Return a single compact signal line for classification prompts.
+
+    Merges the sender hint and junk signal data into a minimal format,
+    replacing ~500 chars of verbose blocks with ~120 chars.
+    """
+    assessment = _junk_signal_assessment(email_data)
+    sender_info = _sender_parts(email_data.get("sender"))
+    parts = []
+    if _sender_looks_automated(sender_info):
+        parts.append("automated_sender")
+    if _sender_uses_personal_domain(sender_info):
+        parts.append("personal_domain")
+    if assessment.get("bulk_signal"):
+        parts.append("bulk/newsletter")
+    if assessment.get("transactional_like"):
+        parts.append("transactional")
+    if assessment.get("commercial_promotion"):
+        parts.append("commercial_promo")
+    if assessment.get("editorial_like"):
+        parts.append("editorial")
+    score = assessment.get("score", 0)
+    signals = ", ".join(parts) if parts else "none"
+    return f"Signals: {signals} | junk_score={score}"
+
+
 def _prefer_junk_uncertain_for_commercial_promotion(junk_assessment):
     """Return True when retail-style promotion should prefer junk confirmation."""
     families = set(junk_assessment.get("families") or ())
@@ -6909,14 +6970,22 @@ def _call_ollama(
         )
         return None
 
+    task_key = model_task or task
+    ollama_options = {
+        "temperature": temperature,
+        "num_predict": num_predict,
+    }
+    num_ctx = TASK_NUM_CTX_MAP.get(task_key)
+    if num_ctx:
+        ollama_options["num_ctx"] = num_ctx
+    top_k = TASK_TOP_K_MAP.get(task_key)
+    if top_k:
+        ollama_options["top_k"] = top_k
     payload = {
         "model": model_name,
         "messages": messages,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": num_predict,
-        },
+        "options": ollama_options,
     }
     if keep_alive:
         payload["keep_alive"] = keep_alive
@@ -7006,13 +7075,18 @@ def classify_email(email_data, email_id=None):
     system_prompt = (
         "You classify inbox emails for triage. "
         "Return valid JSON only with exactly these keys: category, needs_response, priority, confidence. "
-        "category must be urgent, informational, or junk. "
-        "needs_response must be true or false. "
-        "priority must be an integer from 1 to 3. "
-        "confidence must be a float from 0 to 1. "
+        "category rules: "
+        "'urgent' = requires prompt action or response (deadline within 48 h, critical issue, personal sender explicitly requesting action); "
+        "'informational' = receipts, order confirmations, account notices, newsletters, digests, automated service updates, shipping notifications; "
+        "'junk' = ads, coupons, sales blasts, marketing promotions, scam/phishing, unsolicited lead-gen pitches, cold outreach. "
+        "needs_response: true only when a real person is explicitly asking a question or requesting a specific reply; "
+        "false for automated mail, newsletters, marketing, and one-way informational notices. "
+        "priority: 1 = highest (time-sensitive, explicit deadline ≤48 h, or critical issue); "
+        "2 = moderate (action needed but not time-critical); "
+        "3 = low (FYI, newsletters, junk, or no action required). "
+        "confidence: float 0–1 reflecting certainty; use lower values when signals conflict. "
         "Use the email body as primary evidence, sender second, subject third. "
-        "Treat ads, coupons, sales blasts, marketing promotions, scam/phishing mail, and unsolicited lead-gen pitches as junk. "
-        "Treat receipts, account notices, newsletters, and service updates as informational unless the sender clearly wants a reply."
+        "Do not classify as urgent unless there is a clear, explicit time-pressure or critical issue stated in the body."
     )
     user_message["content"] += (
         "\n\n"
@@ -7210,25 +7284,27 @@ def summarize_email(email_data, email_id=None):
 
     system_prompt = (
         "You summarize emails for the mailbox owner. "
-        "Analyze the provided email source context and write a natural plain-text summary of what the email says. "
-        "Use the email content as the source of truth and use the sender and subject metadata only as support. "
-        "Capture the main topic, important details, and any requested action or deadline when present. "
-        "If the email has multiple sections or updates, cover the main ones. "
-        "Ignore footer boilerplate such as unsubscribe links, manage-preferences text, browser-view links, "
-        "profile-management instructions, affiliate disclosures, and legal/support copy unless that is the actual purpose of the email. "
-        "Prefer a complete grounded summary over an incomplete one that drops major details. "
+        "Write a natural plain-text summary grounded strictly in the provided email content. "
+        "Use the email body as the primary source; treat sender and subject as supporting context only. "
+        "Lead with the most important information first. "
+        "If an action or reply is required, state it clearly in the opening sentence. "
+        "Capture the main topic, key facts, any explicit deadlines, and what (if anything) the recipient must do. "
+        "If the email covers multiple distinct points, briefly cover each main one. "
+        "Ignore footer boilerplate: unsubscribe links, manage-preferences text, browser-view links, "
+        "affiliate disclosures, legal copy, and support footers—unless that content is the actual purpose of the email. "
+        "Never invent facts, names, dates, or figures not present in the email. "
+        "Prefer a complete, grounded summary over a vague or incomplete one. "
         + bulk_summary_guidance
         + f"Aim for {profile['prompt_target']}. "
-        + "Return plain text only."
+        + "Return plain text only—no markdown, no bullet points, no labels."
     )
     text_user_message["content"] += (
         "\n\n"
         "Write the summary that best fits this email. "
-        "Keep it grounded in the provided email content, concise, and readable. "
-        "Do not summarize footer or subscription-management text unless it is the real subject of the email. "
-        "For promotional emails, summarize the primary offer or deal rather than legal disclaimers, button text, "
-        "or subscription fine print. "
-        "Mention any action item or deadline if there is one."
+        "Use only facts from the provided email content. "
+        "Lead with the action or key point, then add supporting details. "
+        "Omit footer boilerplate and subscription fine print. "
+        "State any deadline or required action explicitly if present."
     )
     response_text = _call_ollama(
         task="summarize",
@@ -7280,9 +7356,10 @@ def summarize_email(email_data, email_id=None):
             visual_user_message["content"] += (
                 "\n\n"
                 "Write the summary that best fits this email. "
-                "Keep it grounded in the provided email content, concise, and readable. "
-                "Do not summarize footer or subscription-management text unless it is the real subject of the email. "
-                "Mention any action item or deadline if there is one."
+                "Use only facts from the provided email content. "
+                "Lead with the action or key point, then add supporting details. "
+                "Omit footer boilerplate and subscription fine print. "
+                "State any deadline or required action explicitly if present."
             )
             response_text = _call_ollama(
                 task="summarize",
@@ -8379,25 +8456,24 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
     # Generate a complete send-ready draft; the fallback template keeps the UX working on failure.
     system_prompt = (
         "You write send-ready email replies from a structured reply plan. "
-        "Write as the mailbox owner using I/we and never as an observer or 'the user'. "
-        "Return only the email body with greeting and closing, no markdown and no subject. "
-        "Start directly with the reply itself. "
-        "Address the sender's request directly when possible and use at least one concrete plan detail in the body. "
-        "Avoid generic filler, summaries, or commentary about the draft. "
-        "If exact facts are missing, give the safest plausible next step and ask at most one focused clarifying question. "
+        "Write as the mailbox owner using I/we; never write as an observer, narrator, or 'the user'. "
+        "Return only the email body with greeting and closing—no markdown, no subject line, no meta-commentary. "
+        "Start directly with the greeting. "
+        "Address the sender's request or question directly and specifically, referencing at least one concrete detail from the reply plan. "
+        "Match the tone specified in the plan (professional, friendly, urgent, etc.). "
+        "Keep the reply concise and focused—avoid generic filler phrases like 'I hope this email finds you well' or 'Please do not hesitate to contact us'. "
+        "If a key fact is missing, give the safest plausible next step and ask at most one focused clarifying question. "
         "Do not invent the mailbox owner's name, title, or signature. "
-        "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
-        "and never use the mailbox owner's email address as a person name. "
-        "If no name is provided, use a generic closing. "
-        "Treat plain person names as names, not email addresses."
+        "If a display name is provided in context, use it exactly in the closing; otherwise use a generic closing. "
+        "Never use an email address as a person's name."
     )
     user_prompt = (
-        "Draft a complete response email from the structured reply plan below.\n"
-        "Do not reuse long phrases from the sender's email.\n\n"
+        "Draft a complete, send-ready response from the structured reply plan below.\n"
+        "Be direct and specific—avoid restating the sender's email back to them.\n\n"
         f"{_reply_guidance_block(email_data, reply_plan=reply_plan)}\n"
         f"Reply To: {to_value}\n"
         f"Reply Cc: {cc_value}\n"
-        "Keep it clear, specific, and ready to send."
+        "Write a reply that directly addresses the sender's request using the plan details above."
     )
     response_text = _call_ollama(
         task="draft",
@@ -8407,7 +8483,7 @@ def draft_reply(email_data, to_value="", cc_value="", email_id=None):
         ],
         email_id=email_id,
         temperature=0.2,
-        num_predict=_num_predict_for_task("draft", 280),
+        num_predict=_num_predict_for_task("draft", 320),
         model_task=_draft_model_task(email_data),
     )
     if not response_text:
@@ -8472,21 +8548,21 @@ def revise_reply(
     # Preserve the user's intent while improving clarity and completeness against the source context.
     system_prompt = (
         "You revise email drafts using a structured reply plan. "
-        "Write as the mailbox owner using I/we and never as an observer or 'the user'. "
-        "Return only the revised send-ready email with greeting and closing, no markdown and no subject. "
-        "Keep the current draft's intent, constraints, commitments, and questions. "
+        "Write as the mailbox owner using I/we; never write as an observer, narrator, or 'the user'. "
+        "Return only the revised send-ready email with greeting and closing—no markdown, no subject line. "
+        "Preserve the current draft's intent, stance, commitments, and any specific questions or constraints. "
         "If the current draft is a short instruction like 'nope', 'sounds good', 'thanks', or 'wrong email', "
-        "expand it into a complete reply with the same stance. "
-        "Replace weak wording with a direct answer and use at least one concrete plan detail. "
+        "expand it into a complete, polite reply that reflects that exact stance. "
+        "Replace vague or weak wording with a specific, direct answer grounded in the reply plan. "
+        "Match the tone specified in the plan. "
+        "Do not add information the user did not include or imply—only improve clarity and completeness. "
         "Do not invent the mailbox owner's name, title, or signature. "
-        "If a mailbox owner display name is provided in the context, use that exact name in any personal sign-off "
-        "and never use the mailbox owner's email address as a person name. "
-        "If no name is provided, use a generic closing. "
-        "Treat plain person names as names, not email addresses."
+        "If a display name is provided in context, use it exactly in the closing; otherwise use a generic closing. "
+        "Never use an email address as a person's name."
     )
     user_prompt = (
-        "Revise this draft response using the structured reply plan below.\n"
-        "Keep the user's intent, but replace weak or generic wording with a direct answer.\n\n"
+        "Revise this draft using the structured reply plan below.\n"
+        "Preserve the user's intent exactly. Replace vague or weak wording with specific, direct language.\n\n"
         f"{_reply_guidance_block(email_data, reply_plan=reply_plan)}\n"
         f"Reply To: {to_value}\n"
         f"Reply Cc: {cc_value}\n"
@@ -8494,8 +8570,8 @@ def revise_reply(
         "---BEGIN CURRENT DRAFT---\n"
         f"{current_draft_text}\n"
         "---END CURRENT DRAFT---\n\n"
-        "Keep intent, improve clarity, and make it complete enough to send. "
-        "When the current draft is very short, treat it as instructions for the reply rather than final wording."
+        "Output the complete revised reply. "
+        "If the draft is very short, treat it as instructions describing the desired reply stance."
     )
     response_text = _call_ollama(
         task="revise",
@@ -8505,7 +8581,7 @@ def revise_reply(
         ],
         email_id=email_id,
         temperature=0.1,
-        num_predict=_num_predict_for_task("revise", 280),
+        num_predict=_num_predict_for_task("revise", 320),
         model_task=_draft_model_task(email_data),
     )
     if not response_text:

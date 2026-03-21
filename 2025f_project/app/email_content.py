@@ -1,9 +1,14 @@
+"""Repair the messy text and HTML patterns common in real email payloads."""
+
 import quopri
 import re
 import unicodedata
 from html import unescape
 
 
+# These regexes mirror the kinds of breakage we actually see from mail
+# providers: quoted-printable fragments, mojibake, hidden characters, and HTML
+# wrappers that should not leak into the plain-text view.
 _QP_ESCAPE_PATTERN = re.compile(r"=(?:[0-9A-F]{2}|[\r\n])")
 _MARKDOWN_LINK_PATTERN = re.compile(
     r"\[[^\]]{1,160}\]\((?:https?://|mailto:|ht=\s*\r?\n?\s*tps://)[^)]+\)",
@@ -117,6 +122,15 @@ def _replace_common_email_symbols(text):
     return str(text or "").translate(_COMMON_EMAIL_CHAR_TRANSLATION)
 
 
+def _sanitize_common_email_text(text):
+    """Apply the cross-cutting cleanup shared by plain text, HTML, and drafts."""
+    cleaned = _repair_common_mojibake(str(text or "")).replace("\xa0", " ")
+    cleaned = _replace_common_email_symbols(cleaned)
+    cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)
+    cleaned = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", cleaned)
+    return cleaned
+
+
 def _repair_common_mojibake(text):
     value = str(text or "")
     if not value:
@@ -182,10 +196,7 @@ def _decode_bytes(content_bytes, charset=""):
 def _normalize_visible_text(text):
     # Most callers want this "make it readable but keep paragraphs" cleanup pass
     # after decoding HTML or MIME parts from mail providers.
-    cleaned = _repair_common_mojibake(str(text or "")).replace("\xa0", " ")
-    cleaned = _replace_common_email_symbols(cleaned)
-    cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)
-    cleaned = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", cleaned)
+    cleaned = _sanitize_common_email_text(text)
     cleaned = re.sub(r"[ \t\f\v]+", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -280,10 +291,7 @@ def repair_html_content(raw_html):
     html = str(raw_html or "")
     if not html:
         return ""
-    cleaned = _repair_common_mojibake(html)
-    cleaned = _replace_common_email_symbols(cleaned)
-    cleaned = _INVISIBLE_CHAR_PATTERN.sub(" ", cleaned)
-    cleaned = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", cleaned)
+    cleaned = _sanitize_common_email_text(html)
     return cleaned.strip()
 
 
@@ -328,10 +336,7 @@ def prepare_html_email_document(raw_html):
 
 def normalize_outgoing_text(value, *, preserve_newlines=True):
     """Normalize outgoing text into email-safe punctuation before save/send."""
-    text = _repair_common_mojibake(str(value or ""))
-    text = _replace_common_email_symbols(text)
-    text = _INVISIBLE_CHAR_PATTERN.sub(" ", text)
-    text = _UNSAFE_TEXT_CONTROL_PATTERN.sub("", text)
+    text = _sanitize_common_email_text(value)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     if preserve_newlines:
         text = re.sub(r"[ \t\f\v]+", " ", text)

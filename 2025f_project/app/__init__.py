@@ -1,9 +1,8 @@
-# Controller layer.
 from flask import Flask, g, request
 from werkzeug.exceptions import HTTPException
-from datetime import datetime
 from time import perf_counter
 from .db import init_db
+from .datetime_utils import format_known_datetime
 from .debug_logger import (
     configure_debug_logger,
     get_debug_log_path,
@@ -15,17 +14,20 @@ from markupsafe import Markup, escape
 import re
 
 
+# The app factory wires together three things: startup safety checks, request
+# logging, and a couple of template filters used across mailbox pages.
 PLAIN_TEXT_URL_RE = re.compile(
     r"(?P<url>(?:https?://|www\.)[^\s<]+|mailto:[^\s<]+|tel:[^\s<]+)",
     re.IGNORECASE,
 )
 
 
-# Build the Flask app, run startup setup, and then attach routes.
 def create_app():
-    """Create app.
-    """
+    """Create and configure the Flask application."""
     app = Flask(__name__, instance_relative_config=True)
+
+    # Startup work is front-loaded here so failures are visible immediately and
+    # the rest of the request lifecycle can assume the basics are ready.
     # Set up structured logging first so startup failures get captured.
     configure_debug_logger()
     try:
@@ -56,7 +58,6 @@ def create_app():
     @app.before_request
     def _log_request_start():
         """Capture request start timing and write a start event to the debug log."""
-        # Log this here so it is easier to trace later.
         g.request_started_at = perf_counter()
         log_event(
             action_type="http_request",
@@ -103,7 +104,6 @@ def create_app():
     @app.teardown_request
     def _log_request_exception(error):
         """Log unexpected request exceptions that were not handled by Flask HTTP errors."""
-        # Log this here so it is easier to trace later.
         if error is None or isinstance(error, HTTPException):
             return
         log_exception(
@@ -115,35 +115,14 @@ def create_app():
             path=request.path,
             endpoint=request.endpoint or "",
         )
-    
-    # Register this template filter once when the app is created.
+
+    # These filters keep rendering concerns out of the templates themselves:
+    # one handles the mixed timestamp formats in SQLite, the other safely turns
+    # plain-text URLs into clickable links.
     @app.template_filter("fmt_dt")
     def fmt_dt(value):
-        """
-        Accepts:
-        - "YYYY-MM-DD"
-        - "YYYY-MM-DD HH:MM"
-        - "YYYY-MM-DD HH:MM:SS"
-        Returns:
-        - "DD/MM/YYYY HH:MM" (24-hour time)
-        """
-        if value is None:
-            return ""
-
-        s = str(value).strip()
-        dt = None
-        # Older rows mix date-only and date-time values, so accept both.
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-            try:
-                dt = datetime.strptime(s, fmt)
-                break
-            except ValueError:
-                continue
-
-        if dt is None:
-            return s  # If parsing fails, just show the original text.
-
-        return dt.strftime("%d/%m/%Y %H:%M")
+        """Render mailbox timestamps in a single friendly display format."""
+        return format_known_datetime(value)
 
     @app.template_filter("linkify_email_text")
     def linkify_email_text(value):
@@ -182,7 +161,7 @@ def create_app():
 
     # Import routes late so the startup utilities above are ready first.
     from .routes import main
-    app.register_blueprint(main) # Hook the blueprint routes into the app.
+    app.register_blueprint(main)
     log_event(
         action_type="system",
         action="app_ready",

@@ -1,4 +1,5 @@
-# Model layer.
+"""SQLite persistence for mailbox data, settings, and local draft state."""
+
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -95,11 +96,25 @@ MAILBOX_SORT_SQL = {
     "read_first": "m.is_read DESC, m.received_at DESC, m.id DESC",
 }
 
+PROVIDER_ROW_SELECT_FIELDS = """
+id,
+body,
+summary,
+draft,
+body_html,
+provider_draft_id,
+type,
+priority,
+is_archived,
+ai_category,
+ai_needs_response,
+ai_confidence
+"""
+
 
 @contextmanager
 def db_session(db_path):
-    """Database session.
-    """
+    """Open one SQLite transaction scope and cleanly commit or roll it back."""
     # One connection per context call keeps transaction boundaries explicit.
     conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
@@ -125,9 +140,7 @@ def db_session(db_path):
 
 
 def init_db(db_path=DB_DEFAULT):
-    """Initialize database.
-    """
-    # Shared helper for this file.
+    """Create the database file when needed and apply schema upgrades."""
     schema_path = Path(__file__).resolve().parent / "sql" / "schema.sql"
     if not schema_path.exists():
         raise FileNotFoundError("schema.sql not found in app/sql/")
@@ -150,8 +163,7 @@ def init_db(db_path=DB_DEFAULT):
 
 
 def _apply_schema_migrations(conn):
-    """Apply schema migrations.
-    """
+    """Bring older databases forward without forcing a manual reset."""
     # Snapshot current schema so we can decide whether rebuild/alter is needed.
     columns = {
         row["name"]
@@ -428,9 +440,7 @@ def _row_to_dict(row):
 
 
 def _split_addresses(raw_value):
-    """Split addresses.
-    """
-    # Shared helper for this file.
+    """Split a comma/semicolon-delimited address field into unique entries."""
     if raw_value is None:
         return []
     text = str(raw_value).replace(";", ",")
@@ -511,9 +521,7 @@ def _resolve_mailbox_sort_sql(sort_code):
 
 
 def _insert_recipients(conn, email_id, recipient_type, raw_value):
-    """Insert recipients.
-    """
-    # Shared helper for this file.
+    """Insert normalized TO/CC rows for one email."""
     for address in _split_addresses(raw_value):
         conn.execute(
             """
@@ -524,22 +532,35 @@ def _insert_recipients(conn, email_id, recipient_type, raw_value):
         )
 
 
+def _replace_recipients(conn, email_id, recipients, cc):
+    """Rewrite the TO/CC rows so the DB mirrors the latest caller payload."""
+    conn.execute("DELETE FROM email_recipients WHERE email_id = ?", (email_id,))
+    _insert_recipients(conn, email_id, "to", recipients)
+    _insert_recipients(conn, email_id, "cc", cc)
+
+
+def _clamp_priority(value, default=1):
+    """Clamp stored priority values into the app's 1..3 range."""
+    try:
+        priority = int(default if value is None else value)
+    except (TypeError, ValueError):
+        priority = int(default)
+    return max(1, min(3, priority))
+
+
 def _normalize_ai_category(value):
-    """Normalize AI category.
-    """
-    # Normalize ai category to one format used across the app.
+    """Normalize an AI category into one of the supported enum values."""
     category = str(value or "").strip().lower()
     return category if category in AI_CATEGORIES else None
 
 
-def _normalize_ai_needs_response(value):
-    """Normalize AI needs response.
-    """
-    # Normalize ai needs response to one format used across the app.
-    if value is None:
-        return None
+def _normalize_optional_flag(value):
+    """Normalize yes/no style inputs into SQLite-friendly 1/0/NULL values."""
     if isinstance(value, bool):
         return 1 if value else 0
+    if value is None:
+        return None
+
     lowered = str(value).strip().lower()
     if lowered in {"1", "true", "yes", "y"}:
         return 1
@@ -548,10 +569,13 @@ def _normalize_ai_needs_response(value):
     return None
 
 
+def _normalize_ai_needs_response(value):
+    """Normalize the AI needs-response flag into 1, 0, or NULL."""
+    return _normalize_optional_flag(value)
+
+
 def _normalize_ai_confidence(value):
-    """Normalize AI confidence.
-    """
-    # Normalize ai confidence to one format used across the app.
+    """Normalize AI confidence into a bounded 0..1 float."""
     if value is None or value == "":
         return None
     try:
@@ -559,20 +583,11 @@ def _normalize_ai_confidence(value):
     except (TypeError, ValueError):
         return None
     return max(0.0, min(1.0, confidence))
+
+
 def _normalize_archived_flag(value):
-    """Normalize archived flag.
-    """
-    # Normalize archived flag to one format used across the app.
-    if isinstance(value, bool):
-        return 1 if value else 0
-    if value is None:
-        return None
-    lowered = str(value).strip().lower()
-    if lowered in {"1", "true", "yes", "y"}:
-        return 1
-    if lowered in {"0", "false", "no", "n"}:
-        return 0
-    return None
+    """Normalize the archived flag into 1, 0, or NULL."""
+    return _normalize_optional_flag(value)
 
 
 def count_mailbox_emails(
@@ -734,9 +749,7 @@ def set_user_display_name(display_name, db_path=DB_DEFAULT):
 
 
 def fetch_email_by_id(email_id, db_path=DB_DEFAULT):
-    """Fetch email by ID.
-    """
-    # Fetch email by id from storage and return normalized rows.
+    """Fetch one normalized email row by its local id."""
     with db_session(db_path) as conn:
         cur = conn.execute(
             f"""
@@ -789,9 +802,7 @@ def fetch_emails_by_ids(email_ids, db_path=DB_DEFAULT):
 
 
 def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
-    """Fetch email by provider draft ID.
-    """
-    # Fetch email by provider draft id from storage and return normalized rows.
+    """Fetch one normalized email row by its Gmail draft id."""
     if not provider_draft_id:
         return None
     with db_session(db_path) as conn:
@@ -807,9 +818,7 @@ def fetch_email_by_provider_draft_id(provider_draft_id, db_path=DB_DEFAULT):
 
 
 def fetch_thread_emails(thread_id, db_path=DB_DEFAULT):
-    """Fetch thread emails.
-    """
-    # Fetch thread emails from storage and return normalized rows.
+    """Fetch one thread's emails in chronological order."""
     if not thread_id:
         return []
     with db_session(db_path) as conn:
@@ -835,6 +844,70 @@ def mark_read(email_id, read=True, db_path=DB_DEFAULT):
         )
 
 
+def _fetch_existing_provider_row(conn, external_id, provider_draft_id):
+    """Find the local row matched to a provider message or draft identifier."""
+    for column_name, raw_value in (
+        ("external_id", external_id),
+        ("provider_draft_id", provider_draft_id),
+    ):
+        if not raw_value:
+            continue
+
+        row = conn.execute(
+            f"""
+            SELECT
+                {PROVIDER_ROW_SELECT_FIELDS}
+            FROM email_messages
+            WHERE {column_name} = ?
+            """,
+            (raw_value,),
+        ).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
+def _create_local_email_row(
+    conn,
+    *,
+    title,
+    body,
+    email_type,
+    sender=LOCAL_USER_EMAIL,
+    provider_draft_id=None,
+    thread_id=None,
+    priority=1,
+):
+    """Insert one locally-authored email row and return its new id."""
+    cur = conn.execute(
+        """
+        INSERT INTO email_messages (
+            external_id,
+            provider_draft_id,
+            thread_id,
+            title,
+            sender,
+            body,
+            type,
+            priority,
+            is_read,
+            received_at
+        )
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+        """,
+        (
+            provider_draft_id,
+            thread_id,
+            title,
+            sender,
+            body,
+            email_type,
+            _clamp_priority(priority),
+        ),
+    )
+    return cur.lastrowid
+
+
 def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
     """Upsert email from provider.
     """
@@ -848,8 +921,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
     if message_type not in ALLOWED_TYPES:
         message_type = "read-only"
 
-    priority = int(email_data.get("priority") or 1)
-    priority = max(1, min(3, priority))
+    priority = _clamp_priority(email_data.get("priority"))
 
     received_at = (email_data.get("received_at") or "").strip()
     if not received_at:
@@ -880,50 +952,9 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
     }
 
     with db_session(db_path) as conn:
-        # First match by external message id; fallback to provider draft id for draft flows.
-        cur = conn.execute(
-            """
-            SELECT
-                id,
-                body,
-                summary,
-                draft,
-                body_html,
-                provider_draft_id,
-                type,
-                priority,
-                is_archived,
-                ai_category,
-                ai_needs_response,
-                ai_confidence
-            FROM email_messages
-            WHERE external_id = ?
-            """,
-            (external_id,),
-        )
-        existing = cur.fetchone()
-        if existing is None and provider_draft_id:
-            cur = conn.execute(
-                """
-                SELECT
-                    id,
-                    body,
-                    summary,
-                    draft,
-                    body_html,
-                    provider_draft_id,
-                    type,
-                    priority,
-                    is_archived,
-                    ai_category,
-                    ai_needs_response,
-                    ai_confidence
-                FROM email_messages
-                WHERE provider_draft_id = ?
-                """,
-                (provider_draft_id,),
-            )
-            existing = cur.fetchone()
+        # First match by message id, then by provider draft id so compose flows
+        # and normal syncs can converge on the same local row.
+        existing = _fetch_existing_provider_row(conn, external_id, provider_draft_id)
 
         if existing:
             # Provider sync is allowed to refresh source-of-truth mailbox state like
@@ -948,12 +979,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             if is_archived_value is None:
                 is_archived_value = existing["is_archived"]
             existing_priority = existing["priority"]
-            priority_value = (
-                int(existing_priority)
-                if existing_priority is not None
-                else normalized["priority"]
-            )
-            priority_value = max(1, min(3, priority_value))
+            priority_value = _clamp_priority(existing_priority, default=normalized["priority"])
             type_value = normalized["type"]
             existing_type = (existing["type"] or "").strip()
             # Preserve local/AI triage for existing rows; provider sync should
@@ -1050,9 +1076,7 @@ def upsert_email_from_provider(email_data, db_path=DB_DEFAULT):
             email_id = cur.lastrowid
 
         # Rebuild recipients from normalized payload so local TO/CC stay authoritative.
-        conn.execute("DELETE FROM email_recipients WHERE email_id = ?", (email_id,))
-        _insert_recipients(conn, email_id, "to", normalized["recipients"])
-        _insert_recipients(conn, email_id, "cc", normalized["cc"])
+        _replace_recipients(conn, email_id, normalized["recipients"], normalized["cc"])
 
     return email_id
 
@@ -1110,31 +1134,15 @@ def create_reply_email(source_email_id, reply_text, recipients, cc, db_path=DB_D
             title = f"Re: {title}"
         clean_reply_text = normalize_outgoing_text(reply_text or "")
 
-        priority = int(source["priority"] or 1)
-        priority = max(1, min(3, priority))
-
-        cur = conn.execute(
-            """
-            INSERT INTO email_messages (
-                external_id,
-                provider_draft_id,
-                thread_id,
-                title,
-                sender,
-                body,
-                type,
-                priority,
-                is_read,
-                received_at
-            )
-            VALUES (NULL, NULL, ?, ?, ?, ?, 'sent', ?, 1, CURRENT_TIMESTAMP)
-            """,
-            (thread_id, title, LOCAL_USER_EMAIL, clean_reply_text, priority),
+        new_email_id = _create_local_email_row(
+            conn,
+            title=title,
+            body=clean_reply_text,
+            email_type="sent",
+            thread_id=thread_id,
+            priority=source["priority"],
         )
-
-        new_email_id = cur.lastrowid
-        _insert_recipients(conn, new_email_id, "to", recipients)
-        _insert_recipients(conn, new_email_id, "cc", cc)
+        _replace_recipients(conn, new_email_id, recipients, cc)
         return new_email_id
 
 
@@ -1159,6 +1167,8 @@ def save_local_draft(
 ):
     """Save local draft.
     """
+    # Local drafts act as the app's durable compose buffer whether or not Gmail
+    # is reachable, so updates must preserve the existing row when we can.
     clean_title = repair_header_text(title or "(No subject)")
     clean_body = normalize_outgoing_text(body or "")
     with db_session(db_path) as conn:
@@ -1209,36 +1219,18 @@ def save_local_draft(
             )
         else:
             # Create a brand-new local draft row when no prior mapping exists.
-            cur = conn.execute(
-                """
-                INSERT INTO email_messages (
-                    external_id,
-                    provider_draft_id,
-                    thread_id,
-                    title,
-                    sender,
-                    body,
-                    type,
-                    priority,
-                    is_read,
-                    received_at
-                )
-                VALUES (NULL, ?, ?, ?, ?, ?, 'draft', 1, 1, CURRENT_TIMESTAMP)
-                """,
-                (
-                    provider_draft_id,
-                    thread_id,
-                    clean_title,
-                    sender,
-                    clean_body,
-                ),
+            draft_id = _create_local_email_row(
+                conn,
+                title=clean_title,
+                body=clean_body,
+                email_type="draft",
+                sender=sender,
+                provider_draft_id=provider_draft_id,
+                thread_id=thread_id,
             )
-            draft_id = cur.lastrowid
 
         # Rewrite recipients each save so local draft always reflects latest compose fields.
-        conn.execute("DELETE FROM email_recipients WHERE email_id = ?", (draft_id,))
-        _insert_recipients(conn, draft_id, "to", recipients)
-        _insert_recipients(conn, draft_id, "cc", cc)
+        _replace_recipients(conn, draft_id, recipients, cc)
         return draft_id
 
 
@@ -1337,25 +1329,13 @@ def create_local_sent_email(
     clean_title = repair_header_text(title or "(No subject)")
     clean_body = normalize_outgoing_text(body or "")
     with db_session(db_path) as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO email_messages (
-                external_id,
-                provider_draft_id,
-                thread_id,
-                title,
-                sender,
-                body,
-                type,
-                priority,
-                is_read,
-                received_at
-            )
-            VALUES (NULL, NULL, ?, ?, ?, ?, 'sent', 1, 1, CURRENT_TIMESTAMP)
-            """,
-            (thread_id, clean_title, sender, clean_body),
+        email_id = _create_local_email_row(
+            conn,
+            title=clean_title,
+            body=clean_body,
+            email_type="sent",
+            sender=sender,
+            thread_id=thread_id,
         )
-        email_id = cur.lastrowid
-        _insert_recipients(conn, email_id, "to", recipients)
-        _insert_recipients(conn, email_id, "cc", cc)
+        _replace_recipients(conn, email_id, recipients, cc)
         return email_id

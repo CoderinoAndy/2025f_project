@@ -1,4 +1,5 @@
-# Model layer.
+"""Gmail integration: auth, MIME parsing, sync loops, and send/draft helpers."""
+
 import base64
 import hashlib
 import mimetypes
@@ -66,7 +67,8 @@ BULK_SENDER_MARKERS = (
 )
 
 
-# Background sync state so repeated page loads do not hammer the Gmail API.
+# The service layer has two jobs: translate Gmail payloads into the local DB
+# shape, and keep provider-side mutations from overwhelming the API.
 class _GmailSyncState:
     """In-memory sync throttling state for background Gmail sync."""
 
@@ -79,9 +81,7 @@ GMAIL_SYNC_STATE = _GmailSyncState()
 
 
 def _candidate_credentials_paths():
-    """Candidate credentials paths.
-    """
-    # Build the fallback candidates in priority order.
+    """Return the credential-file locations we are willing to try."""
     configured_path = os.getenv("GMAIL_CREDENTIALS_FILE")
     candidates = []
     if configured_path:
@@ -92,9 +92,7 @@ def _candidate_credentials_paths():
 
 
 def _resolve_credentials_path():
-    """Resolve credentials path.
-    """
-    # Resolve the credentials path, with a safe fallback if config is missing.
+    """Resolve the first credential file that exists on disk."""
     for path in _candidate_credentials_paths():
         if path.exists():
             return path
@@ -102,9 +100,7 @@ def _resolve_credentials_path():
 
 
 def gmail_available():
-    """Gmail available.
-    """
-    # Shared helper for this file.
+    """Return whether Gmail features can run in this environment."""
     return bool(
         _resolve_credentials_path()
         and Request
@@ -115,9 +111,7 @@ def gmail_available():
 
 
 def _save_token(credentials):
-    """Save token.
-    """
-    # Save the token after cleaning up any user-provided values.
+    """Persist the refreshed OAuth token next to the app instance data."""
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_PATH.write_text(credentials.to_json(), encoding="utf-8")
 
@@ -174,6 +168,7 @@ def _load_credentials():
 
 
 def _get_service():
+    """Build the Gmail API client, or return ``None`` when auth is unavailable."""
     # Try the requested value first, then fall back safely if it fails.
     # Only build the Gmail API client once auth is available.
     credentials = _load_credentials()
@@ -192,20 +187,21 @@ def _get_service():
         return None
 
 
-def _extract_header(payload, header_name):
-    """Extract header.
-    """
-    # Some payloads leave this field out, so read it carefully.
-    for header in payload.get("headers", []) or []:
+def _extract_named_header(headers, header_name):
+    """Read a case-insensitive header value from a Gmail header list."""
+    for header in headers or []:
         if header.get("name", "").lower() == header_name.lower():
             return header.get("value", "")
     return ""
 
 
+def _extract_header(payload, header_name):
+    """Read a top-level message header from a Gmail payload."""
+    return _extract_named_header(payload.get("headers", []) or [], header_name)
+
+
 def _decode_body_bytes(raw_data):
-    """Decode body bytes.
-    """
-    # Shared helper for this file.
+    """Decode Gmail's URL-safe base64 payloads."""
     if not raw_data:
         return b""
     padded = f"{raw_data}{'=' * (-len(raw_data) % 4)}"
@@ -216,19 +212,12 @@ def _decode_body_bytes(raw_data):
 
 
 def _extract_part_header(part, header_name):
-    """Extract part header.
-    """
-    # Some payloads leave this field out, so read it carefully.
-    for header in part.get("headers", []) or []:
-        if header.get("name", "").lower() == header_name.lower():
-            return header.get("value", "")
-    return ""
+    """Read one MIME-part header."""
+    return _extract_named_header(part.get("headers", []) or [], header_name)
 
 
 def _normalize_cid(raw_value):
-    """Normalize cid.
-    """
-    # Normalize cid to one format used across the app.
+    """Normalize ``cid:`` tokens so HTML replacement can match them reliably."""
     if not raw_value:
         return ""
     return raw_value.strip().strip("<>").lower()
@@ -254,9 +243,7 @@ def _attachment_bytes(service, message_id, attachment_id):
 
 
 def _iter_parts(payload):
-    """Iter parts.
-    """
-    # Shared helper for this file.
+    """Yield every MIME part in depth-first order without recursive calls."""
     if not payload:
         return
     stack = [payload]
@@ -270,9 +257,7 @@ def _iter_parts(payload):
 
 
 def _guess_filename(content_type, index):
-    """Guess filename.
-    """
-    # Shared helper for this file.
+    """Invent a stable attachment filename when Gmail leaves it blank."""
     mime = (content_type or "").split(";", 1)[0].strip().lower()
     extension = mimetypes.guess_extension(mime) if mime else None
     suffix = extension or ".bin"
@@ -280,9 +265,7 @@ def _guess_filename(content_type, index):
 
 
 def _extract_attachment_payloads(payload, service=None, message_id=None):
-    """Extract attachment payloads.
-    """
-    # Some payloads leave this field out, so read it carefully.
+    """Extract attachment bytes and metadata from a Gmail MIME tree."""
     attachments = []
     for part in _iter_parts(payload):
         body_info = part.get("body") or {}
@@ -313,9 +296,7 @@ def _extract_attachment_payloads(payload, service=None, message_id=None):
 
 
 def _extract_attachment_metadata(payload):
-    """Extract attachment metadata.
-    """
-    # Some payloads leave this field out, so read it carefully.
+    """Extract attachment names/content types without downloading bytes."""
     metadata = []
     for part in _iter_parts(payload):
         body_info = part.get("body") or {}
@@ -345,8 +326,7 @@ def _extract_attachment_metadata(payload):
 
 
 def _merge_attachment_payloads(existing_attachments, incoming_attachments):
-    """Merge attachment payloads.
-    """
+    """Merge attachment lists while deduplicating by content signature."""
     merged = []
     seen = set()
     # Deduplicate by a stable content signature so draft updates do not duplicate files.
@@ -372,8 +352,7 @@ def _merge_attachment_payloads(existing_attachments, incoming_attachments):
 
 
 def _get_draft_data(service, provider_draft_id):
-    """Get draft data.
-    """
+    """Fetch one Gmail draft resource in ``format=full`` form."""
     # Try the requested value first, then fall back safely if it fails.
     if not service or not provider_draft_id:
         return None
@@ -397,8 +376,7 @@ def _get_draft_data(service, provider_draft_id):
 
 
 def _get_message_data(service, external_id):
-    """Get message data.
-    """
+    """Fetch one Gmail message resource in ``format=full`` form."""
     # Try the requested value first, then fall back safely if it fails.
     if not service or not external_id:
         return None
@@ -421,78 +399,74 @@ def _get_message_data(service, external_id):
         return None
 
 
-def fetch_draft_attachments(provider_draft_id):
-    """Fetch draft attachments.
-    """
-    # Fetch draft attachments from storage and return normalized rows.
-    service = _get_service()
-    if not service or not provider_draft_id:
-        return []
+def _load_draft_message(service, provider_draft_id):
+    """Return the nested message payload for one Gmail draft."""
     draft_data = _get_draft_data(service, provider_draft_id)
-    if not draft_data:
+    return (draft_data or {}).get("message") or None
+
+
+def _fetch_attachment_view(identifier, *, load_message, include_content):
+    """Load attachments or attachment metadata for a Gmail message-like object."""
+    service = _get_service()
+    if not service or not identifier:
         return []
-    message_data = draft_data.get("message") or {}
-    return _extract_attachment_payloads(
-        message_data.get("payload") or {},
-        service=service,
-        message_id=message_data.get("id"),
+    message_data = load_message(service, identifier)
+    if not message_data:
+        return []
+
+    payload = message_data.get("payload") or {}
+    if include_content:
+        return _extract_attachment_payloads(
+            payload,
+            service=service,
+            message_id=message_data.get("id"),
+        )
+    return _extract_attachment_metadata(payload)
+
+
+def fetch_draft_attachments(provider_draft_id):
+    """Fetch full attachment payloads for a Gmail draft."""
+    return _fetch_attachment_view(
+        provider_draft_id,
+        load_message=_load_draft_message,
+        include_content=True,
     )
 
 
 def fetch_draft_attachment_metadata(provider_draft_id):
-    """Fetch draft attachment metadata.
-    """
-    # Fetch draft attachment metadata from storage and return normalized rows.
-    service = _get_service()
-    if not service or not provider_draft_id:
-        return []
-    draft_data = _get_draft_data(service, provider_draft_id)
-    if not draft_data:
-        return []
-    message_data = draft_data.get("message") or {}
-    return _extract_attachment_metadata(message_data.get("payload") or {})
+    """Fetch draft attachment names/content types without downloading bytes."""
+    return _fetch_attachment_view(
+        provider_draft_id,
+        load_message=_load_draft_message,
+        include_content=False,
+    )
 
 
 def fetch_message_attachments(external_id):
-    """Fetch message attachments.
-    """
-    # Fetch message attachments from storage and return normalized rows.
-    service = _get_service()
-    if not service or not external_id:
-        return []
-    message_data = _get_message_data(service, external_id)
-    if not message_data:
-        return []
-    return _extract_attachment_payloads(
-        message_data.get("payload") or {},
-        service=service,
-        message_id=message_data.get("id"),
+    """Fetch full attachment payloads for a Gmail message."""
+    return _fetch_attachment_view(
+        external_id,
+        load_message=_get_message_data,
+        include_content=True,
     )
 
 
 def fetch_message_attachment_metadata(external_id):
-    """Fetch message attachment metadata.
-    """
-    # Fetch message attachment metadata from storage and return normalized rows.
-    service = _get_service()
-    if not service or not external_id:
-        return []
-    message_data = _get_message_data(service, external_id)
-    if not message_data:
-        return []
-    return _extract_attachment_metadata(message_data.get("payload") or {})
+    """Fetch Gmail message attachment metadata without downloading bytes."""
+    return _fetch_attachment_view(
+        external_id,
+        load_message=_get_message_data,
+        include_content=False,
+    )
 
 
 def _replace_inline_cid_sources(raw_html, cid_sources):
-    """Replace inline cid sources.
-    """
-    # Shared helper for this file.
+    """Swap ``cid:`` image references with inline data URLs when available."""
     if not raw_html or not cid_sources:
         return raw_html
 
     def replacer(match):
         """Swap `cid:` image references with resolved inline data URLs when available."""
-        # Shared helper for this file.
         quote = match.group(1)
         cid_key = _normalize_cid(match.group(2))
         resolved = cid_sources.get(cid_key)
@@ -509,8 +483,7 @@ def _replace_inline_cid_sources(raw_html, cid_sources):
 
 
 def _extract_message_content(payload, service=None, message_id=None):
-    """Extract message content.
-    """
+    """Extract repaired plain text plus optional HTML from a Gmail MIME tree."""
     if not payload:
         return "", None
 
@@ -586,9 +559,7 @@ def _extract_message_content(payload, service=None, message_id=None):
 
 
 def _parse_addresses(raw_value):
-    """Parse addresses.
-    """
-    # Validate this before we trust it.
+    """Parse one Gmail address header into a comma-separated address list."""
     if not raw_value:
         return ""
     parsed_addresses = [addr for _, addr in getaddresses([raw_value]) if addr]
@@ -596,16 +567,12 @@ def _parse_addresses(raw_value):
 
 
 def _header_value(payload, name):
-    """Header value.
-    """
-    # Shared helper for this file.
+    """Return a stripped header value from the top-level payload."""
     return (_extract_header(payload, name) or "").strip()
 
 
 def _sender_looks_bulk(payload):
-    """Sender looks bulk.
-    """
-    # Shared helper for this file.
+    """Return whether the sender/header hints look like bulk mail."""
     sender_value = _header_value(payload, "From").lower()
     if any(marker in sender_value for marker in BULK_SENDER_MARKERS):
         return True
@@ -627,9 +594,7 @@ def _sender_looks_bulk(payload):
 
 
 def _labels_to_type(label_ids, payload=None):
-    """Labels recipient type.
-    """
-    # Shared helper for this file.
+    """Map Gmail labels onto the app's mailbox type buckets."""
     labels = set(label_ids or [])
     if "DRAFT" in labels:
         return "draft"
@@ -645,9 +610,7 @@ def _labels_to_type(label_ids, payload=None):
 
 
 def _labels_to_priority(label_ids):
-    """Labels recipient priority.
-    """
-    # Shared helper for this file.
+    """Map Gmail labels onto the app's local priority scale."""
     labels = set(label_ids or [])
     if "STARRED" in labels:
         return 3
@@ -657,9 +620,7 @@ def _labels_to_priority(label_ids):
 
 
 def _received_at(internal_date):
-    """Received at.
-    """
-    # Shared helper for this file.
+    """Convert Gmail's millisecond timestamp into the DB's timestamp format."""
     try:
         timestamp = int(internal_date) / 1000
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -706,9 +667,7 @@ def sync_message_by_external_id(
     service=None,
     provider_draft_id=None,
 ):
-    """Sync message by external ID.
-    """
-    # Sync a message by external id between Gmail and the local database.
+    """Fetch one Gmail message and mirror it into the local database."""
     if not external_id:
         return None
     service = service or _get_service()
@@ -971,9 +930,7 @@ def trigger_background_sync(db_path=DB_DEFAULT, force=False, max_results=None):
 
 
 def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
-    """Modify labels.
-    """
-    # Shared helper for this file.
+    """Apply Gmail label mutations to one message."""
     body = {}
     if add_labels:
         body["addLabelIds"] = sorted(set(add_labels))
@@ -998,9 +955,7 @@ def _modify_labels(service, external_id, add_labels=None, remove_labels=None):
 
 
 def _build_email_message(to_value, cc_value, subject, body_text, attachments=None):
-    """Build email message.
-    """
-    # Build the email payload in the exact shape the next API or DB call expects.
+    """Build the RFC822 message used for Gmail send/draft endpoints."""
     message = EmailMessage()
     if to_value:
         message["To"] = to_value
@@ -1040,9 +995,7 @@ def send_compose_message(
     thread_id=None,
     db_path=DB_DEFAULT,
 ):
-    """Send compose message.
-    """
-    # Convert API data into the mailbox shape the app uses locally.
+    """Send a composed message through Gmail and re-sync the sent row locally."""
     service = _get_service()
     if not service:
         return None
@@ -1439,7 +1392,6 @@ def send_reply_message(
 def trash_message(external_id):
     """Trash message.
     """
-    # Convert API data into the mailbox shape the app uses locally.
     service = _get_service()
     if not service or not external_id:
         return False

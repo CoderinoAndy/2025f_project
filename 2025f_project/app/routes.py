@@ -1,5 +1,5 @@
-# Controller layer.
-# Flask routes for mailbox pages, compose flows, and lightweight JSON action APIs.
+"""Flask routes for mailbox pages, compose flows, and lightweight JSON APIs."""
+
 from flask import Blueprint, render_template, request, redirect, url_for, abort, Response, jsonify
 import os
 import threading
@@ -66,12 +66,23 @@ LOCAL_USER_EMAIL = (os.getenv("LOCAL_USER_EMAIL") or "you@example.com").strip() 
 # Mailbox type rules shared by several routes.
 NON_MAIN_TYPES = {"sent", "draft"}
 ALLOWED_EMAIL_TYPES = {"response-needed", "read-only", "junk", "junk-uncertain"}
+MAILBOX_PAGE_ROUTES = (
+    ("/allemails", "allemails", "allemails.html", "all"),
+    ("/readonly", "readonly", "readonly.html", "read-only"),
+    ("/responseneeded", "responseneeded", "responseneeded.html", "response-needed"),
+    ("/junkmailconfirm", "junkmailconfirm", "junkmailconfirm.html", "junk-uncertain"),
+    ("/junk", "junk", "junk.html", "junk"),
+    ("/sent", "sent", "sent.html", "sent"),
+    ("/drafts", "drafts", "drafts.html", "draft"),
+    ("/archive", "archive", "archive.html", "archived"),
+)
 
 
 @main.app_context_processor
 def inject_user_display_name():
     """Expose the mailbox-owner display name to shared templates."""
     return {"user_display_name": get_user_display_name() or ""}
+
 
 def _normalize_addresses(raw_value):
     """Normalize addresses.
@@ -351,6 +362,43 @@ def _resolve_bulk_email_ids_from_request():
     return email_ids
 
 
+def _fetch_email_or_404(email_id):
+    """Load one email row or stop immediately when the id is invalid."""
+    email_data = fetch_email_by_id(email_id)
+    if email_data is None:
+        abort(404)
+    return email_data
+
+
+def _require_ai_ready_email(email_id):
+    """Load the kind of inbox email the AI features are allowed to operate on."""
+    email_data = _fetch_email_or_404(email_id)
+    if bool(email_data.get("is_archived")):
+        abort(400)
+    if email_data.get("type") in NON_MAIN_TYPES:
+        abort(400)
+    return email_data
+
+
+def _register_mailbox_page_routes():
+    """Register the tab routes from one table so they stay in sync."""
+    # These views are intentionally tiny: the table captures what changes per
+    # tab, while the shared renderer handles pagination, polling, and filters.
+    def _make_mailbox_view(template_name, list_view):
+        def _view():
+            return _render_mailbox_page(
+                template_name,
+                list_view=list_view,
+            )
+
+        return _view
+
+    for rule, endpoint, template_name, list_view in MAILBOX_PAGE_ROUTES:
+        view_func = _make_mailbox_view(template_name, list_view)
+        view_func.__name__ = endpoint
+        main.add_url_rule(rule, endpoint=endpoint, view_func=view_func)
+
+
 @main.route("/api/list-emails")
 def list_emails_api():
     """List emails api.
@@ -411,13 +459,7 @@ def start_ai_analyze(id):
     """Start AI analyze.
     """
     # Start AI analysis in the background and return metadata for polling.
-    email_data = fetch_email_by_id(id)
-    if email_data is None:
-        abort(404)
-    if bool(email_data.get("is_archived")):
-        abort(400)
-    if email_data.get("type") in NON_MAIN_TYPES:
-        abort(400)
+    _require_ai_ready_email(id)
     task = _start_analysis_task(id, force=True)
     return jsonify(_serialize_ai_task(task))
 
@@ -427,13 +469,7 @@ def start_ai_draft(id):
     """Start AI draft.
     """
     # Start AI draft generation in the background and return metadata for polling.
-    email_data = fetch_email_by_id(id)
-    if email_data is None:
-        abort(404)
-    if bool(email_data.get("is_archived")):
-        abort(400)
-    if email_data.get("type") in NON_MAIN_TYPES:
-        abort(400)
+    email_data = _require_ai_ready_email(id)
 
     # The request body is optional so older callers still work.
     payload = request.get_json(silent=True) or {}
@@ -494,107 +530,17 @@ def sync_from_gmail():
 
 @main.route("/")
 def index():
-    """Index.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
+    """Redirect the root path to the about page."""
     return redirect(url_for("main.about"))
 
 @main.route("/about")
 def about():
-    """About.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
+    """Render the static about page."""
     return render_template("about.html")
-
-
-@main.route("/allemails")
-def allemails():
-    """Allemails.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "allemails.html",
-        list_view="all",
-    )
-
-@main.route("/readonly")
-def readonly():
-    """Readonly.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "readonly.html",
-        list_view="read-only",
-    )
-
-@main.route("/responseneeded")
-def responseneeded():
-    """Responseneeded.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "responseneeded.html",
-        list_view="response-needed",
-    )
-
-@main.route("/junkmailconfirm")
-def junkmailconfirm():
-    """Junkmailconfirm.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "junkmailconfirm.html",
-        list_view="junk-uncertain",
-    )
-
-@main.route("/junk")
-def junk():
-    """Junk.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "junk.html",
-        list_view="junk",
-    )
-
-
-@main.route("/sent")
-def sent():
-    """Sent.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "sent.html",
-        list_view="sent",
-    )
-
-
-@main.route("/drafts")
-def drafts():
-    """Drafts.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "drafts.html",
-        list_view="draft",
-    )
-
-
-@main.route("/archive")
-def archive():
-    """Archive.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
-    return _render_mailbox_page(
-        "archive.html",
-        list_view="archived",
-    )
 
 @main.route("/email/<int:id>")
 def email(id):
-    """Email.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
+    """Render the full email detail page."""
     email_data = fetch_email_by_id(id)
     if email_data is None:
         return "Email not found", 404
@@ -681,7 +627,6 @@ def set_email_type(id):
 def bulk_email_action():
     """Bulk email action.
     """
-    # Convert API data into the mailbox shape the app uses locally.
     action = (request.form.get("action") or "").strip()
     new_type = (request.form.get("new_type") or "").strip()
     email_ids = _resolve_bulk_email_ids_from_request()
@@ -759,7 +704,6 @@ def bulk_email_action():
 def archive_email(id):
     """Archive email.
     """
-    # Convert API data into the mailbox shape the app uses locally.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -774,7 +718,6 @@ def archive_email(id):
 def unarchive_email(id):
     """Unarchive email.
     """
-    # Convert API data into the mailbox shape the app uses locally.
     email_data = fetch_email_by_id(id)
     if email_data is None:
         abort(404)
@@ -785,9 +728,7 @@ def unarchive_email(id):
 
 @main.route("/search")
 def search():
-    """Search.
-    """
-    # Thin route wrapper that validates input, then renders or redirects.
+    """Redirect bare search requests into the main mailbox view."""
     q = (request.args.get("q") or "").strip()
     if not q:
         return redirect(url_for("main.allemails"))
@@ -798,14 +739,7 @@ def search():
 def analyze_email_route(id):
     """Analyze email route.
     """
-    # Convert API data into the mailbox shape the app uses locally.
-    email_data = fetch_email_by_id(id)
-    if email_data is None:
-        abort(404)
-    if bool(email_data.get("is_archived")):
-        abort(400)
-    if email_data.get("type") in NON_MAIN_TYPES:
-        abort(400)
+    _require_ai_ready_email(id)
 
     _start_analysis_task(id, force=True)
     next_url = _next_url_from_request()
@@ -900,7 +834,7 @@ def compose():
 def compose_save():
     """Compose save.
     """
-    # Shared helper for this file.
+    # Save is explicit, so we keep attachments and return the user to compose.
     next_url = _next_url_from_request()
     fields = _collect_compose_fields()
     attachments = _collect_attachment_payloads()
@@ -915,7 +849,7 @@ def compose_save():
 def compose_autosave():
     """Compose autosave.
     """
-    # Shared helper for this file.
+    # Autosave skips attachment handling and quietly persists text fields only.
     fields = _collect_compose_fields()
     if not _has_compose_content(fields):
         return Response(status=204)
@@ -1015,11 +949,11 @@ def delete_email(id):
 def toggle_read(id):
     """Toggle read.
     """
-    # Shared helper for this file.
-    email_data = fetch_email_by_id(id)
-    if email_data is None:
-        abort(404)
+    email_data = _fetch_email_or_404(id)
     new_read_state = not bool(email_data.get("is_read"))
     _set_read_state_with_fallback(id, email_data, new_read_state)
     next_url = _next_url_from_request()
     return redirect(next_url)
+
+
+_register_mailbox_page_routes()

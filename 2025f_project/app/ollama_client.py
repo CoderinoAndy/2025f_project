@@ -1,4 +1,4 @@
-# Model layer.
+"""Local Ollama/Playwright integration for classification, summaries, drafts, and AI tasks."""
 import atexit
 import base64
 import hashlib
@@ -32,8 +32,9 @@ from .db import (
 from .debug_logger import log_event
 from .email_content import contains_common_mojibake, html_to_text, repair_body_text, repair_header_text
 
-# This module handles both model calls and the async AI task plumbing.
-# Shared runtime defaults and label sets for classification and summary work.
+# Think of this file as three layers living together:
+# 1) model/runtime configuration, 2) heuristic cleanup/fallback logic, and
+# 3) async task plumbing that lets the UI poll long-running AI work.
 OLLAMA_API_URL_DEFAULT = "http://127.0.0.1:11434/api/chat"
 OLLAMA_CLASSIFY_MODEL_DEFAULT = "qwen2.5:7b-instruct"
 OLLAMA_SUMMARY_MODEL_DEFAULT = "mistral-small3.2:24b"
@@ -60,6 +61,8 @@ LONG_OLLAMA_TASKS = {
     "summarize",
     "summarize_rewrite",
 }
+# These maps let each task resolve its own env vars without scattering model
+# selection rules throughout the rest of the module.
 TASK_MODEL_ENV_MAP = {
     "classify": "OLLAMA_CLASSIFY_MODEL",
     "draft": "OLLAMA_DRAFT_MODEL",
@@ -110,6 +113,7 @@ VISUAL_SUMMARY_MIN_HTML_CHARS_DEFAULT = 180
 VISUAL_SUMMARY_COMPLEXITY_THRESHOLD_DEFAULT = 2
 VISUAL_SUMMARY_TEXT_OVERLAP_THRESHOLD_DEFAULT = 0.72
 JUNK_LOW_CONFIDENCE_THRESHOLD = 0.78
+
 # Per-task context window limits sent to Ollama.
 # Bounding num_ctx to match actual input size prevents models from allocating large KV caches,
 # which is the primary source of latency on local inference.  Values are padded generously
@@ -717,16 +721,12 @@ HTML_VISUAL_COMPLEXITY_PATTERN = re.compile(
 
 
 def _utc_now():
-    """Utc now.
-    """
-    # Shared helper for this file.
+    """Return the app's canonical UTC timestamp string for logs."""
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _action_log_path():
-    """Action log path.
-    """
-    # Log this here so it is easier to trace later.
+    """Resolve the sidecar AI action log path."""
     configured = (os.getenv("AI_ACTION_LOG_PATH") or "").strip()
     if configured:
         return Path(configured)
@@ -734,9 +734,7 @@ def _action_log_path():
 
 
 def _one_line(value):
-    """One line.
-    """
-    # Shared helper for this file.
+    """Collapse a value into one short log-friendly line."""
     text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
     return text[:500]
 
@@ -773,9 +771,7 @@ def _log_action(task, status, email_id=None, detail=""):
 
 
 def log_ai_event(task, status, email_id=None, detail=""):
-    """Log AI event.
-    """
-    # Log this here so it is easier to trace later.
+    """Public wrapper used throughout the module for AI task logging."""
     _log_action(task=task, status=status, email_id=email_id, detail=detail)
 
 
@@ -6228,6 +6224,7 @@ def _classification_few_shot_block():
     """Classification few shot block.
     """
     # Keep labels aligned with the mailbox triage buckets.
+    # priority scale: 1=low/FYI, 2=moderate, 3=urgent/time-sensitive
     return (
         "Few-shot examples:\n"
         "1) From: promotions@store-updates.example\n"
@@ -6261,7 +6258,11 @@ def _classification_few_shot_block():
         "8) From: hello@fashion-brand.example\n"
         "Subject: New arrivals for spring\n"
         "Body: Discover fresh styles and featured picks from the new collection. Shop the collection online.\n"
-        'Output: {"category":"junk","needs_response":false,"priority":1,"confidence":0.64}'
+        'Output: {"category":"junk","needs_response":false,"priority":1,"confidence":0.64}\n\n'
+        "9) From: newsletter@tech-insights.example\n"
+        "Subject: BREAKING: Markets Crash as AI Disrupts Everything\n"
+        "Body: This week in tech: industry trends, analyst opinions, and what it means for you. Read more online. Unsubscribe.\n"
+        'Output: {"category":"informational","needs_response":false,"priority":1,"confidence":0.93}'
     )
 
 
@@ -6778,6 +6779,11 @@ def _merge_with_heuristics(model_classification, heuristic_classification):
             merged["needs_response"] = False
             merged["priority"] = min(int(merged.get("priority") or 1), 1)
             merged["email_type"] = "read-only"
+        elif not bool(merged.get("needs_response")):
+            # Read-only emails (newsletters, digests, etc.) should never
+            # have high priority regardless of clickbait subjects.
+            merged["priority"] = min(int(merged.get("priority") or 1), 1)
+            merged["email_type"] = "read-only"
 
     if heuristic_guardrail and str(merged.get("category") or "").strip().lower() != "junk":
         merged = dict(heuristic_classification)
@@ -6880,6 +6886,8 @@ def _normalize_classification(raw_value):
         needs_response = True
     elif email_type == "read-only":
         needs_response = False
+        if priority > 1:
+            priority = 1
         if category == "junk":
             category = "informational"
     elif email_type in {"junk", "junk-uncertain"}:
@@ -7077,10 +7085,12 @@ def classify_email(email_data, email_id=None):
         "Return valid JSON with keys: category, needs_response, priority, confidence. "
         "category: urgent (action needed, deadline ≤48h), informational (receipts, notices, newsletters), junk (ads, spam, cold pitches). "
         "needs_response: true only if a real person explicitly asks for a reply. "
-        "priority: 1=urgent/time-sensitive, 2=moderate, 3=low/FYI. "
+        "priority: 1=low/FYI, 2=moderate, 3=urgent/time-sensitive. "
         "confidence: 0–1. "
         "Body is primary evidence; sender and subject are secondary. "
-        "Do not classify as urgent without explicit time-pressure in the body."
+        "Do not classify as urgent without explicit time-pressure in the body. "
+        "Newsletters, digests, and automated content emails are always low priority (1) "
+        "regardless of how dramatic or clickbait their subject lines sound."
     )
     user_message["content"] += (
         "\n\n"
@@ -7199,10 +7209,10 @@ def _postprocess_model_summary(summary_text, email_data, email_id=None, structur
 
 
 def summarize_email(email_data, email_id=None):
-    """Summarize email.
-    """
+    """Generate the best available summary for one email row."""
     started_at = time.perf_counter()
-    # Convert API data into the mailbox shape the app uses locally.
+    # Short-circuit quickly when the email is too small or otherwise not a
+    # good summary candidate; the heavier heuristics and model calls come later.
     if not should_summarize_email(email_data):
         return None
     raw_body = _email_body_text(email_data)
@@ -8743,7 +8753,8 @@ def run_ai_analysis(email_data, force=False):
         or email_data.get("ai_confidence") is None
     )
 
-    # Save classification and summary independently so partial success still counts.
+    # Classification and summary are deliberately saved independently so one
+    # successful step still improves the row even if the other model call fails.
     if force or missing_classification:
         classification = classify_email(email_data, email_id=email_data.get("id"))
         if classification:
@@ -8767,6 +8778,8 @@ def run_ai_analysis(email_data, force=False):
         if summary:
             update_email_ai_fields(email_id=email_data["id"], summary=summary)
             changed = True
+    # Emit one timing event for the whole analysis pass so we can tune the
+    # balance between local heuristics and model work later.
     _log_performance(
         "analysis_total",
         int((time.perf_counter() - started_at) * 1000),
@@ -8781,7 +8794,8 @@ def run_ai_analysis(email_data, force=False):
 
 AI_TASK_MAX_ITEMS = 200
 AI_TASK_ACTIVE_STATUSES = {"queued", "running"}
-# In-memory async task registry for polling endpoints; cleanup keeps it bounded.
+# The browser polls task ids, so this registry keeps just enough in-memory state
+# to answer those requests without letting completed work accumulate forever.
 AI_TASKS = {}
 AI_TASK_INDEX = {}
 AI_TASK_LOCK = threading.Lock()

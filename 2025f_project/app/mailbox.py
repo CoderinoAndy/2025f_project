@@ -1,14 +1,16 @@
-# Model layer.
+"""Mailbox list helpers: paging, polling, filtering, and stable sorting."""
+
 import os
 import threading
 import time
-from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .db import count_mailbox_emails, fetch_mailbox_ids, fetch_mailbox_page
+from .datetime_utils import parse_known_datetime
 from .gmail_service import sync_drafts_from_gmail
 
-# Helpers for live mailbox tabs: filtering, sorting, and sync throttling.
+# This module keeps list-view behavior centralized so routes only need to ask
+# for "the draft tab" or "the archive tab" instead of rebuilding query rules.
 HIDDEN_FROM_MAIN_LIST_TYPES = {"sent", "draft"}
 VALID_SORTS = {
     "date_desc",
@@ -200,29 +202,17 @@ def _live_list_query_filters(list_view):
     }
 
 
-def _parse_date(date_text):
-    """Parse the app's date formats into datetime, or None."""
-    text = str(date_text or "").strip()
-    if not text:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
-
-
-def _date_number(dt):
-    """Convert datetime to a comparable integer."""
+def _date_number(date_text):
+    """Convert one stored mailbox timestamp into a comparable integer."""
+    dt = parse_known_datetime(date_text)
     if dt is None:
         return -1
     return dt.toordinal() * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
 
 
 def _email_sort_key(email, sort_code):
-    """Return a tuple key for manual insertion sort."""
-    date_num = _date_number(_parse_date(email.get("date")))
+    """Return the tuple used for stable mailbox sorting."""
+    date_num = _date_number(email.get("date"))
     priority = int(email.get("priority") or 0)
     is_read = bool(email.get("is_read"))
 
@@ -240,51 +230,14 @@ def _email_sort_key(email, sort_code):
     return (-date_num,)
 
 
-def _merge_sorted_pairs(left_pairs, right_pairs):
-    """Merge two sorted (email, key) lists."""
-    merged = []
-    left_i = 0
-    right_i = 0
-    # Standard stable merge: equal keys stay in left-side order.
-    while left_i < len(left_pairs) and right_i < len(right_pairs):
-        if left_pairs[left_i][1] <= right_pairs[right_i][1]:
-            merged.append(left_pairs[left_i])
-            left_i += 1
-        else:
-            merged.append(right_pairs[right_i])
-            right_i += 1
-    if left_i < len(left_pairs):
-        merged.extend(left_pairs[left_i:])
-    if right_i < len(right_pairs):
-        merged.extend(right_pairs[right_i:])
-    return merged
-
-
-def _merge_sort_pairs(pairs):
-    """Sort (email, key) pairs with merge sort in O(n log n)."""
-    if len(pairs) <= 1:
-        return pairs
-    mid = len(pairs) // 2
-    left = _merge_sort_pairs(pairs[:mid])
-    right = _merge_sort_pairs(pairs[mid:])
-    return _merge_sorted_pairs(left, right)
-
-
 def sort_emails(emails, sort_code):
-    """Sort emails with custom merge sort (stable, O(n log n))."""
+    """Sort mailbox rows using Python's stable built-in sort."""
     if sort_code not in VALID_SORTS:
         sort_code = "date_desc"
 
-    # Precompute keys once so merge sort only compares tuples.
-    pairs = []
-    for email in emails:
-        pairs.append((email, _email_sort_key(email, sort_code)))
-    sorted_pairs = _merge_sort_pairs(pairs)
-
-    sorted_rows = []
-    for email, _key in sorted_pairs:
-        sorted_rows.append(email)
-    return sorted_rows
+    # The key function stays centralized above, while the runtime gets to rely
+    # on CPython's well-tested stable sort instead of our own merge-sort copy.
+    return sorted(list(emails), key=lambda email: _email_sort_key(email, sort_code))
 
 
 def emails_fingerprint(emails, *, total_count=None, page=None):

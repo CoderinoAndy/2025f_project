@@ -1,4 +1,5 @@
-# Model layer.
+"""Tiny structured logger used across startup, sync, and AI flows."""
+
 import logging
 import os
 from datetime import datetime, timezone
@@ -12,11 +13,8 @@ MAX_FIELD_LENGTH = 1000
 _CONFIG_LOCK = Lock()
 
 
-# Normalize values so log lines stay single-line and easy to grep.
 def _clean_value(value):
-    """Clean value.
-    """
-    # Clean this up so the rest of the code sees something predictable.
+    """Keep log values single-line and bounded."""
     text = str(value if value is not None else "")
     text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
     if len(text) > MAX_FIELD_LENGTH:
@@ -25,9 +23,7 @@ def _clean_value(value):
 
 
 def _clean_key(value):
-    """Clean key.
-    """
-    # Clean this up so the rest of the code sees something predictable.
+    """Normalize metadata keys into a log-friendly token."""
     raw = _clean_value(value).lower()
     if not raw:
         return "meta"
@@ -37,9 +33,7 @@ def _clean_key(value):
 
 
 def _log_path():
-    """Log path.
-    """
-    # Log this here so it is easier to trace later.
+    """Resolve the log file path, honoring an override env var when present."""
     configured = (os.getenv("APP_DEBUG_LOG_PATH") or "").strip()
     if configured:
         return Path(configured).expanduser()
@@ -47,16 +41,12 @@ def _log_path():
 
 
 def get_debug_log_path():
-    """Get debug log path.
-    """
-    # Return this value, with a safe fallback if config is missing.
+    """Return the current debug log path as text for UI/debug output."""
     return str(_log_path())
 
 
 def configure_debug_logger():
-    """Configure debug logger.
-    """
-    # Log this here so it is easier to trace later.
+    """Create the rotating debug logger once and reuse it thereafter."""
     logger = logging.getLogger(LOGGER_NAME)
     target_path = _log_path()
 
@@ -82,9 +72,7 @@ def configure_debug_logger():
 
 
 def _logger():
-    """Logger.
-    """
-    # Log this here so it is easier to trace later.
+    """Return the configured app logger."""
     return configure_debug_logger()
 
 
@@ -98,8 +86,7 @@ def log_event(
     details="",
     **metadata,
 ):
-    """Log event.
-    """
+    """Write one structured event line to the debug log."""
     # Convert a string level into the numeric level the stdlib logger expects.
     level_name = str(level or "INFO").upper()
     level_number = getattr(logging, level_name, logging.INFO)
@@ -141,9 +128,7 @@ def log_exception(
     status="error",
     **metadata,
 ):
-    """Log exception.
-    """
-    # Log this here so it is easier to trace later.
+    """Log an exception as a structured event with shared metadata fields."""
     error_name = type(error).__name__
     fallback_details = details or str(error)
     log_event(  # Log the exception as one normalized structured event.
